@@ -37,6 +37,10 @@ struct Cli {
     /// API has no authentication yet
     #[arg(long)]
     insecure_no_auth: bool,
+    /// DEVELOPMENT ONLY: connect to IMAP servers without TLS, sending
+    /// passwords in cleartext (local test servers)
+    #[arg(long)]
+    insecure_plain_imap: bool,
     /// Maximum concurrent event streams
     #[arg(long, default_value_t = DEFAULT_MAX_SSE_CLIENTS)]
     max_sse_clients: usize,
@@ -88,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
         data_dir: cli.data_dir,
         init_key: cli.init_key,
         insecure_no_auth: cli.insecure_no_auth,
+        insecure_plain_imap: cli.insecure_plain_imap,
         max_sse_clients: cli.max_sse_clients,
     };
     tracing::info!(

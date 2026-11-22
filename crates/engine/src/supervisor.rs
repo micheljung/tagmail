@@ -76,6 +76,9 @@ pub trait ConnectorFactory: Send + Sync + 'static {
 #[derive(Debug, Clone, Default)]
 pub struct ImapConnectorFactory {
     pub capability_override: CapabilityOverride,
+    /// Connect without TLS whatever the account says; for local test
+    /// servers only.
+    pub insecure_plaintext: bool,
 }
 
 impl ConnectorFactory for ImapConnectorFactory {
@@ -85,7 +88,11 @@ impl ConnectorFactory for ImapConnectorFactory {
         let mut config = ServerConfig::new(
             a.host.clone(),
             a.port,
-            a.security,
+            if self.insecure_plaintext {
+                Security::Plain
+            } else {
+                a.security
+            },
             a.username.clone(),
             a.password.clone(),
         );

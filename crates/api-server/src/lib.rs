@@ -39,6 +39,8 @@ pub struct Config {
     pub init_key: bool,
     /// Allow a non-loopback listen address although M1 has no login.
     pub insecure_no_auth: bool,
+    /// Connect to IMAP servers without TLS (local test servers only).
+    pub insecure_plain_imap: bool,
     pub max_sse_clients: usize,
 }
 
@@ -124,11 +126,16 @@ impl Server {
                     blobs: Arc::new(blobs),
                     feed: feed.clone(),
                 };
-                let engine = Arc::new(Engine::new(
-                    stores,
-                    ImapConnectorFactory::default(),
-                    engine_config,
-                ));
+                if config.insecure_plain_imap {
+                    tracing::warn!(
+                        "connecting to IMAP servers WITHOUT TLS (--insecure-plain-imap); development only"
+                    );
+                }
+                let factory = ImapConnectorFactory {
+                    insecure_plaintext: config.insecure_plain_imap,
+                    ..ImapConnectorFactory::default()
+                };
+                let engine = Arc::new(Engine::new(stores, factory, engine_config));
                 let started = engine.start_all().await?;
                 tracing::info!(accounts = started, "sync engine started");
                 (

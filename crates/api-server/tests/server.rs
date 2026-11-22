@@ -31,6 +31,7 @@ impl Dirs {
             master_key: key.to_owned(),
             init_key: true,
             insecure_no_auth: false,
+            insecure_plain_imap: false,
             max_sse_clients: 2,
         }
     }
