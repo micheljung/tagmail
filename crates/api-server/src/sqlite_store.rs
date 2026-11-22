@@ -8,10 +8,10 @@ use tagmail_api_core::{
     AccountSummary, ChangePage, NewAccount, Store, StoreResult, ThreadRows, View, ViewIndex,
 };
 use tagmail_core::{AccountId, ChangeCursor, ThreadId};
-use tagmail_store::rusqlite::{self, Connection, OptionalExtension, params, params_from_iter};
-use tagmail_store::{CacheDb, Change, ChangeOp, Changes, ConfigDb, Entity, changes};
-
-use crate::credentials::{DATA_KEY_META, KeyError, MasterKey, Sealed, Vault};
+use tagmail_store::rusqlite::{self, Connection, params, params_from_iter};
+use tagmail_store::{
+    CacheDb, Change, ChangeOp, Changes, ConfigDb, Entity, MasterKey, Sealed, Vault, changes,
+};
 
 /// Senders listed per thread row.
 pub const MAX_SENDERS: usize = 4;
@@ -22,14 +22,6 @@ pub struct SqliteStore {
     vault: Arc<Vault>,
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum OpenError {
-    #[error(transparent)]
-    Store(#[from] tagmail_store::Error),
-    #[error(transparent)]
-    Key(#[from] KeyError),
-}
-
 impl SqliteStore {
     /// Unlocks the credential data key in `config`, creating it on first
     /// start.
@@ -37,38 +29,8 @@ impl SqliteStore {
         config: ConfigDb,
         cache: CacheDb,
         master: &MasterKey,
-    ) -> Result<SqliteStore, OpenError> {
-        let wrapped: Option<String> = config
-            .read(|conn| {
-                Ok(conn
-                    .query_row(
-                        "SELECT value FROM meta WHERE key = ?1",
-                        [DATA_KEY_META],
-                        |r| r.get(0),
-                    )
-                    .optional()?)
-            })
-            .await?;
-        let vault = match wrapped {
-            Some(hex_value) => {
-                let bytes = hex::decode(hex_value).map_err(|_| KeyError::CorruptDataKey)?;
-                Vault::unwrap(master, &bytes)?
-            }
-            None => {
-                let (vault, wrapped) = Vault::create(master)?;
-                let value = hex::encode(wrapped);
-                config
-                    .write(move |tx| {
-                        tx.execute(
-                            "INSERT INTO meta (key, value) VALUES (?1, ?2)",
-                            params![DATA_KEY_META, value],
-                        )?;
-                        Ok(())
-                    })
-                    .await?;
-                vault
-            }
-        };
+    ) -> tagmail_store::Result<SqliteStore> {
+        let vault = Vault::unlock(&config, master).await?;
         Ok(SqliteStore {
             config,
             cache,
@@ -101,7 +63,8 @@ impl SqliteStore {
                 )?)
             })
             .await?;
-        Ok(self.vault.open(id, &sealed)?)
+        let plain = self.vault.open(id, &sealed)?;
+        Ok(tagmail_api_core::Secret::new(plain.as_str().to_owned()))
     }
 
     pub async fn close(self) -> tagmail_store::Result<()> {
@@ -370,9 +333,7 @@ impl Store for SqliteStore {
                     tx.query_row("SELECT coalesce(max(id), 0) + 1 FROM account", [], |r| {
                         r.get(0)
                     })?;
-                let sealed = vault
-                    .seal(AccountId(id), &account.password)
-                    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+                let sealed = vault.seal(AccountId(id), account.password.expose())?;
                 tx.execute(
                     "INSERT INTO account (id, name, imap_host, imap_port, imap_tls, smtp_host, \
                      smtp_port, smtp_tls, username, secret_ct, secret_nonce, max_connections) \

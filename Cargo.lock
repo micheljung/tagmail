@@ -1538,7 +1538,6 @@ dependencies = [
  "anyhow",
  "axum",
  "base64",
- "chacha20poly1305",
  "clap",
  "form_urlencoded",
  "futures-util",
@@ -1596,6 +1595,7 @@ version = "0.0.0"
 name = "tagmail-store"
 version = "0.0.0"
 dependencies = [
+ "chacha20poly1305",
  "hex",
  "rusqlite",
  "sha2",
@@ -1604,6 +1604,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "zeroize",
  "zstd",
 ]
 

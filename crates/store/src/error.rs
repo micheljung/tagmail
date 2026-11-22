@@ -10,6 +10,8 @@ pub enum Error {
     Io(#[from] io::Error),
     #[error(transparent)]
     Core(#[from] tagmail_core::Error),
+    #[error(transparent)]
+    Credential(#[from] crate::credentials::CredentialError),
     #[error("database connection is closed")]
     Closed,
     #[error("a reader panicked")]

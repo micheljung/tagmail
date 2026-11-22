@@ -17,7 +17,9 @@ use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinHandle;
 
-use crate::credentials::{KeyWarning, MasterKey};
+use tagmail_store::MasterKey;
+
+use crate::credentials::{KeyWarning, load_master_key};
 use crate::sqlite_store::SqliteStore;
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7878";
@@ -72,7 +74,7 @@ impl Server {
         std::fs::create_dir_all(&config.data_dir)
             .with_context(|| format!("creating data directory {}", config.data_dir.display()))?;
         let (master, warnings) =
-            MasterKey::load(&config.master_key, &config.data_dir, config.init_key)?;
+            load_master_key(&config.master_key, &config.data_dir, config.init_key)?;
         for warning in &warnings {
             match warning {
                 KeyWarning::InsideDataDir { .. } => tracing::warn!("!!! {warning} !!!"),
