@@ -13,3 +13,27 @@ path = "src/main.rs"
 
 [lints]
 workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+base64.workspace = true
+chacha20poly1305.workspace = true
+clap.workspace = true
+form_urlencoded.workspace = true
+futures-util.workspace = true
+hex.workspace = true
+percent-encoding.workspace = true
+serde_json.workspace = true
+tagmail-api-core.workspace = true
+tagmail-core.workspace = true
+tagmail-store.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zeroize.workspace = true
+
+[dev-dependencies]
+reqwest.workspace = true
+tempfile.workspace = true
