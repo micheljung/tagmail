@@ -60,9 +60,6 @@ async fn api(
     uri: Uri,
     body: Bytes,
 ) -> HttpResponse {
-    let Ok(path) = percent_encoding::percent_decode_str(uri.path()).decode_utf8() else {
-        return to_http(Response::error(400, "bad_request", "path is not UTF-8"));
-    };
     let method = match method {
         HttpMethod::GET => Method::Get,
         HttpMethod::POST => Method::Post,
@@ -72,7 +69,7 @@ async fn api(
         .api
         .handle(Request {
             method,
-            path: &path,
+            path: uri.path(),
             query: uri.query().unwrap_or(""),
             body: &body,
         })

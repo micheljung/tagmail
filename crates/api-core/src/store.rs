@@ -6,33 +6,45 @@ use std::fmt;
 use std::future::Future;
 use std::str::FromStr;
 
-use tagmail_core::{AccountId, ChangeCursor, MailboxRowId, ThreadId};
+use tagmail_core::query::{self, Query, QueryError};
+use tagmail_core::{AccountId, ChangeCursor, LabelKey, MailboxRowId, ThreadId};
 use zeroize::Zeroizing;
 
-use crate::dto::{ChangeDto, ThreadRowDto, TlsMode};
+use crate::dto::{ChangeDto, LabelDto, MailboxDto, ThreadRowDto, TlsMode};
 
 pub type StoreError = Box<dyn std::error::Error + Send + Sync>;
 pub type StoreResult<T> = Result<T, StoreError>;
 
-/// A thread list. Path form: `inbox` (every account's INBOX) or
-/// `mailbox:<id>`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A thread list. Path form: `inbox` (every account's INBOX),
+/// `mailbox:<id>`, `label:<label key>` or `search:<query>`; label and search
+/// views exclude Trash and Junk unless the query names a location.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum View {
     Inbox,
     Mailbox(MailboxRowId),
+    Label(LabelKey),
+    Search(Query),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewError {
+    Unknown,
+    Query(QueryError),
 }
 
 impl FromStr for View {
-    type Err = ();
+    type Err = ViewError;
 
-    fn from_str(s: &str) -> Result<View, ()> {
+    fn from_str(s: &str) -> Result<View, ViewError> {
         match s.split_once(':') {
             None if s == "inbox" => Ok(View::Inbox),
             Some(("mailbox", id)) if id.bytes().all(|b| b.is_ascii_digit()) => id
                 .parse()
                 .map(|id| View::Mailbox(MailboxRowId(id)))
-                .map_err(|_| ()),
-            _ => Err(()),
+                .map_err(|_| ViewError::Unknown),
+            Some(("label", key)) if !key.trim().is_empty() => Ok(View::Label(LabelKey::of(key))),
+            Some(("search", q)) => query::parse(q).map(View::Search).map_err(ViewError::Query),
+            _ => Err(ViewError::Unknown),
         }
     }
 }
@@ -120,6 +132,12 @@ pub trait Store: Send + Sync + 'static {
     /// read in one snapshot.
     fn view_index(&self, view: View) -> impl Future<Output = StoreResult<ViewIndex>> + Send;
 
+    /// Mailboxes of every account.
+    fn mailboxes(&self) -> impl Future<Output = StoreResult<Vec<MailboxDto>>> + Send;
+
+    /// Labels of every account, one per key.
+    fn labels(&self) -> impl Future<Output = StoreResult<Vec<LabelDto>>> + Send;
+
     /// Rows for those of `ids` that exist and are not merged, in `ids`
     /// order, read in one snapshot with their cursor.
     fn threads(&self, ids: Vec<ThreadId>) -> impl Future<Output = StoreResult<ThreadRows>> + Send;
@@ -168,15 +186,25 @@ mod tests {
     fn view_parses_path_forms() {
         assert_eq!("inbox".parse(), Ok(View::Inbox));
         assert_eq!("mailbox:42".parse(), Ok(View::Mailbox(MailboxRowId(42))));
+        assert_eq!("label:Work".parse(), Ok(View::Label(LabelKey::of("work"))));
+        assert_eq!(
+            "search:a/b:c".parse(),
+            Ok(View::Search(query::parse("a/b:c").unwrap()))
+        );
+        assert_eq!(
+            "search:(".parse::<View>(),
+            Err(ViewError::Query(QueryError::Unbalanced(0)))
+        );
         for bad in [
             "",
             "Inbox",
             "mailbox:",
             "mailbox:-1",
             "mailbox:+1",
-            "label:x",
+            "label:",
+            "x:y",
         ] {
-            assert_eq!(bad.parse::<View>(), Err(()), "{bad}");
+            assert_eq!(bad.parse::<View>(), Err(ViewError::Unknown), "{bad}");
         }
     }
 

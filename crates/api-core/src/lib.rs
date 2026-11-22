@@ -13,5 +13,5 @@ pub use api::{API_VERSION, Api, Method, Request, Response};
 pub use events::{ChangeFeed, Event, EventSession, EventSource, OpenError};
 pub use store::{
     AccountRegistry, AccountSummary, ChangePage, NewAccount, RuntimeStatus, Secret, Store,
-    StoreError, StoreResult, ThreadRows, View, ViewIndex,
+    StoreError, StoreResult, ThreadRows, View, ViewError, ViewIndex,
 };

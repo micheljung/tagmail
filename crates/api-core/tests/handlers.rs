@@ -2,14 +2,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tagmail_api_core::dto::{ChangeDto, ChangeOpDto, EntityDto, ThreadRowDto};
+use tagmail_api_core::dto::{
+    ChangeDto, ChangeOpDto, EntityDto, LabelDto, MailboxDto, SpecialUseDto, ThreadRowDto,
+};
 use tagmail_api_core::id_index;
 use tagmail_api_core::{
     AccountRegistry, AccountSummary, Api, ChangeFeed, ChangePage, Event, EventSession, Method,
     NewAccount, OpenError, Request, Response, RuntimeStatus, Store, StoreResult, ThreadRows, View,
     ViewIndex,
 };
-use tagmail_core::{AccountId, CacheEpoch, ChangeCursor, MailboxRowId, ThreadId};
+use tagmail_core::query::parse;
+use tagmail_core::{AccountId, CacheEpoch, ChangeCursor, LabelKey, MailboxRowId, ThreadId};
 
 const EPOCH: CacheEpoch = CacheEpoch(0xabc);
 
@@ -22,6 +25,8 @@ struct MemStore {
     log: Mutex<Vec<ChangeDto>>,
     min_seq: i64,
     accounts: Mutex<Vec<(AccountSummary, NewAccount)>>,
+    /// Label and search views answer with `inbox` and are recorded here.
+    queried: Mutex<Vec<View>>,
 }
 
 impl MemStore {
@@ -55,6 +60,10 @@ impl Store for MemStore {
     async fn view_index(&self, view: View) -> StoreResult<ViewIndex> {
         let ids = match view {
             View::Inbox => self.inbox.clone(),
+            View::Label(_) | View::Search(_) => {
+                self.queried.lock().unwrap().push(view);
+                self.inbox.clone()
+            }
             View::Mailbox(MailboxRowId(m)) => self
                 .mailbox
                 .iter()
@@ -66,6 +75,24 @@ impl Store for MemStore {
             cursor: self.cursor(),
             ids: ids.into_iter().map(ThreadId).collect(),
         })
+    }
+
+    async fn mailboxes(&self) -> StoreResult<Vec<MailboxDto>> {
+        Ok(vec![MailboxDto {
+            id: 1,
+            account_id: 1,
+            name: "Entwürfe".to_owned(),
+            delimiter: Some("/".to_owned()),
+            special_use: Some(SpecialUseDto::Drafts),
+        }])
+    }
+
+    async fn labels(&self) -> StoreResult<Vec<LabelDto>> {
+        Ok(vec![LabelDto {
+            key: "work".to_owned(),
+            name: "Work".to_owned(),
+            color: None,
+        }])
     }
 
     async fn threads(&self, ids: Vec<ThreadId>) -> StoreResult<ThreadRows> {
@@ -241,6 +268,55 @@ async fn view_index_is_binary_with_cursor() {
 
     let resp = get(&api, "/api/views/mailbox:3/index").await;
     assert_eq!(id_index::decode(&resp.body).unwrap(), [2, 1]);
+}
+
+#[tokio::test]
+async fn label_and_search_views_decode_segments_after_splitting() {
+    let store = MemStore {
+        inbox: vec![7],
+        ..MemStore::default()
+    };
+    let (api, _) = api(store);
+    let resp = get(&api, "/api/views/label%3AWork/index").await;
+    assert_eq!(resp.status, 200);
+    let resp = get(
+        &api,
+        "/api/views/search%3Aafter%3A2026%2F01%2F01%20%22100%25%20off%22/index",
+    )
+    .await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(id_index::decode(&resp.body).unwrap(), [7]);
+    assert_eq!(
+        *api.store().queried.lock().unwrap(),
+        [
+            View::Label(LabelKey::of("work")),
+            View::Search(parse("after:2026/01/01 \"100% off\"").unwrap()),
+        ]
+    );
+
+    let resp = get(&api, "/api/views/search%3A%28a/index").await;
+    assert_eq!(resp.status, 400);
+    assert_eq!(json_body(&resp)["error"], "invalid_query");
+    assert_eq!(get(&api, "/api/views/search:a/b/index").await.status, 404);
+    assert_eq!(get(&api, "/api/views/%FF/index").await.status, 400);
+}
+
+#[tokio::test]
+async fn mailboxes_and_labels() {
+    let (api, _) = api(MemStore::default());
+    let resp = get(&api, "/api/mailboxes").await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(
+        json_body(&resp),
+        json!([{ "id": 1, "accountId": 1, "name": "Entwürfe", "delimiter": "/",
+                 "specialUse": "drafts" }])
+    );
+    let resp = get(&api, "/api/labels").await;
+    assert_eq!(
+        json_body(&resp),
+        json!([{ "key": "work", "name": "Work", "color": null }])
+    );
+    assert_eq!(post(&api, "/api/labels", &json!({})).await.status, 405);
 }
 
 #[tokio::test]

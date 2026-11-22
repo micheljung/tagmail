@@ -344,6 +344,105 @@ async fn reads_the_inbox_index_and_rows_from_cache_db() {
     server.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn search_label_views_mailboxes_and_labels() {
+    let dirs = Dirs::new();
+    let server = Server::start(&dirs.config(&dirs.key()), None)
+        .await
+        .unwrap();
+    server
+        .store()
+        .cache()
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO mailbox (id, account_id, name, delimiter, special_use, uidvalidity) VALUES
+                     (1, 1, 'INBOX', '/', NULL, 1), (2, 1, 'Trash', '/', '\\Trash', 1),
+                     (3, 1, 'Entw&APw-rfe', '/', '\\Drafts', 1);
+                 INSERT INTO thread (id, account_id, last_date) VALUES (10, 1, 100), (11, 1, 300), (12, 1, 200);
+                 INSERT INTO message (id, account_id, email_id, thread_id, date, subject) VALUES
+                     (1, 1, 'a', 10, 1767225600, 'Invoice 2026/01'), (2, 1, 'b', 11, 1767225600, 'Invoice'),
+                     (3, 1, 'c', 12, 1700000000, 'Invoice');
+                 INSERT INTO location (mailbox_id, uid, message_id, flags) VALUES (1, 1, 1, 0), (2, 1, 2, 0), (1, 2, 3, 1);
+                 INSERT INTO label (id, account_id, keyword, label_key, kind) VALUES (1, 1, 'Work', 'work', 'keyword');
+                 INSERT INTO message_label (message_id, label_id) VALUES (1, 1), (2, 1), (3, 1);",
+            )?;
+            for (id, subject) in [(1, "Invoice 2026/01"), (2, "Invoice"), (3, "Invoice")] {
+                tagmail_store::fts::index(
+                    tx,
+                    tagmail_core::MessageRowId(id),
+                    &tagmail_store::FtsDocument {
+                        subject,
+                        ..Default::default()
+                    },
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    server
+        .store()
+        .config()
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO account (id, name, imap_host, imap_port, imap_tls, smtp_host, smtp_port,
+                     smtp_tls, username, secret_ct, secret_nonce) VALUES
+                     (1, 'a', 'h', 993, 'tls', 'h', 465, 'tls', 'u', x'00', x'00');
+                 INSERT INTO label_registry (account_id, label_key, display_name, color) VALUES
+                     (1, 'travel', 'Travel', '#0a0');",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let index = |view: &'static str| {
+        let u = url(&server, &format!("/api/views/{view}/index"));
+        async move {
+            let resp = reqwest::get(u).await.unwrap();
+            let status = resp.status().as_u16();
+            let body = resp.bytes().await.unwrap();
+            (status, id_index::decode(&body).unwrap_or_default())
+        }
+    };
+    assert_eq!(index("search%3Ainvoice").await, (200, vec![12, 10]));
+    assert_eq!(
+        index("search%3Ainvoice%20in%3Aanywhere").await,
+        (200, vec![11, 12, 10])
+    );
+    assert_eq!(
+        index("search%3Ainvoice%20after%3A2026%2F01%2F01").await,
+        (200, vec![10])
+    );
+    assert_eq!(index("search%3A%222026%2F01%22").await, (200, vec![10]));
+    assert_eq!(index("search%3Ais%3Aread").await, (200, vec![12]));
+    assert_eq!(index("label%3AWORK").await, (200, vec![12, 10]));
+    assert_eq!(index("search%3A%28").await.0, 400);
+
+    let mailboxes: Value = reqwest::get(url(&server, "/api/mailboxes"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(mailboxes[2]["name"], "Entwürfe");
+    assert_eq!(mailboxes[2]["specialUse"], "drafts");
+    assert_eq!(mailboxes[0]["specialUse"], Value::Null);
+    let labels: Value = reqwest::get(url(&server, "/api/labels"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        labels,
+        json!([
+            { "key": "travel", "name": "Travel", "color": "#0a0" },
+            { "key": "work", "name": "Work", "color": null },
+        ])
+    );
+    server.shutdown().await.unwrap();
+}
+
 fn new_account() -> Value {
     json!({
         "name": "Work",

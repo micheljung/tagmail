@@ -218,3 +218,41 @@ pub struct ApiErrorDto {
     #[ts(optional)]
     pub field: Option<String>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SpecialUseDto {
+    All,
+    Archive,
+    Drafts,
+    Flagged,
+    Important,
+    Junk,
+    Sent,
+    Trash,
+}
+
+/// `GET /api/mailboxes`, one entry per mailbox of every account. The view
+/// of a mailbox is `mailbox:<id>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct MailboxDto {
+    pub id: i64,
+    pub account_id: i64,
+    /// Display name: decoded from modified UTF-7, hierarchy separated by
+    /// `delimiter`.
+    pub name: String,
+    pub delimiter: Option<String>,
+    pub special_use: Option<SpecialUseDto>,
+}
+
+/// `GET /api/labels`, one entry per label key across accounts. The view of
+/// a label is `label:<key>`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelDto {
+    /// Casefolded identity.
+    pub key: String,
+    pub name: String,
+    pub color: Option<String>,
+}

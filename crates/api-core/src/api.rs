@@ -15,6 +15,7 @@ use crate::dto::{
 use crate::id_index;
 use crate::store::{
     AccountRegistry, AccountSummary, ChangePage, NewAccount, Secret, Store, StoreError, View,
+    ViewError,
 };
 
 pub const API_VERSION: ApiVersion = ApiVersion { major: 1, minor: 0 };
@@ -53,7 +54,9 @@ pub enum Method {
 #[derive(Debug, Clone, Copy)]
 pub struct Request<'a> {
     pub method: Method,
-    /// Decoded path, e.g. `/api/views/inbox/index`.
+    /// Path as received, still percent-encoded, e.g.
+    /// `/api/views/search%3Aafter%3A2026%2F01%2F01/index`. Segments are
+    /// decoded after splitting, so a view id may contain `/`.
     pub path: &'a str,
     /// Raw query string without `?`.
     pub query: &'a str,
@@ -165,15 +168,30 @@ impl<S: Store> Api<S> {
         let Some(rest) = req.path.strip_prefix("/api/") else {
             return Response::error(404, "not_found", "no such route");
         };
-        let segments: Vec<&str> = rest.split('/').collect();
+        let segments = rest
+            .split('/')
+            .map(|s| percent_encoding::percent_decode_str(s).decode_utf8())
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(segments) = segments else {
+            return Response::error(400, "bad_request", "path is not UTF-8");
+        };
+        let segments: Vec<&str> = segments.iter().map(|s| s.as_ref()).collect();
         let route = match (req.method, segments.as_slice()) {
             (Method::Get, ["version"]) => Ok(self.version()),
             (Method::Get, ["status"]) => self.status().await,
             (Method::Get, ["views", view, "index"]) => self.view_index(view).await,
             (Method::Get, ["threads"]) => self.threads(req.query).await,
             (Method::Get, ["changes"]) => self.changes(req.query).await,
+            (Method::Get, ["mailboxes"]) => self.mailboxes().await,
+            (Method::Get, ["labels"]) => self.labels().await,
             (Method::Post, ["accounts"]) => self.create_account(req.body).await,
-            (_, ["version" | "status" | "threads" | "changes" | "accounts"])
+            (
+                _,
+                [
+                    "version" | "status" | "threads" | "changes" | "accounts" | "mailboxes"
+                    | "labels",
+                ],
+            )
             | (_, ["views", _, "index"]) => Ok(Response::error(
                 405,
                 "method_not_allowed",
@@ -223,8 +241,14 @@ impl<S: Store> Api<S> {
     }
 
     async fn view_index(&self, view: &str) -> Result<Response, StoreError> {
-        let Ok(view) = view.parse::<View>() else {
-            return Ok(Response::error(404, "not_found", "no such view"));
+        let view = match view.parse::<View>() {
+            Ok(view) => view,
+            Err(ViewError::Unknown) => {
+                return Ok(Response::error(404, "not_found", "no such view"));
+            }
+            Err(ViewError::Query(e)) => {
+                return Ok(Response::error(400, "invalid_query", e.to_string()));
+            }
         };
         let index = self.store.view_index(view).await?;
         let ids: Vec<i64> = index.ids.iter().map(|id| id.0).collect();
@@ -232,6 +256,14 @@ impl<S: Store> Api<S> {
         let mut resp = Response::new(200, OCTET_STREAM, body);
         resp.headers.push((CURSOR_HEADER, index.cursor.to_string()));
         Ok(resp)
+    }
+
+    async fn mailboxes(&self) -> Result<Response, StoreError> {
+        Ok(Response::json(200, &self.store.mailboxes().await?))
+    }
+
+    async fn labels(&self) -> Result<Response, StoreError> {
+        Ok(Response::json(200, &self.store.labels().await?))
     }
 
     async fn threads(&self, query: &str) -> Result<Response, StoreError> {

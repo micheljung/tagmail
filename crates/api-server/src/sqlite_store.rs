@@ -1,16 +1,23 @@
 //! [`Store`] over the server's `config.db` and `cache.db`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use tagmail_api_core::dto::{AddressDto, ChangeDto, ChangeOpDto, EntityDto, ThreadRowDto};
+use tagmail_api_core::dto::{
+    AddressDto, ChangeDto, ChangeOpDto, EntityDto, LabelDto, MailboxDto, SpecialUseDto,
+    ThreadRowDto,
+};
 use tagmail_api_core::{
     AccountSummary, ChangePage, NewAccount, Store, StoreResult, ThreadRows, View, ViewIndex,
 };
-use tagmail_core::{AccountId, ChangeCursor, ThreadId};
+use tagmail_core::query::{Query, Term};
+use tagmail_core::{
+    AccountId, ChangeCursor, KeywordClass, SpecialUse, ThreadId, classify_keyword,
+    decode_mailbox_name,
+};
 use tagmail_store::rusqlite::{self, Connection, params, params_from_iter};
 use tagmail_store::{
-    CacheDb, Change, ChangeOp, Changes, ConfigDb, Entity, MasterKey, Sealed, Vault, changes,
+    CacheDb, Change, ChangeOp, Changes, ConfigDb, Entity, MasterKey, Sealed, Vault, changes, search,
 };
 
 /// Senders listed per thread row.
@@ -118,6 +125,19 @@ fn change_dto(c: Change) -> tagmail_store::Result<ChangeDto> {
         },
         payload,
     })
+}
+
+fn special_use_dto(u: SpecialUse) -> SpecialUseDto {
+    match u {
+        SpecialUse::All => SpecialUseDto::All,
+        SpecialUse::Archive => SpecialUseDto::Archive,
+        SpecialUse::Drafts => SpecialUseDto::Drafts,
+        SpecialUse::Flagged => SpecialUseDto::Flagged,
+        SpecialUse::Important => SpecialUseDto::Important,
+        SpecialUse::Junk => SpecialUseDto::Junk,
+        SpecialUse::Sent => SpecialUseDto::Sent,
+        SpecialUse::Trash => SpecialUseDto::Trash,
+    }
 }
 
 fn placeholders(n: usize) -> String {
@@ -243,6 +263,13 @@ impl Store for SqliteStore {
                             stmt.query_map([], |r| r.get(0).map(ThreadId))?
                                 .collect::<rusqlite::Result<Vec<_>>>()?
                         }
+                        View::Label(key) => {
+                            let label = Query::Term(Term::Label(key.as_str().to_owned()));
+                            search::search_threads(conn, &label, search::MAX_HITS)?.threads
+                        }
+                        View::Search(query) => {
+                            search::search_threads(conn, &query, search::MAX_HITS)?.threads
+                        }
                         View::Mailbox(mailbox) => {
                             let mut stmt = conn.prepare_cached(
                                 "SELECT thread_id FROM thread_mailbox WHERE mailbox_id = ?1 \
@@ -256,6 +283,94 @@ impl Store for SqliteStore {
                 })
             })
             .await?)
+    }
+
+    async fn mailboxes(&self) -> StoreResult<Vec<MailboxDto>> {
+        Ok(self
+            .cache
+            .read(|conn| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT id, account_id, name, delimiter, special_use FROM mailbox \
+                     ORDER BY account_id, id",
+                )?;
+                let rows = stmt.query_map([], |r| {
+                    Ok(MailboxDto {
+                        id: r.get(0)?,
+                        account_id: r.get(1)?,
+                        name: decode_mailbox_name(&r.get::<_, String>(2)?),
+                        delimiter: r.get(3)?,
+                        special_use: r
+                            .get::<_, Option<String>>(4)?
+                            .and_then(|s| s.parse().ok())
+                            .map(special_use_dto),
+                    })
+                })?;
+                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            })
+            .await?)
+    }
+
+    async fn labels(&self) -> StoreResult<Vec<LabelDto>> {
+        let derived = self
+            .cache
+            .read(|conn| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT l.label_key, l.keyword, m.name FROM label l \
+                     LEFT JOIN mailbox m ON m.id = l.mailbox_id",
+                )?;
+                let rows = stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                })?;
+                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            })
+            .await?;
+        let registry = self
+            .config
+            .read(|conn| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT label_key, display_name, color FROM label_registry \
+                     ORDER BY account_id",
+                )?;
+                let rows = stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                })?;
+                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            })
+            .await?;
+        let mut labels: BTreeMap<String, LabelDto> = BTreeMap::new();
+        for (key, keyword, mailbox) in derived {
+            let name = match (keyword, mailbox) {
+                (Some(keyword), _) => match tagmail_core::Keyword::new(keyword.clone()) {
+                    Ok(kw) => match classify_keyword(&kw) {
+                        KeywordClass::Label { name, .. } => name,
+                        KeywordClass::Hidden => continue,
+                    },
+                    Err(_) => keyword,
+                },
+                (None, Some(mailbox)) => decode_mailbox_name(&mailbox),
+                (None, None) => key.clone(),
+            };
+            labels.entry(key.clone()).or_insert(LabelDto {
+                key,
+                name,
+                color: None,
+            });
+        }
+        let mut registered = HashSet::new();
+        for (key, name, color) in registry {
+            if registered.insert(key.clone()) {
+                labels.insert(key.clone(), LabelDto { key, name, color });
+            }
+        }
+        Ok(labels.into_values().collect())
     }
 
     async fn threads(&self, ids: Vec<ThreadId>) -> StoreResult<ThreadRows> {

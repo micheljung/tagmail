@@ -22,7 +22,6 @@ clap.workspace = true
 form_urlencoded.workspace = true
 futures-util.workspace = true
 hex.workspace = true
-percent-encoding.workspace = true
 serde_json.workspace = true
 tagmail-api-core.workspace = true
 tagmail-core.workspace = true

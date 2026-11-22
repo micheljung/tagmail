@@ -36,7 +36,10 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<ChangeOpDto>(&cfg, &mut files)?;
     file::<ChangesDto>(&cfg, &mut files)?;
     file::<EntityDto>(&cfg, &mut files)?;
+    file::<LabelDto>(&cfg, &mut files)?;
+    file::<MailboxDto>(&cfg, &mut files)?;
     file::<NewAccountDto>(&cfg, &mut files)?;
+    file::<SpecialUseDto>(&cfg, &mut files)?;
     file::<StatusDto>(&cfg, &mut files)?;
     file::<SyncPhase>(&cfg, &mut files)?;
     file::<ThreadRowDto>(&cfg, &mut files)?;
