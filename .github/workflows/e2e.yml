@@ -52,3 +52,19 @@ jobs:
       - name: Server logs
         if: failure()
         run: docker compose -f test/compose.yml logs
+
+  imap-dovecot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100"
+      - uses: Swatinem/rust-cache@v2
+      - name: Start Dovecot
+        run: cargo xtask dovecot up
+      - name: IMAP integration tests
+        run: cargo test -p tagmail-imap --features dovecot-tests --test dovecot
+      - name: Server logs
+        if: failure()
+        run: docker compose -f test/compose.yml logs dovecot
