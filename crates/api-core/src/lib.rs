@@ -1,0 +1,1 @@
+//! Tagmail `api-core` crate.

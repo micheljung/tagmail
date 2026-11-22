@@ -1,0 +1,1 @@
+//! Tagmail `core` crate.

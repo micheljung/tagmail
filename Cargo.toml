@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.100"
+license = "AGPL-3.0-only"
+repository = "https://github.com/micheljung/tagmail"
+publish = false
+
+[workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -1,0 +1,1 @@
+//! Tagmail `imap` crate.
