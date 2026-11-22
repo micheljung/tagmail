@@ -31,7 +31,7 @@ use tagmail_api_core::auth_dto::{
 };
 use tagmail_store::ConfigDb;
 use tagmail_store::rusqlite::{OptionalExtension, params};
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 use url::Url;
 use zeroize::Zeroizing;
 
@@ -45,6 +45,7 @@ pub const SESSION_COOKIE: &str = "tagmail_session";
 pub const CSRF_HEADER_VALUE: &str = "tagmail";
 pub const DEFAULT_SESSION_IDLE: Duration = Duration::from_secs(30 * 24 * 3600);
 pub const DEFAULT_SESSION_LIFETIME: Duration = Duration::from_secs(90 * 24 * 3600);
+pub const DEFAULT_STREAM_RECHECK: Duration = Duration::from_secs(60);
 pub const MIN_PASSWORD_CHARS: usize = 8;
 pub const MAX_PASSWORD_BYTES: usize = 1024;
 /// argon2id, m = 19 MiB, t = 2, p = 1 (OWASP minimum).
@@ -65,6 +66,9 @@ pub struct AuthConfig {
     pub insecure_http: bool,
     pub session_idle: Duration,
     pub session_lifetime: Duration,
+    /// How often open event streams recheck their session or device, besides
+    /// immediately on logout and revocation and at session expiry.
+    pub stream_recheck: Duration,
 }
 
 impl Default for AuthConfig {
@@ -75,6 +79,7 @@ impl Default for AuthConfig {
             insecure_http: false,
             session_idle: DEFAULT_SESSION_IDLE,
             session_lifetime: DEFAULT_SESSION_LIFETIME,
+            stream_recheck: DEFAULT_STREAM_RECHECK,
         }
     }
 }
@@ -158,6 +163,8 @@ pub struct Auth {
     setup_token: Mutex<Option<Zeroizing<String>>>,
     hasher: Arc<Semaphore>,
     limiter: RateLimiter,
+    revocations: watch::Sender<u64>,
+    stream_recheck: Duration,
     pub(crate) passkeys: Option<Passkeys>,
 }
 
@@ -208,6 +215,8 @@ impl Auth {
             setup_token: Mutex::new(setup_token),
             hasher: Arc::new(Semaphore::new(1)),
             limiter: RateLimiter::new(ratelimit::PER_IP, ratelimit::GLOBAL),
+            revocations: watch::Sender::new(0),
+            stream_recheck: config.stream_recheck,
         })
     }
 
@@ -230,6 +239,48 @@ impl Auth {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
             .map(|t| t.as_str().to_owned())
+    }
+
+    /// Tells open event streams to recheck their credentials.
+    fn revoked(&self) {
+        self.revocations.send_modify(|n| *n = n.wrapping_add(1));
+    }
+
+    pub(crate) fn revocations(&self) -> watch::Receiver<u64> {
+        self.revocations.subscribe()
+    }
+
+    /// When an event stream of `principal` must recheck it next, or `None`
+    /// if the session ended or the device was revoked.
+    pub(crate) async fn stream_recheck_at(
+        &self,
+        principal: &Principal,
+    ) -> Option<tokio::time::Instant> {
+        let mut wait = self.stream_recheck;
+        match principal {
+            Principal::Session(hash, _) => {
+                match session::live_until(&self.db, self.lifetimes, *hash).await {
+                    Ok(Some(until)) => {
+                        let left = u64::try_from(until - session::now()).unwrap_or(0);
+                        wait = wait.min(Duration::from_secs(left));
+                    }
+                    Ok(None) => return None,
+                    Err(e) => {
+                        tracing::error!(error = %e, "rechecking an event stream's session");
+                        return None;
+                    }
+                }
+            }
+            Principal::Device(id) => match session::device_active(&self.db, *id).await {
+                Ok(true) => {}
+                Ok(false) => return None,
+                Err(e) => {
+                    tracing::error!(error = %e, "rechecking an event stream's device");
+                    return None;
+                }
+            },
+        }
+        Some(tokio::time::Instant::now() + wait)
     }
 
     pub(crate) fn unauthorized(&self) -> HttpResponse {
@@ -621,6 +672,7 @@ pub async fn logout(
     if let Err(e) = done {
         return internal(e);
     }
+    auth.revoked();
     let mut resp = no_content();
     if matches!(*principal, Principal::Session(..)) {
         auth.clear_cookie(&mut resp);
@@ -656,6 +708,7 @@ pub async fn revoke_session(
     };
     match session::delete_session(&auth.db, hash).await {
         Ok(true) => {
+            auth.revoked();
             let mut resp = no_content();
             if matches!(&*principal, Principal::Session(current, _) if *current == hash) {
                 auth.clear_cookie(&mut resp);
@@ -682,6 +735,7 @@ pub async fn revoke_device(State(state): State<AppState>, Path(id): Path<String>
     };
     match session::revoke_device(&state.auth.db, id).await {
         Ok(true) => {
+            state.auth.revoked();
             tracing::info!(device = id, "device revoked");
             no_content()
         }

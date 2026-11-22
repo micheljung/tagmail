@@ -3,6 +3,7 @@
 //! software authenticator) and the SPA.
 
 use std::path::Path;
+use std::time::Duration;
 
 use passkey::authenticator::{Authenticator, UiHint, UserCheck, UserValidationMethod};
 use passkey::client::{Client as PasskeyClient, DefaultClientData};
@@ -914,5 +915,127 @@ async fn serves_the_spa_publicly_without_shadowing_the_api() {
     let resp = owner.get(url(&server, "/api/nope")).send().await.unwrap();
     assert_eq!(resp.status(), 404);
     assert_eq!(resp.headers()["content-type"], "application/json");
+    server.shutdown().await.unwrap();
+}
+
+/// Reads the stream until it ends; panics if it is still open after 1 s.
+async fn assert_stream_ends(mut resp: reqwest::Response, what: &str) {
+    let ended = tokio::time::timeout(Duration::from_secs(1), async {
+        while resp.chunk().await.unwrap().is_some() {}
+    })
+    .await;
+    assert!(ended.is_ok(), "stream still open after {what}");
+}
+
+async fn assert_stream_open(resp: &mut reqwest::Response) {
+    let read = tokio::time::timeout(Duration::from_millis(500), resp.chunk()).await;
+    assert!(read.is_err(), "stream ended early: {read:?}");
+}
+
+#[tokio::test]
+async fn event_streams_end_when_credentials_do() {
+    let dirs = Dirs::new();
+    let mut config = dirs.config();
+    config.max_sse_clients = 8;
+    config.auth.stream_recheck = Duration::from_millis(200);
+    let server = Server::start(&config, None).await.unwrap();
+    let owner = setup(&server).await;
+    let events = |client: &reqwest::Client| client.get(url(&server, "/api/events")).send();
+
+    let (revoked, _) = login(&server).await;
+    let me: Value = revoked
+        .get(url(&server, "/api/auth/session"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut stream = events(&revoked).await.unwrap();
+    assert_eq!(stream.status(), 200);
+    assert_stream_open(&mut stream).await;
+    let id = me["session"]["id"].as_str().unwrap();
+    let resp = owner
+        .delete(url(&server, &format!("/api/sessions/{id}")))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    assert_stream_ends(stream, "session revocation").await;
+    assert_eq!(events(&revoked).await.unwrap().status(), 401);
+
+    let (logged_out, _) = login(&server).await;
+    let stream = events(&logged_out).await.unwrap();
+    let resp = logged_out
+        .post(url(&server, "/api/auth/logout"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    assert_stream_ends(stream, "logout").await;
+
+    let pairing: Value = owner
+        .post(url(&server, "/api/pairing"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let paired: Value = reqwest::Client::new()
+        .post(url(&server, "/api/pairing/exchange"))
+        .header("x-requested-with", "tagmail")
+        .json(&json!({ "code": pairing["code"], "name": "Laptop" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut stream = reqwest::Client::new()
+        .get(url(&server, "/api/events"))
+        .bearer_auth(paired["token"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stream.status(), 200);
+    assert_stream_open(&mut stream).await;
+    let resp = owner
+        .delete(url(
+            &server,
+            &format!("/api/devices/{}", paired["deviceId"]),
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    assert_stream_ends(stream, "device revocation").await;
+
+    let (idle, _) = login(&server).await;
+    let me: Value = idle
+        .get(url(&server, "/api/auth/session"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let hash = hex::decode(me["session"]["id"].as_str().unwrap()).unwrap();
+    let mut stream = events(&idle).await.unwrap();
+    assert_stream_open(&mut stream).await;
+    server
+        .store()
+        .config()
+        .write(move |tx| {
+            tx.execute(
+                "UPDATE session SET last_seen_at = last_seen_at - 31 * 86400 WHERE id_hash = ?1",
+                [hash],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_stream_ends(stream, "idle expiry").await;
+    assert_eq!(status(&owner, &server, "/api/status").await, 200);
     server.shutdown().await.unwrap();
 }

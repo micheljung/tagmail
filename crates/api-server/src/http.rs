@@ -3,9 +3,11 @@
 //! the rest to the SPA.
 
 use std::convert::Infallible;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Extension;
 use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, RawQuery, State};
@@ -18,8 +20,9 @@ use futures_util::stream;
 use tagmail_api_core::{Api, EventSession, EventSource, Method, OpenError, Request, Response};
 use tagmail_core::ChangeCursor;
 use tokio::sync::{Semaphore, watch};
+use tokio::time::Sleep;
 
-use crate::auth::{self, Auth};
+use crate::auth::{self, Auth, Principal};
 use crate::sqlite_store::SqliteStore;
 use crate::web::WebDir;
 use crate::{pairing, webauthn};
@@ -159,8 +162,29 @@ fn resume_cursor(headers: &HeaderMap, query: Option<&str>) -> Result<Option<Chan
         .transpose()
 }
 
+/// Credentials of an open event stream; the stream ends once they do.
+struct StreamAuth {
+    auth: Arc<Auth>,
+    principal: Principal,
+    revocations: watch::Receiver<u64>,
+    recheck: Pin<Box<Sleep>>,
+}
+
+impl StreamAuth {
+    async fn still_valid(&mut self) -> bool {
+        match self.auth.stream_recheck_at(&self.principal).await {
+            Some(at) => {
+                self.recheck.as_mut().reset(at);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 async fn events(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     headers: HeaderMap,
     RawQuery(query): RawQuery,
 ) -> HttpResponse {
@@ -185,12 +209,28 @@ async fn events(
             }
             Ok(Ok(session)) => session,
         };
+    let mut guard = StreamAuth {
+        revocations: state.auth.revocations(),
+        auth: state.auth.clone(),
+        principal,
+        recheck: Box::pin(tokio::time::sleep(Duration::ZERO)),
+    };
+    if !guard.still_valid().await {
+        return state.auth.unauthorized();
+    }
     let stream = stream::unfold(
-        (session, slot, state.shutdown),
-        |(mut session, slot, mut shutdown)| async move {
-            let event = tokio::select! {
-                event = session.next() => event,
-                _ = shutdown.wait_for(|stop| *stop) => return None,
+        (session, slot, state.shutdown, guard),
+        |(mut session, slot, mut shutdown, mut guard)| async move {
+            let event = loop {
+                let recheck = tokio::select! {
+                    event = session.next() => break event,
+                    _ = shutdown.wait_for(|stop| *stop) => return None,
+                    changed = guard.revocations.changed() => changed.is_ok(),
+                    () = guard.recheck.as_mut() => true,
+                };
+                if !recheck || !guard.still_valid().await {
+                    return None;
+                }
             };
             match event {
                 Ok(Some(event)) => {
@@ -198,7 +238,7 @@ async fn events(
                     if let Some(id) = event.id() {
                         sse = sse.id(id);
                     }
-                    Some((Ok::<_, Infallible>(sse), (session, slot, shutdown)))
+                    Some((Ok::<_, Infallible>(sse), (session, slot, shutdown, guard)))
                 }
                 Ok(None) => None,
                 Err(e) => {

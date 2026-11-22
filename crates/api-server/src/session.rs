@@ -155,6 +155,30 @@ pub async fn session(
     Ok(Some(row))
 }
 
+/// When the session for `hash` ends unless used again, in Unix seconds;
+/// `None` if it already ended. Does not count as use.
+pub async fn live_until(
+    db: &ConfigDb,
+    lifetimes: Lifetimes,
+    hash: TokenHash,
+) -> tagmail_store::Result<Option<i64>> {
+    let row = db
+        .read(move |conn| {
+            Ok(conn
+                .query_row(
+                    &format!("SELECT {SESSION_COLUMNS} FROM session WHERE id_hash = ?1"),
+                    [hash.as_slice()],
+                    |r| session_row(r, lifetimes, None),
+                )
+                .optional()?)
+        })
+        .await?;
+    let now = now();
+    Ok(row
+        .map(|s| s.expires_at.min(s.idle_expires_at))
+        .filter(|until| *until > now))
+}
+
 pub async fn sessions(
     db: &ConfigDb,
     lifetimes: Lifetimes,
@@ -213,6 +237,20 @@ pub async fn device(db: &ConfigDb, hash: TokenHash) -> tagmail_store::Result<Opt
         .await?;
     }
     Ok(Some(id))
+}
+
+pub async fn device_active(db: &ConfigDb, id: i64) -> tagmail_store::Result<bool> {
+    db.read(move |conn| {
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM device WHERE id = ?1 AND revoked_at IS NULL",
+                [id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    })
+    .await
 }
 
 pub async fn devices(db: &ConfigDb) -> tagmail_store::Result<Vec<DeviceDto>> {

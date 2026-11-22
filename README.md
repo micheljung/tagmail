@@ -99,7 +99,8 @@ pairing exchange requires a session or a device token. Browser sessions
 are random tokens stored as SHA-256 hashes in `config.db` and sent as an
 `HttpOnly; SameSite=Strict` cookie (`Secure` with an `https` origin).
 They expire after 30 days without use or 90 days after login, and can be
-listed and revoked in Settings.
+listed and revoked in Settings. Open event streams end when their session
+or device does.
 
 CSRF protection: besides `SameSite=Strict`, every state-changing request
 must send `X-Requested-With: tagmail`. Browsers cannot add that header
