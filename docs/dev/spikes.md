@@ -167,15 +167,15 @@ file path if this matters.
   plus pkg-config, then run the binary with `LD_LIBRARY_PATH` built from
   `$NIX_LDFLAGS` under `xvfb-run`.
 
+**CI:** in the "Desktop spike" workflow at commit 7bd3022, the in-webview
+self-test passed on `macos-latest` (WKWebView) and `windows-latest`
+(WebView2).
+
 **Not verified**
 
-- WKWebView (macOS) and WebView2 (Windows). CI builds and runs the self-test
-  there with `continue-on-error`, so the first CI run gives data. Before it
-  counts, check by hand: header CSP on `http://app.localhost` (WebView2),
-  iframe sandbox and height, POST bodies.
-- The CI job itself: actionlint passes, but the workflow has not run yet. Only the Nix
-  WebKitGTK 2.54.3 was tested. Ubuntu's packaged WebKitGTK was not, because
-  the sandbox has no apt.
+- WKWebView and WebView2 by hand. The self-test there still runs with
+  `continue-on-error`. Check by hand: header CSP on `http://app.localhost`
+  (WebView2), iframe sandbox and height, POST bodies.
 - Real HTTP to a server (the mock is in-process), an on-disk replica, the 90-day
   window, intent TTL and the 410 re-bootstrap. These belong to `crates/replica`
   in M5.
