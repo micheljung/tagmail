@@ -93,7 +93,9 @@ tagmail-server --data-dir /var/lib/tagmail --public-origin https://mail.example.
 On first start the server logs a one-time setup token. Open the web app
 and enter it with the owner password. The password is hashed with
 argon2id (19 MiB, t=2); logins run one hash at a time and are rate
-limited per client IP and globally. Passkeys can be added afterwards in
+limited per client IP (10 attempts, then one per 10 s). A global limit
+(600, then ten per second) is only a backstop: an attacker with hundreds
+of addresses can still delay password logins until it refills. Passkeys can be added afterwards in
 Settings. They need a domain name origin (`localhost` works; IP addresses
 do not).
 

@@ -1,5 +1,12 @@
-//! Login rate limits (per client IP and global) and the client IP behind
-//! trusted reverse proxies.
+//! Login rate limits and the client IP behind trusted reverse proxies.
+//!
+//! Per-client buckets do the limiting. The global bucket is only a high
+//! backstop against attacks spread over many addresses: it is far above
+//! anything one owner needs, so a single attacker cannot exhaust it, while
+//! the single-flight password hasher already bounds CPU and memory. The
+//! trade-off: an attacker with hundreds of addresses can still delay the
+//! owner's password login until the backstop refills, and the owner is
+//! never exempt, since a login request carries no proof of who sends it.
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr};
@@ -21,12 +28,13 @@ pub const PER_IP: Rate = Rate {
     burst: 10,
     refill: Duration::from_secs(10),
 };
-/// 60 attempts, then one per second across all clients.
+/// 600 attempts, then ten per second across all clients.
 pub const GLOBAL: Rate = Rate {
-    burst: 60,
-    refill: Duration::from_secs(1),
+    burst: 600,
+    refill: Duration::from_millis(100),
 };
-/// Tracked clients; beyond this, full buckets are dropped first.
+/// Tracked clients; beyond this, full buckets are dropped first, and new
+/// clients that still do not fit only count against the global bucket.
 const MAX_CLIENTS: usize = 4096;
 
 #[derive(Debug, Clone, Copy)]
@@ -84,22 +92,26 @@ impl RateLimiter {
                 b.refill(rate, now);
                 b.tokens < f64::from(rate.burst)
             });
-            if clients.len() >= MAX_CLIENTS {
-                return Err(rate.refill);
+        }
+        let mut client = if clients.len() < MAX_CLIENTS || clients.contains_key(&key) {
+            let client = clients
+                .entry(key)
+                .or_insert_with(|| Bucket::full(self.per_ip, now));
+            client.refill(self.per_ip, now);
+            if client.tokens < 1.0 {
+                return Err(client.wait(self.per_ip));
             }
-        }
-        let client = clients
-            .entry(key)
-            .or_insert_with(|| Bucket::full(self.per_ip, now));
-        client.refill(self.per_ip, now);
+            Some(client)
+        } else {
+            None
+        };
         global.refill(self.global, now);
-        if client.tokens < 1.0 {
-            return Err(client.wait(self.per_ip));
-        }
         if global.tokens < 1.0 {
             return Err(global.wait(self.global));
         }
-        client.tokens -= 1.0;
+        if let Some(client) = client.as_mut() {
+            client.tokens -= 1.0;
+        }
         global.tokens -= 1.0;
         Ok(())
     }
@@ -206,6 +218,28 @@ mod tests {
         );
         let later = t + Duration::from_secs(10);
         assert!(limiter.check_at(ip("1.1.1.1"), later).is_ok());
+    }
+
+    #[test]
+    fn a_full_client_table_falls_back_to_the_global_bucket() {
+        let per_ip = Rate {
+            burst: 1,
+            refill: Duration::from_secs(3600),
+        };
+        let global = Rate {
+            burst: 2 * MAX_CLIENTS as u32,
+            refill: Duration::from_secs(1),
+        };
+        let limiter = RateLimiter::new(per_ip, global);
+        let t = Instant::now();
+        for n in 0..MAX_CLIENTS as u32 {
+            let ip = IpAddr::V4(std::net::Ipv4Addr::from(n + 1));
+            assert!(limiter.check_at(ip, t).is_ok());
+        }
+        assert!(
+            limiter.check_at(ip("203.0.113.9"), t).is_ok(),
+            "an untracked client is not locked out by a full table"
+        );
     }
 
     #[test]
