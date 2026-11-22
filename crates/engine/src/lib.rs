@@ -2,14 +2,22 @@
 //! server (plan §3.4) and publishes every committed change to the API's
 //! change feed.
 
-#![allow(dead_code)]
-
 mod cache;
 mod ctx;
 mod error;
+#[cfg(test)]
+mod fake;
 mod message;
+mod supervisor;
+mod sync;
+#[cfg(test)]
+mod sync_tests;
 #[cfg(test)]
 mod testutil;
 mod threading;
 
 pub use error::{Error, Result};
+pub use supervisor::{
+    AccountSettings, ConnectorFactory, Engine, EngineConfig, ImapConnectorFactory, Stores,
+    load_account,
+};
