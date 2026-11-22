@@ -21,7 +21,10 @@ export default defineConfig(
 			globals: { ...globals.browser, ...globals.node }
 		},
 		rules: {
-			'no-undef': 'off'
+			'no-undef': 'off',
+			// The SPA is always served at the origin root (web and app://localhost), so
+			// links need no base-path resolution.
+			'svelte/no-navigation-without-resolve': 'off'
 		}
 	},
 	{
@@ -33,5 +36,23 @@ export default defineConfig(
 				parser: ts.parser
 			}
 		}
+	},
+	{
+		files: ['**/*.svelte'],
+		// typescript-eslint cannot see the prop types of imported components, so
+		// callbacks passed to them would all read as `any`; svelte-check covers these.
+		rules: {
+			'@typescript-eslint/no-unsafe-argument': 'off',
+			'@typescript-eslint/no-unsafe-assignment': 'off',
+			'@typescript-eslint/no-unsafe-call': 'off',
+			'@typescript-eslint/no-unsafe-member-access': 'off',
+			'@typescript-eslint/no-unsafe-return': 'off'
+		}
+	},
+	{
+		// Id indexes and row caches are deliberately non-reactive; a version
+		// counter in $state tells the UI when they changed.
+		files: ['src/lib/list/**', 'src/lib/stores/**'],
+		rules: { 'svelte/prefer-svelte-reactivity': 'off' }
 	}
 );

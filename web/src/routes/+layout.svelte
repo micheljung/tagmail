@@ -1,8 +1,13 @@
 <script lang="ts">
+	import '../app.css';
 	import favicon from '#lib/assets/favicon.svg';
+	import { theme } from '#lib/stores/index.ts';
+	import { onMount } from 'svelte';
 	import type { LayoutProps } from './$types';
 
 	let { children }: LayoutProps = $props();
+
+	onMount(() => theme.init());
 </script>
 
 <svelte:head>
