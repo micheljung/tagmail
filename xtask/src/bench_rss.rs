@@ -199,6 +199,8 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
     let mut running = Running { child, addr };
     let pid = running.child.id();
     wait_until_serving(&mut running)?;
+    let session = set_up_owner(addr, &work.join("server.log"))?;
+    let session = Some(session.as_str());
 
     let account = json!({
         "name": "bench",
@@ -211,7 +213,13 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
         "username": opts.user,
         "password": opts.password,
     });
-    let (status, body) = http(addr, "POST", "/api/accounts", Some(&account.to_string()))?;
+    let (status, body) = http(
+        addr,
+        "POST",
+        "/api/accounts",
+        Some(&account.to_string()),
+        session,
+    )?;
     if status != 201 {
         bail!("POST /api/accounts: {status} {body}");
     }
@@ -224,7 +232,7 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
     let settled = loop {
         check_alive(&mut running)?;
         sync_peak_kib = sync_peak_kib.max(proc_status_kib(pid, "VmRSS")?);
-        let account = account_status(addr)?;
+        let account = account_status(addr, session)?;
         let live = account["phase"] == "live";
         let pending = account["textPending"].as_u64().unwrap_or(u64::MAX);
         if live && pending == 0 {
@@ -318,8 +326,8 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
     Ok(())
 }
 
-fn account_status(addr: SocketAddr) -> Result<Value> {
-    let (status, body) = http(addr, "GET", "/api/status", None)?;
+fn account_status(addr: SocketAddr, session: Option<&str>) -> Result<Value> {
+    let (status, body) = http(addr, "GET", "/api/status", None, session)?;
     if status != 200 {
         bail!("GET /api/status: {status} {body}");
     }
@@ -332,7 +340,7 @@ fn wait_until_serving(running: &mut Running) -> Result<()> {
     loop {
         check_alive(running)?;
         if matches!(
-            http(running.addr, "GET", "/api/version", None),
+            http(running.addr, "GET", "/api/version", None, None),
             Ok((200, _))
         ) {
             return Ok(());
@@ -398,7 +406,52 @@ fn free_loopback_addr() -> Result<SocketAddr> {
 }
 
 /// One HTTP/1.0 exchange, so the response is neither chunked nor kept alive.
-fn http(addr: SocketAddr, method: &str, path: &str, body: Option<&str>) -> Result<(u16, String)> {
+/// Sets the owner password with the setup token from the server log and
+/// returns the session cookie.
+fn set_up_owner(addr: SocketAddr, log: &Path) -> Result<String> {
+    const MARKER: &str = "one-time setup token ";
+    let log = fs::read_to_string(log)?;
+    let token: String = log
+        .split_once(MARKER)
+        .context("no setup token in the server log")?
+        .1
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let password = format!("bench-{}", std::process::id());
+    let setup = json!({ "token": token, "password": password }).to_string();
+    let (status, head, body) = request(addr, "POST", "/api/auth/setup", Some(&setup), None)?;
+    if status != 201 {
+        bail!("POST /api/auth/setup: {status} {body}");
+    }
+    head.lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("set-cookie")
+                .then(|| value.trim().split(';').next().unwrap_or("").to_owned())
+        })
+        .context("no session cookie")
+}
+
+fn http(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    session: Option<&str>,
+) -> Result<(u16, String)> {
+    let (status, _, body) = request(addr, method, path, body, session)?;
+    Ok((status, body))
+}
+
+/// Returns status, head and body.
+fn request(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    session: Option<&str>,
+) -> Result<(u16, String, String)> {
     let mut stream = TcpStream::connect_timeout(&addr, HTTP_TIMEOUT)?;
     stream.set_read_timeout(Some(HTTP_TIMEOUT))?;
     stream.set_write_timeout(Some(HTTP_TIMEOUT))?;
@@ -406,8 +459,11 @@ fn http(addr: SocketAddr, method: &str, path: &str, body: Option<&str>) -> Resul
     write!(
         stream,
         "{method} {path} HTTP/1.0\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
-         Content-Length: {}\r\n\r\n{body}",
-        body.len()
+         X-Requested-With: tagmail\r\n{cookie}Content-Length: {}\r\n\r\n{body}",
+        body.len(),
+        cookie = session
+            .map(|c| format!("Cookie: {c}\r\n"))
+            .unwrap_or_default(),
     )?;
     let mut response = String::new();
     stream.read_to_string(&mut response)?;
@@ -419,7 +475,7 @@ fn http(addr: SocketAddr, method: &str, path: &str, body: Option<&str>) -> Resul
         .nth(1)
         .and_then(|s| s.parse().ok())
         .context("malformed HTTP status line")?;
-    Ok((status, body.to_owned()))
+    Ok((status, head.to_owned(), body.to_owned()))
 }
 
 fn workspace_root() -> PathBuf {
