@@ -30,9 +30,12 @@ allow = [
 multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = true
+# OpenSSL-free musl static build, see docs/dev/spikes.md (spike 3)
 deny = [
-  { crate = "openssl", reason = "Prefer pure-Rust TLS and crypto (rustls)" },
-  { crate = "openssl-sys", reason = "Prefer pure-Rust TLS and crypto (rustls)" },
+  { crate = "openssl", reason = "OpenSSL-free build: use rustls (ring) and web-push-native, not web-push" },
+  { crate = "openssl-sys", reason = "OpenSSL-free build: use rustls (ring) and web-push-native, not web-push" },
+  { crate = "native-tls", reason = "Links OpenSSL on Linux: disable default features (lettre, reqwest) and use rustls" },
+  { crate = "aws-lc-sys", reason = "rustls crypto provider is ring: use reqwest rustls-no-provider, lettre ring" },
 ]
 
 [sources]
