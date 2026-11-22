@@ -116,7 +116,8 @@ The desktop app pairs from Settings → Devices: the web app shows an
 8-character code (and QR code) valid for 5 minutes. The desktop app
 exchanges it once for a device token, which only its Rust side sends as
 `Authorization: Bearer`. Requests from browsers cannot use device tokens.
-Device tokens are hashed at rest and revocable.
+Device tokens are hashed at rest and revocable, and cannot pair devices
+or manage sessions, devices or passkeys.
 
 ### Master key
 

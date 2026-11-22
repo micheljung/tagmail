@@ -22,7 +22,7 @@ use webauthn_rs::prelude::{
     RegisterPublicKeyCredential, Uuid, Webauthn, WebauthnBuilder,
 };
 
-use crate::auth::{Principal, error, internal, invalid, no_content, parse};
+use crate::auth::{Principal, error, internal, invalid, no_content, parse, require_session};
 use crate::http::{AppState, to_http};
 use crate::session;
 
@@ -195,12 +195,8 @@ pub async fn register_start(
     principal: axum::Extension<Principal>,
     body: Bytes,
 ) -> HttpResponse {
-    if !matches!(*principal, Principal::Session(..)) {
-        return error(
-            403,
-            "session_required",
-            "add passkeys from a browser session",
-        );
+    if let Err(resp) = require_session(&principal, "add passkeys") {
+        return *resp;
     }
     let Some(passkeys) = &state.auth.passkeys else {
         return unavailable();
@@ -244,12 +240,8 @@ pub async fn register_finish(
     principal: axum::Extension<Principal>,
     body: Bytes,
 ) -> HttpResponse {
-    if !matches!(*principal, Principal::Session(..)) {
-        return error(
-            403,
-            "session_required",
-            "add passkeys from a browser session",
-        );
+    if let Err(resp) = require_session(&principal, "add passkeys") {
+        return *resp;
     }
     let Some(passkeys) = &state.auth.passkeys else {
         return unavailable();
@@ -441,7 +433,14 @@ pub async fn list(State(state): State<AppState>) -> HttpResponse {
 }
 
 /// `DELETE /api/passkeys/{id}`.
-pub async fn delete(State(state): State<AppState>, Path(id): Path<String>) -> HttpResponse {
+pub async fn delete(
+    State(state): State<AppState>,
+    principal: axum::Extension<Principal>,
+    Path(id): Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_session(&principal, "remove passkeys") {
+        return *resp;
+    }
     let Ok(id) = id.parse::<i64>() else {
         return error(404, "not_found", "no such passkey");
     };

@@ -12,7 +12,7 @@ use tagmail_api_core::Response;
 use tagmail_api_core::auth_dto::{DeviceTokenDto, PairingCodeDto, PairingExchangeDto};
 use tagmail_store::rusqlite::params;
 
-use crate::auth::{Principal, error, internal, invalid, is_browser, parse};
+use crate::auth::{Principal, error, internal, invalid, is_browser, parse, require_session};
 use crate::http::{AppState, to_http};
 use crate::session;
 
@@ -43,12 +43,8 @@ pub async fn create(
     State(state): State<AppState>,
     principal: axum::Extension<Principal>,
 ) -> HttpResponse {
-    if !matches!(*principal, Principal::Session(..)) {
-        return error(
-            403,
-            "session_required",
-            "pair devices from a browser session",
-        );
+    if let Err(resp) = require_session(&principal, "pair devices") {
+        return *resp;
     }
     let auth = &state.auth;
     let code = new_code();

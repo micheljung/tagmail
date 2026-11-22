@@ -460,6 +460,19 @@ fn cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
         .filter(|v| !v.is_empty())
 }
 
+/// `403` unless `principal` is a browser session: a device token must not
+/// manage the owner's other credentials.
+pub(crate) fn require_session(principal: &Principal, what: &str) -> Result<(), Box<HttpResponse>> {
+    match principal {
+        Principal::Session(..) => Ok(()),
+        Principal::Device(_) => Err(Box::new(error(
+            403,
+            "session_required",
+            format!("{what} from a browser session"),
+        ))),
+    }
+}
+
 pub(crate) fn error(status: u16, code: &str, message: impl Into<String>) -> HttpResponse {
     to_http(Response::error(status, code, message))
 }
@@ -685,6 +698,9 @@ pub async fn sessions(
     State(state): State<AppState>,
     principal: axum::Extension<Principal>,
 ) -> HttpResponse {
+    if let Err(resp) = require_session(&principal, "list sessions") {
+        return *resp;
+    }
     let current = match &*principal {
         Principal::Session(hash, _) => Some(*hash),
         Principal::Device(_) => None,
@@ -701,6 +717,9 @@ pub async fn revoke_session(
     principal: axum::Extension<Principal>,
     Path(id): Path<String>,
 ) -> HttpResponse {
+    if let Err(resp) = require_session(&principal, "revoke sessions") {
+        return *resp;
+    }
     let auth = &state.auth;
     let hash: Option<TokenHash> = hex::decode(&id).ok().and_then(|b| b.try_into().ok());
     let Some(hash) = hash else {
@@ -729,7 +748,14 @@ pub async fn devices(State(state): State<AppState>) -> HttpResponse {
 }
 
 /// `DELETE /api/devices/{id}`.
-pub async fn revoke_device(State(state): State<AppState>, Path(id): Path<String>) -> HttpResponse {
+pub async fn revoke_device(
+    State(state): State<AppState>,
+    principal: axum::Extension<Principal>,
+    Path(id): Path<String>,
+) -> HttpResponse {
+    if let Err(resp) = require_session(&principal, "revoke devices") {
+        return *resp;
+    }
     let Ok(id) = id.parse::<i64>() else {
         return error(404, "not_found", "no such device");
     };

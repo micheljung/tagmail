@@ -612,6 +612,43 @@ async fn desktop_pairing_exchanges_a_single_use_code_for_a_revocable_token() {
         .unwrap();
     assert_eq!(resp.status(), 403, "devices cannot pair devices");
 
+    let me: Value = owner
+        .get(url(&server, "/api/auth/session"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let owner_session = me["session"]["id"].as_str().unwrap().to_owned();
+    let management = [
+        (Method::GET, "/api/sessions".to_owned()),
+        (Method::DELETE, format!("/api/sessions/{owner_session}")),
+        (Method::DELETE, format!("/api/devices/{device_id}")),
+        (Method::POST, "/api/auth/passkey/register/start".to_owned()),
+        (Method::POST, "/api/auth/passkey/register/finish".to_owned()),
+        (Method::DELETE, "/api/passkeys/1".to_owned()),
+    ];
+    for (method, path) in management {
+        let resp = desktop
+            .request(method.clone(), url(&server, &path))
+            .bearer_auth(&token)
+            .json(&json!({ "name": "x", "ceremonyId": "x", "credential": {} }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 403, "device token: {method} {path}");
+        assert_eq!(error_code(resp).await, "session_required");
+    }
+    assert_eq!(
+        status(&owner, &server, "/api/status").await,
+        200,
+        "owner session kept"
+    );
+    for path in ["/api/devices", "/api/passkeys"] {
+        assert_eq!(bearer(path).send().await.unwrap().status(), 200, "{path}");
+    }
+
     let expired: Value = owner
         .post(url(&server, "/api/pairing"))
         .send()
@@ -664,6 +701,36 @@ async fn desktop_pairing_exchanges_a_single_use_code_for_a_revocable_token() {
         .await
         .unwrap();
     assert_eq!(devices["devices"], json!([]));
+
+    let pairing: Value = owner
+        .post(url(&server, "/api/pairing"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let second: Value = exchange(pairing["code"].as_str().unwrap().to_owned())
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let second = second["token"].as_str().unwrap().to_owned();
+    let resp = desktop
+        .post(url(&server, "/api/auth/logout"))
+        .bearer_auth(&second)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204, "a device may revoke itself");
+    let resp = desktop
+        .get(url(&server, "/api/status"))
+        .bearer_auth(&second)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
 
     let stored: Vec<u8> = server
         .store()
