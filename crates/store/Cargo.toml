@@ -11,12 +11,15 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+hex.workspace = true
 rusqlite.workspace = true
+sha2.workspace = true
 tagmail-core.workspace = true
+tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }
 tracing.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
