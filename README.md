@@ -84,6 +84,9 @@ tagmail-server --data-dir /var/lib/tagmail --public-origin https://mail.example.
   are ignored.
 - `--web-dir` serves the built web app (`web/build`) at `/`. By default a
   `web` directory next to the binary is used if present.
+- `--insecure-plain-imap` is for local test servers only: it connects to
+  IMAP without TLS for **every** account on the server, not just one, and
+  sends their passwords in cleartext.
 
 ### Login
 
