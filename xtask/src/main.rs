@@ -1,7 +1,10 @@
+mod bench_rss;
 mod harness;
 mod seed;
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
@@ -38,6 +41,37 @@ enum Command {
     Stalwart {
         #[command(subcommand)]
         action: ServerAction,
+    },
+    /// Idle RSS gate (AC 9): sync the seeded `user1` with tagmail-server,
+    /// idle, and fail if VmRSS over the last window exceeds the limit
+    BenchRss {
+        /// Prebuilt tagmail-server; built in release mode when absent
+        #[arg(long)]
+        server: Option<PathBuf>,
+        #[arg(long, default_value = "127.0.0.1:10143")]
+        imap: SocketAddr,
+        #[arg(long, default_value = "user1")]
+        user: String,
+        #[arg(long, default_value = "pass1")]
+        password: String,
+        /// Idle period after the sync
+        #[arg(long, default_value_t = 300)]
+        idle_secs: u64,
+        /// Gated tail of the idle period
+        #[arg(long, default_value_t = 60)]
+        window_secs: u64,
+        #[arg(long, default_value_t = 64)]
+        limit_mib: u64,
+        /// Give up if the sync and text pass take longer
+        #[arg(long, default_value_t = 3600)]
+        sync_timeout_secs: u64,
+        /// JSON result
+        #[arg(long, default_value = "target/bench-rss.json")]
+        out: PathBuf,
+        /// Run the server inside the Dovecot container's network namespace
+        /// (for Docker daemons whose published ports are unreachable)
+        #[arg(long)]
+        in_dovecot_network: bool,
     },
     /// Regenerate the TypeScript API types in packages/api-types
     GenTsTypes {
@@ -122,6 +156,38 @@ fn main() -> Result<()> {
             ServerAction::Up => harness::up(&[harness::STALWART])?,
             ServerAction::Down => harness::down(&[harness::STALWART])?,
         },
+        Command::BenchRss {
+            server,
+            imap,
+            user,
+            password,
+            idle_secs,
+            window_secs,
+            limit_mib,
+            sync_timeout_secs,
+            out,
+            in_dovecot_network,
+        } => {
+            if window_secs == 0 || window_secs > idle_secs {
+                bail!("--window-secs must be between 1 and --idle-secs");
+            }
+            let opts = bench_rss::Options {
+                server,
+                imap,
+                user,
+                password,
+                idle: Duration::from_secs(idle_secs),
+                window: Duration::from_secs(window_secs),
+                limit_mib,
+                sync_timeout: Duration::from_secs(sync_timeout_secs),
+                out,
+            };
+            if in_dovecot_network {
+                bench_rss::run_in_dovecot_network(&opts)?;
+            } else {
+                bench_rss::run_local(&opts)?;
+            }
+        }
         Command::GenTsTypes { check } => {
             let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("..")

@@ -36,7 +36,7 @@ fn compose() -> Command {
     cmd
 }
 
-fn run(cmd: &mut Command) -> Result<()> {
+pub(crate) fn run(cmd: &mut Command) -> Result<()> {
     let status = cmd.status().with_context(|| format!("running {cmd:?}"))?;
     if !status.success() {
         bail!("{cmd:?} failed with {status}");
@@ -44,7 +44,7 @@ fn run(cmd: &mut Command) -> Result<()> {
     Ok(())
 }
 
-fn output(cmd: &mut Command) -> Result<String> {
+pub(crate) fn output(cmd: &mut Command) -> Result<String> {
     let out = cmd
         .stderr(Stdio::inherit())
         .output()
@@ -73,15 +73,21 @@ pub fn down(services: &[&str]) -> Result<()> {
     Ok(())
 }
 
+/// The id of a running service's container.
+pub fn container(service: &str) -> Result<String> {
+    let id = output(compose().args(["ps", "--quiet", service]))?;
+    let id = id.trim();
+    if id.is_empty() {
+        bail!("{service} is not running; start it with `cargo xtask dovecot up`");
+    }
+    Ok(id.to_owned())
+}
+
 pub fn load_maildir(service: &str, from: &Path, user: &str) -> Result<()> {
     if !from.join("cur").is_dir() {
         bail!("{} is not a Maildir", from.display());
     }
-    let container = output(compose().args(["ps", "--quiet", service]))?;
-    let container = container.trim();
-    if container.is_empty() {
-        bail!("{service} is not running; start it with `cargo xtask dovecot up`");
-    }
+    let container = container(service)?;
 
     let mut child = Command::new("docker")
         .args(["cp", "-", &format!("{container}:{MAIL_ROOT}/")])

@@ -88,3 +88,15 @@ For the static musl build, the bundled SQLite needs
 `LIBSQLITE3_FLAGS=-DSQLITE_DISABLE_LFS` (glibc headers otherwise reference
 `open64` and friends, which musl does not export). Pass the manifest into the
 container with `-e TAGMAIL_SEED_MANIFEST=/seed.json` after copying it there.
+
+## RSS gate
+
+`cargo xtask bench-rss` checks AC 9 against the seed loaded into `user1`:
+it starts a release `tagmail-server`, adds the account, waits until the sync
+and the text pass are done, idles 5 minutes and fails if the highest VmRSS
+of the last 60 s exceeds 64 MiB. It writes `target/bench-rss.json`
+(`--idle-secs`, `--window-secs`, `--limit-mib`, `--out` adjust it). With a
+remote Docker daemon, `--in-dovecot-network` builds static binaries and runs
+the benchmark in the Dovecot container's network namespace. These binaries
+use musl's allocator, so their RSS is not comparable with the glibc build
+that `bench.yml` measures.

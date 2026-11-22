@@ -1,0 +1,86 @@
+name: Bench
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  pull_request:
+    types: [opened, synchronize, reopened, labeled]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  SEED: 1
+  SEED_COUNT: 100000
+  SEED_AVG_KB: 8
+  SEED_DIR: ${{ github.workspace }}/../tagmail-seed
+
+jobs:
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      crates: ${{ steps.diff.outputs.crates }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git diff --name-only "$BASE...HEAD" | grep -q '^crates/'; then
+            echo "crates=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "crates=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  rss:
+    needs: changes
+    if: >-
+      always() && (
+        github.event_name != 'pull_request' ||
+        (github.event.action == 'labeled' && github.event.label.name == 'perf') ||
+        (github.event.action != 'labeled' && (
+          needs.changes.outputs.crates == 'true' ||
+          contains(github.event.pull_request.labels.*.name, 'perf')))
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100"
+      - uses: Swatinem/rust-cache@v2
+      - name: Restore seeded Maildir
+        id: seed-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.SEED_DIR }}
+          key: seed-${{ hashFiles('xtask/src/seed.rs') }}-${{ env.SEED }}-${{ env.SEED_COUNT }}-${{ env.SEED_AVG_KB }}
+      - name: Seed Maildir
+        if: steps.seed-cache.outputs.cache-hit != 'true'
+        run: cargo xtask seed --seed "$SEED" --count "$SEED_COUNT" --avg-kb "$SEED_AVG_KB" --out "$SEED_DIR"
+      - name: Start Dovecot
+        run: cargo xtask dovecot up
+      - name: Load seed into Dovecot
+        run: cargo xtask dovecot load --from "$SEED_DIR"
+      - name: Idle RSS gate
+        run: cargo xtask bench-rss --out target/bench-rss.json
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: bench-rss
+          path: target/bench-rss.json
+          if-no-files-found: warn
+      - name: Server logs
+        if: failure()
+        run: docker compose -f test/compose.yml logs dovecot
