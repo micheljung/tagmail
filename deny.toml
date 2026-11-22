@@ -4,6 +4,11 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+  # rsa via webauthn-rs only verifies RS256 assertions with public keys;
+  # the Marvin timing attack needs private-key decryption or signing.
+  { id = "RUSTSEC-2023-0071", reason = "webauthn-rs uses RSA for public-key signature verification only" },
+]
 
 [licenses]
 version = 2

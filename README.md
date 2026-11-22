@@ -68,13 +68,53 @@ disposable and can be rebuilt from the server at any time.
 
 ## Running the server
 
-The server has no login yet (planned for milestone M2). Until then:
+The server serves plain HTTP on `127.0.0.1:7878` by default and does not
+terminate TLS. To expose it, put a TLS-terminating reverse proxy (Caddy,
+nginx, Traefik) in front and tell the server its public origin:
 
-- It serves plain HTTP and listens on `127.0.0.1:7878` by default. It
-  refuses any non-loopback `--listen` address unless you pass
-  `--insecure-no-auth`. Use that flag only for development.
-- It does not terminate TLS. To expose it, put a reverse proxy that
-  handles TLS (Caddy, nginx, Traefik) in front of the loopback port.
+```sh
+tagmail-server --data-dir /var/lib/tagmail --public-origin https://mail.example.com \
+  --trusted-proxy 127.0.0.1
+```
+
+- A non-loopback `--listen` address needs an `https` `--public-origin`.
+  `--insecure-http` allows plain HTTP for development only.
+- `--trusted-proxy` (address or CIDR, repeatable) lists proxies whose
+  `X-Forwarded-For` is used for login rate limits. Other peers' headers
+  are ignored.
+- `--web-dir` serves the built web app (`web/build`) at `/`. By default a
+  `web` directory next to the binary is used if present.
+
+### Login
+
+On first start the server logs a one-time setup token. Open the web app
+and enter it with the owner password. The password is hashed with
+argon2id (19 MiB, t=2); logins run one hash at a time and are rate
+limited per client IP and globally. Passkeys can be added afterwards in
+Settings. They need a domain name origin (`localhost` works; IP addresses
+do not).
+
+Every `/api` route except `/api/version`, setup, login and the desktop
+pairing exchange requires a session or a device token. Browser sessions
+are random tokens stored as SHA-256 hashes in `config.db` and sent as an
+`HttpOnly; SameSite=Strict` cookie (`Secure` with an `https` origin).
+They expire after 30 days without use or 90 days after login, and can be
+listed and revoked in Settings.
+
+CSRF protection: besides `SameSite=Strict`, every state-changing request
+must send `X-Requested-With: tagmail`. Browsers cannot add that header
+cross-origin without a CORS preflight, and the server allows no CORS. A
+present `Origin` must match the public origin, and `Sec-Fetch-Site` must
+be `same-origin` or `none`. Behind a web dev server that proxies `/api`,
+pass the dev server's origin as `--public-origin`.
+
+The desktop app pairs from Settings → Devices: the web app shows an
+8-character code (and QR code) valid for 5 minutes. The desktop app
+exchanges it once for a device token, which only its Rust side sends as
+`Authorization: Bearer`. Requests from browsers cannot use device tokens.
+Device tokens are hashed at rest and revocable.
+
+### Master key
 
 ```sh
 tagmail-server --data-dir /var/lib/tagmail --master-key /etc/tagmail/master.key --init-key

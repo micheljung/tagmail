@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
+use ipnet::IpNet;
+use tagmail_api_server::auth::{AuthConfig, parse_origin, parse_proxy};
 use tagmail_api_server::credentials::{self, KEY_FILE_ENV};
 use tagmail_api_server::{Config, DEFAULT_LISTEN, DEFAULT_MAX_SSE_CLIENTS, Server};
 use tagmail_engine::EngineConfig;
@@ -18,8 +20,8 @@ enum LogFormat {
 #[derive(Debug, Parser)]
 #[command(name = "tagmail-server", version)]
 struct Cli {
-    /// Address to listen on. Only loopback is allowed without
-    /// --insecure-no-auth.
+    /// Address to listen on. A non-loopback address needs an https
+    /// --public-origin (TLS terminated by a reverse proxy) or --insecure-http.
     #[arg(long, default_value = DEFAULT_LISTEN)]
     listen: SocketAddr,
     /// Directory for config.db and cache.db
@@ -33,10 +35,23 @@ struct Cli {
     /// Generate the master key (mode 0600) if it does not exist
     #[arg(long)]
     init_key: bool,
-    /// DEVELOPMENT ONLY: allow a non-loopback --listen address although the
-    /// API has no authentication yet
+    /// Origin browsers use, e.g. https://mail.example.com. Default:
+    /// http://localhost:<port>. Used for CSRF origin checks, passkeys,
+    /// Secure cookies (https) and pairing links.
+    #[arg(long, value_parser = parse_origin)]
+    public_origin: Option<url::Url>,
+    /// Reverse proxy address or CIDR whose X-Forwarded-For is trusted for
+    /// rate limiting; repeatable or comma-separated
+    #[arg(long, value_delimiter = ',', value_parser = parse_proxy)]
+    trusted_proxy: Vec<IpNet>,
+    /// DEVELOPMENT ONLY: allow a non-loopback --listen address with a plain
+    /// http --public-origin (passwords and cookies unencrypted)
     #[arg(long)]
-    insecure_no_auth: bool,
+    insecure_http: bool,
+    /// Built web app to serve at / (default: `web` next to the binary, if
+    /// present)
+    #[arg(long)]
+    web_dir: Option<PathBuf>,
     /// DEVELOPMENT ONLY: connect to IMAP servers without TLS, sending
     /// passwords in cleartext (local test servers)
     #[arg(long)]
@@ -49,6 +64,11 @@ struct Cli {
     poll_interval: u64,
     #[arg(long, value_enum, default_value_t = LogFormat::Text)]
     log_format: LogFormat,
+}
+
+fn default_web_dir() -> Option<PathBuf> {
+    let dir = std::env::current_exe().ok()?.parent()?.join("web");
+    dir.join("index.html").is_file().then_some(dir)
 }
 
 async fn terminated() {
@@ -91,9 +111,15 @@ async fn main() -> anyhow::Result<()> {
         ),
         data_dir: cli.data_dir,
         init_key: cli.init_key,
-        insecure_no_auth: cli.insecure_no_auth,
         insecure_plain_imap: cli.insecure_plain_imap,
         max_sse_clients: cli.max_sse_clients,
+        auth: AuthConfig {
+            public_origin: cli.public_origin,
+            trusted_proxies: cli.trusted_proxy,
+            insecure_http: cli.insecure_http,
+            ..AuthConfig::default()
+        },
+        web_dir: cli.web_dir.or_else(default_web_dir),
     };
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),

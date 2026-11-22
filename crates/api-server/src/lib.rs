@@ -1,16 +1,22 @@
-//! `tagmail-server`: HTTP API, SSE push channel and credential storage over
-//! the engine's databases.
+//! `tagmail-server`: HTTP API, SSE push channel, owner authentication and
+//! credential storage over the engine's databases, plus the built SPA.
 
+pub mod auth;
 pub mod credentials;
 pub mod http;
+mod pairing;
+pub mod ratelimit;
+pub mod session;
 pub mod sqlite_store;
+pub mod web;
+mod webauthn;
 
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use tagmail_api_core::{AccountRegistry, Api, ChangeFeed, EventSource};
 use tagmail_engine::{Engine, EngineConfig, ImapConnectorFactory, Stores};
 use tagmail_store::{BlobStore, CacheDb, ConfigDb};
@@ -20,8 +26,10 @@ use tokio::task::JoinHandle;
 
 use tagmail_store::MasterKey;
 
+use crate::auth::{Auth, AuthConfig};
 use crate::credentials::{KeyWarning, load_master_key};
 use crate::sqlite_store::SqliteStore;
+use crate::web::WebDir;
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7878";
 pub const DEFAULT_MAX_SSE_CLIENTS: usize = 8;
@@ -37,33 +45,19 @@ pub struct Config {
     pub master_key: PathBuf,
     /// Generate the master key if it does not exist.
     pub init_key: bool,
-    /// Allow a non-loopback listen address although M1 has no login.
-    pub insecure_no_auth: bool,
     /// Connect to IMAP servers without TLS (local test servers only).
     pub insecure_plain_imap: bool,
     pub max_sse_clients: usize,
-}
-
-/// Until login exists (M2), anyone who can connect has full access, so only
-/// loopback is allowed unless explicitly overridden.
-pub fn check_listen(addr: SocketAddr, insecure_no_auth: bool) -> anyhow::Result<()> {
-    if addr.ip().is_loopback() {
-        return Ok(());
-    }
-    if !insecure_no_auth {
-        bail!(
-            "refusing to listen on {addr}: the API has no authentication yet, so it only binds \
-             to loopback; pass --insecure-no-auth to override (development only)"
-        );
-    }
-    tracing::warn!(%addr, "listening on a non-loopback address WITHOUT AUTHENTICATION (--insecure-no-auth); development only");
-    Ok(())
+    pub auth: AuthConfig,
+    /// Built SPA served at `/`; without it only the API is served.
+    pub web_dir: Option<PathBuf>,
 }
 
 pub struct Server {
     addr: SocketAddr,
     store: Arc<SqliteStore>,
     feed: Arc<ChangeFeed>,
+    auth: Arc<Auth>,
     engine: Option<Arc<Engine>>,
     stop: watch::Sender<bool>,
     task: JoinHandle<io::Result<()>>,
@@ -96,7 +90,7 @@ impl Server {
     }
 
     async fn start_with(config: &Config, sync: Sync) -> anyhow::Result<Server> {
-        check_listen(config.listen, config.insecure_no_auth)?;
+        auth::check_listen(config.listen, &config.auth)?;
         std::fs::create_dir_all(&config.data_dir)
             .with_context(|| format!("creating data directory {}", config.data_dir.display()))?;
         let (master, warnings) =
@@ -149,27 +143,34 @@ impl Server {
             .await
             .with_context(|| format!("binding {}", config.listen))?;
         let addr = listener.local_addr()?;
+        let auth = Arc::new(Auth::new(store.config().clone(), &config.auth, addr.port()).await?);
         let (stop, shutdown) = watch::channel(false);
         let state = http::AppState {
             api: Arc::new(Api::new(store.clone(), registry)),
             events: feed.clone() as Arc<dyn EventSource>,
             sse_slots: Arc::new(Semaphore::new(config.max_sse_clients)),
             shutdown: shutdown.clone(),
+            auth: auth.clone(),
+            web: config.web_dir.clone().map(|dir| Arc::new(WebDir::new(dir))),
         };
         let mut stopped = shutdown;
         let task = tokio::spawn(async move {
-            axum::serve(listener, http::router(state))
-                .with_graceful_shutdown(async move {
-                    // An error means the Server was dropped: stop as well.
-                    let _ = stopped.wait_for(|stop| *stop).await;
-                })
-                .await
+            axum::serve(
+                listener,
+                http::router(state).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move {
+                // An error means the Server was dropped: stop as well.
+                let _ = stopped.wait_for(|stop| *stop).await;
+            })
+            .await
         });
         tracing::info!(%addr, data_dir = %config.data_dir.display(), "listening");
         Ok(Server {
             addr,
             store,
             feed,
+            auth,
             engine,
             stop,
             task,
@@ -187,6 +188,10 @@ impl Server {
     /// The engine publishes the change-log head here after each commit.
     pub fn feed(&self) -> &Arc<ChangeFeed> {
         &self.feed
+    }
+
+    pub fn auth(&self) -> &Arc<Auth> {
+        &self.auth
     }
 
     /// Resolves when the HTTP server stops on its own (an I/O error).
@@ -207,6 +212,7 @@ impl Server {
         }
         drop(self.engine);
         drop(self.feed);
+        drop(self.auth);
         match Arc::try_unwrap(self.store) {
             Ok(store) => store.close().await?,
             Err(_) => tracing::warn!("store still in use at shutdown; not closing explicitly"),
@@ -227,21 +233,4 @@ async fn open_store(data_dir: &Path, master: &MasterKey) -> anyhow::Result<Sqlit
     })
     .await??;
     Ok(SqliteStore::open(config, cache, master).await?)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn non_loopback_needs_the_insecure_flag() {
-        for ok in ["127.0.0.1:1", "[::1]:1", "127.0.0.2:1"] {
-            assert!(check_listen(ok.parse().unwrap(), false).is_ok(), "{ok}");
-        }
-        for open in ["0.0.0.0:1", "[::]:1", "192.168.1.2:1"] {
-            let addr = open.parse().unwrap();
-            assert!(check_listen(addr, false).is_err(), "{open}");
-            assert!(check_listen(addr, true).is_ok(), "{open}");
-        }
-    }
 }

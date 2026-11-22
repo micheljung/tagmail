@@ -3,6 +3,7 @@
 //! Used by `tagmail-server` (axum) and the desktop app (custom protocol).
 
 pub mod api;
+pub mod auth_dto;
 pub mod dto;
 pub mod events;
 pub mod id_index;

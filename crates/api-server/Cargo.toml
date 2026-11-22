@@ -16,23 +16,33 @@ workspace = true
 
 [dependencies]
 anyhow.workspace = true
+argon2.workspace = true
 axum.workspace = true
 base64.workspace = true
 clap.workspace = true
 form_urlencoded.workspace = true
 futures-util.workspace = true
+getrandom.workspace = true
 hex.workspace = true
+ipnet.workspace = true
+percent-encoding.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tagmail-api-core.workspace = true
 tagmail-core.workspace = true
 tagmail-engine.workspace = true
 tagmail-store.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread", "signal", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+url.workspace = true
+webauthn-rs.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+async-trait.workspace = true
+passkey.workspace = true
 reqwest.workspace = true
 tempfile.workspace = true

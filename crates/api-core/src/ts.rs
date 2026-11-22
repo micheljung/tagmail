@@ -7,6 +7,7 @@ use std::path::Path;
 
 use ts_rs::{Config, ExportError, TS};
 
+use crate::auth_dto::*;
 use crate::dto::*;
 
 /// Path of the generated bindings, relative to the workspace root.
@@ -32,13 +33,29 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<AddressDto>(&cfg, &mut files)?;
     file::<ApiErrorDto>(&cfg, &mut files)?;
     file::<ApiVersion>(&cfg, &mut files)?;
+    file::<AuthVia>(&cfg, &mut files)?;
     file::<ChangeDto>(&cfg, &mut files)?;
     file::<ChangeOpDto>(&cfg, &mut files)?;
     file::<ChangesDto>(&cfg, &mut files)?;
+    file::<CurrentAuthDto>(&cfg, &mut files)?;
+    file::<DeviceDto>(&cfg, &mut files)?;
+    file::<DeviceTokenDto>(&cfg, &mut files)?;
+    file::<DevicesDto>(&cfg, &mut files)?;
     file::<EntityDto>(&cfg, &mut files)?;
     file::<LabelDto>(&cfg, &mut files)?;
+    file::<LoginDto>(&cfg, &mut files)?;
     file::<MailboxDto>(&cfg, &mut files)?;
     file::<NewAccountDto>(&cfg, &mut files)?;
+    file::<NewPasskeyDto>(&cfg, &mut files)?;
+    file::<PairingCodeDto>(&cfg, &mut files)?;
+    file::<PairingExchangeDto>(&cfg, &mut files)?;
+    file::<PasskeyChallengeDto>(&cfg, &mut files)?;
+    file::<PasskeyDto>(&cfg, &mut files)?;
+    file::<PasskeyResponseDto>(&cfg, &mut files)?;
+    file::<PasskeysDto>(&cfg, &mut files)?;
+    file::<SessionDto>(&cfg, &mut files)?;
+    file::<SessionsDto>(&cfg, &mut files)?;
+    file::<SetupDto>(&cfg, &mut files)?;
     file::<SpecialUseDto>(&cfg, &mut files)?;
     file::<StatusDto>(&cfg, &mut files)?;
     file::<SyncPhase>(&cfg, &mut files)?;

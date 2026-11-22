@@ -30,9 +30,10 @@ impl Dirs {
             data_dir: self.data.path().to_owned(),
             master_key: key.to_owned(),
             init_key: true,
-            insecure_no_auth: false,
             insecure_plain_imap: false,
             max_sse_clients: 2,
+            auth: Default::default(),
+            web_dir: None,
         }
     }
 
@@ -59,6 +60,37 @@ impl AccountRegistry for Registry {
 fn url(server: &Server, path: &str) -> String {
     format!("http://{}{path}", server.local_addr())
 }
+
+/// Sets up the owner (or logs in after a restart) and returns a client
+/// sending the session cookie and the CSRF header.
+async fn owner(server: &Server) -> reqwest::Client {
+    let (path, body) = match server.auth().setup_token() {
+        Some(token) => (
+            "/api/auth/setup",
+            json!({ "token": token, "password": PASSWORD }),
+        ),
+        None => ("/api/auth/login", json!({ "password": PASSWORD })),
+    };
+    let resp = reqwest::Client::new()
+        .post(url(server, path))
+        .header("x-requested-with", "tagmail")
+        .json(&body)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let cookie = resp.headers()["set-cookie"].to_str().unwrap();
+    let cookie = cookie.split(';').next().unwrap().to_owned();
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert("cookie", cookie.parse().unwrap());
+    headers.insert("x-requested-with", "tagmail".parse().unwrap());
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .build()
+        .unwrap()
+}
+
+const PASSWORD: &str = "correct horse battery";
 
 async fn append(server: &Server, thread: i64) -> ChangeCursor {
     let cache = server.store().cache();
@@ -127,16 +159,20 @@ impl SseReader {
     }
 }
 
-async fn open_events(server: &Server, last_event_id: Option<&str>) -> reqwest::Response {
-    let mut req = reqwest::Client::new().get(url(server, "/api/events"));
+async fn open_events(
+    server: &Server,
+    client: &reqwest::Client,
+    last_event_id: Option<&str>,
+) -> reqwest::Response {
+    let mut req = client.get(url(server, "/api/events"));
     if let Some(id) = last_event_id {
         req = req.header("last-event-id", id);
     }
     req.send().await.unwrap()
 }
 
-async fn sse(server: &Server, last_event_id: Option<&str>) -> SseReader {
-    let resp = open_events(server, last_event_id).await;
+async fn sse(server: &Server, client: &reqwest::Client, last_event_id: Option<&str>) -> SseReader {
+    let resp = open_events(server, client, last_event_id).await;
     assert_eq!(resp.status(), 200);
     assert_eq!(
         resp.headers()["content-type"].to_str().unwrap(),
@@ -162,9 +198,10 @@ async fn sse_resumes_from_last_event_id_and_410s_after_cache_wipe() {
     let dirs = Dirs::new();
     let config = dirs.config(&dirs.key());
     let server = Server::start(&config, None).await.unwrap();
+    let client = owner(&server).await;
     let epoch = server.store().cache().epoch();
 
-    let mut events = sse(&server, None).await;
+    let mut events = sse(&server, &client, None).await;
     let first = append(&server, 1).await;
     let frame = events.next().await;
     assert_eq!(frame.event, "changes");
@@ -179,7 +216,7 @@ async fn sse_resumes_from_last_event_id_and_410s_after_cache_wipe() {
 
     append(&server, 2).await;
     append(&server, 3).await;
-    let mut events = sse(&server, Some(&first.to_string())).await;
+    let mut events = sse(&server, &client, Some(&first.to_string())).await;
     let frame = events.next().await;
     assert_eq!(seqs(&frame), [2, 3], "missed changes replayed on resume");
     assert_eq!(frame.id.as_deref(), Some(format!("{epoch}:3").as_str()));
@@ -188,7 +225,9 @@ async fn sse_resumes_from_last_event_id_and_410s_after_cache_wipe() {
     assert_eq!(seqs(&events.next().await), [4]);
     drop(events);
 
-    let changes: Value = reqwest::get(url(&server, &format!("/api/changes?since={first}")))
+    let changes: Value = client
+        .get(url(&server, &format!("/api/changes?since={first}")))
+        .send()
         .await
         .unwrap()
         .json()
@@ -199,13 +238,16 @@ async fn sse_resumes_from_last_event_id_and_410s_after_cache_wipe() {
     server.shutdown().await.unwrap();
     CacheDb::wipe(&dirs.data.path().join(CACHE_DB)).unwrap();
     let server = Server::start(&config, None).await.unwrap();
+    let client = owner(&server).await;
     assert_ne!(server.store().cache().epoch(), epoch);
 
-    let resp = open_events(&server, Some(&first.to_string())).await;
+    let resp = open_events(&server, &client, Some(&first.to_string())).await;
     assert_eq!(resp.status(), 410);
     let body: Value = resp.json().await.unwrap();
     assert_eq!(body["error"], "gone");
-    let resp = reqwest::get(url(&server, &format!("/api/changes?since={first}")))
+    let resp = client
+        .get(url(&server, &format!("/api/changes?since={first}")))
+        .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 410);
@@ -218,10 +260,11 @@ async fn sse_sends_reset_on_epoch_change_and_caps_clients() {
     let server = Server::start(&dirs.config(&dirs.key()), None)
         .await
         .unwrap();
+    let client = owner(&server).await;
 
-    let mut a = sse(&server, None).await;
-    let _b = sse(&server, None).await;
-    let over = open_events(&server, None).await;
+    let mut a = sse(&server, &client, None).await;
+    let _b = sse(&server, &client, None).await;
+    let over = open_events(&server, &client, None).await;
     assert_eq!(over.status(), 503);
 
     let head = server.store().cache().head().await.unwrap();
@@ -240,7 +283,7 @@ async fn sse_sends_reset_on_epoch_change_and_caps_clients() {
     // The closed stream's slot is free again.
     let resp = tokio::time::timeout(TIMEOUT, async {
         loop {
-            let resp = open_events(&server, None).await;
+            let resp = open_events(&server, &client, None).await;
             if resp.status() != 503 {
                 return resp;
             }
@@ -261,6 +304,7 @@ async fn reads_the_inbox_index_and_rows_from_cache_db() {
     let server = Server::start(&dirs.config(&dirs.key()), None)
         .await
         .unwrap();
+    let client = owner(&server).await;
     server
         .store()
         .cache()
@@ -284,7 +328,9 @@ async fn reads_the_inbox_index_and_rows_from_cache_db() {
         .await
         .unwrap();
 
-    let resp = reqwest::get(url(&server, "/api/views/inbox/index"))
+    let resp = client
+        .get(url(&server, "/api/views/inbox/index"))
+        .send()
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
@@ -296,7 +342,9 @@ async fn reads_the_inbox_index_and_rows_from_cache_db() {
     let ids = id_index::decode(&resp.bytes().await.unwrap()).unwrap();
     assert_eq!(ids, [11, 10, 12, 9_007_199_254_740_991]);
 
-    let resp = reqwest::get(url(&server, "/api/views/mailbox%3A2/index"))
+    let resp = client
+        .get(url(&server, "/api/views/mailbox%3A2/index"))
+        .send()
         .await
         .unwrap();
     assert_eq!(
@@ -304,7 +352,9 @@ async fn reads_the_inbox_index_and_rows_from_cache_db() {
         [10]
     );
 
-    let body: Value = reqwest::get(url(&server, "/api/threads?ids=10,404,11"))
+    let body: Value = client
+        .get(url(&server, "/api/threads?ids=10,404,11"))
+        .send()
         .await
         .unwrap()
         .json()
@@ -327,14 +377,18 @@ async fn reads_the_inbox_index_and_rows_from_cache_db() {
     assert_eq!(t["labels"], json!(["work"]));
     assert_eq!(threads[1]["subject"], "later");
 
-    let status: Value = reqwest::get(url(&server, "/api/status"))
+    let status: Value = client
+        .get(url(&server, "/api/status"))
+        .send()
         .await
         .unwrap()
         .json()
         .await
         .unwrap();
     assert_eq!(status["accounts"], json!([]));
-    let version: Value = reqwest::get(url(&server, "/api/version"))
+    let version: Value = client
+        .get(url(&server, "/api/version"))
+        .send()
         .await
         .unwrap()
         .json()
@@ -350,6 +404,7 @@ async fn search_label_views_mailboxes_and_labels() {
     let server = Server::start(&dirs.config(&dirs.key()), None)
         .await
         .unwrap();
+    let client = owner(&server).await;
     server
         .store()
         .cache()
@@ -396,9 +451,9 @@ async fn search_label_views_mailboxes_and_labels() {
         .await
         .unwrap();
     let index = |view: &'static str| {
-        let u = url(&server, &format!("/api/views/{view}/index"));
+        let req = client.get(url(&server, &format!("/api/views/{view}/index")));
         async move {
-            let resp = reqwest::get(u).await.unwrap();
+            let resp = req.send().await.unwrap();
             let status = resp.status().as_u16();
             let body = resp.bytes().await.unwrap();
             (status, id_index::decode(&body).unwrap_or_default())
@@ -418,7 +473,9 @@ async fn search_label_views_mailboxes_and_labels() {
     assert_eq!(index("label%3AWORK").await, (200, vec![12, 10]));
     assert_eq!(index("search%3A%28").await.0, 400);
 
-    let mailboxes: Value = reqwest::get(url(&server, "/api/mailboxes"))
+    let mailboxes: Value = client
+        .get(url(&server, "/api/mailboxes"))
+        .send()
         .await
         .unwrap()
         .json()
@@ -427,7 +484,9 @@ async fn search_label_views_mailboxes_and_labels() {
     assert_eq!(mailboxes[2]["name"], "Entwürfe");
     assert_eq!(mailboxes[2]["specialUse"], "drafts");
     assert_eq!(mailboxes[0]["specialUse"], Value::Null);
-    let labels: Value = reqwest::get(url(&server, "/api/labels"))
+    let labels: Value = client
+        .get(url(&server, "/api/labels"))
+        .send()
         .await
         .unwrap()
         .json()
@@ -466,7 +525,7 @@ async fn accounts_store_encrypted_credentials() {
         .await
         .unwrap();
 
-    let client = reqwest::Client::new();
+    let client = owner(&server).await;
     let resp = client
         .post(url(&server, "/api/accounts"))
         .json(&new_account())
@@ -560,7 +619,7 @@ async fn refuses_to_start_without_a_key_or_on_a_public_address() {
     let mut config = dirs.config(&dirs.key());
     config.listen = "0.0.0.0:0".parse().unwrap();
     let err = Server::start(&config, None).await.err().unwrap();
-    assert!(err.to_string().contains("--insecure-no-auth"), "{err}");
+    assert!(err.to_string().contains("--public-origin"), "{err}");
 }
 
 #[tokio::test]
@@ -573,7 +632,7 @@ async fn engine_syncs_added_accounts_and_reports_errors() {
     let server = Server::start_with_engine(&config, tagmail_engine::EngineConfig::default())
         .await
         .unwrap();
-    let client = reqwest::Client::new();
+    let client = owner(&server).await;
     let mut account = new_account();
     account["imapHost"] = json!("127.0.0.1");
     account["imapPort"] = json!(port);
