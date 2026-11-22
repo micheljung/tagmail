@@ -4,6 +4,7 @@
 #![cfg(feature = "dovecot-tests")]
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::task::{Context, Poll};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -36,7 +37,10 @@ async fn fresh_mailbox(s: &mut TokioSession, test: &str) -> String {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let name = format!("it-{test}-{nanos}");
+    // Clock resolution alone collides when one test creates two mailboxes.
+    static SEQ: AtomicU32 = AtomicU32::new(0);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let name = format!("it-{test}-{nanos}-{seq}");
     s.create_mailbox(&name).await.expect("create");
     name
 }
