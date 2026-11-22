@@ -48,6 +48,8 @@ deny = [
   { crate = "openssl-sys", reason = "OpenSSL-free build: use rustls (ring) and web-push-native, not web-push" },
   { crate = "native-tls", reason = "Links OpenSSL on Linux: disable default features (lettre, reqwest) and use rustls" },
   { crate = "aws-lc-sys", reason = "rustls crypto provider is ring: use reqwest rustls-no-provider, lettre ring" },
+  # RUSTSEC-2023-0071 is ignored above only for webauthn-rs's verify-only use
+  { crate = "rsa", wrappers = ["crypto-glue"], reason = "RSA only via webauthn-rs (crypto-glue), see RUSTSEC-2023-0071 above" },
 ]
 
 [sources]
