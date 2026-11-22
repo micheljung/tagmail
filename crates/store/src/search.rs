@@ -6,7 +6,9 @@
 //! pushed into FTS5, so the planner probes the `MATCH` with a limit: a
 //! narrow `MATCH` drives and the filter is checked per hit; a broad `MATCH`
 //! with a narrow filter evaluates the filter to a rowid set first and
-//! intersects it via `rowid IN`. Results are threads, newest first.
+//! intersects it with the `MATCH` result, which SQLite builds once (an FTS5
+//! `rowid IN` lookup would rescan the doclist per rowid). Results are
+//! threads, newest first.
 
 use rusqlite::types::Value;
 use rusqlite::{Connection, params_from_iter};
@@ -47,7 +49,7 @@ pub enum Strategy {
     FilterOnly,
     /// `MATCH` first, filter joined on rowid.
     MatchFirst,
-    /// Filter rowid set first, intersected with `MATCH`.
+    /// Filter rowid set first, intersected with the `MATCH` set.
     FilterFirst,
 }
 
@@ -138,13 +140,12 @@ pub fn search_threads_with(
             } else {
                 let ids = filter_ids(conn, &filter, thresholds.narrow_filter)?;
                 if ids.len() <= thresholds.narrow_filter {
-                    driver.text.push_str(
-                        "SELECT rowid FROM message_fts WHERE message_fts MATCH ? \
-                         AND rowid IN (SELECT value FROM json_each(?))",
-                    );
-                    driver.params.push(Value::Text(expr.clone()));
+                    driver.text.push_str("SELECT value FROM json_each(?)");
                     driver.params.push(Value::Text(json_ids(&ids)));
                     filter = Sql::default();
+                    filter.text.push_str("m.id IN (");
+                    filter.push_match(expr);
+                    filter.text.push(')');
                     Strategy::FilterFirst
                 } else {
                     driver.push_match(expr);
