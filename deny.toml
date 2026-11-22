@@ -25,6 +25,10 @@ allow = [
   "Unlicense",
   "Zlib",
 ]
+exceptions = [
+  # Mozilla root certificates as data
+  { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+]
 
 [bans]
 multiple-versions = "warn"
