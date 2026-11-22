@@ -1,9 +1,9 @@
 mod harness;
 mod seed;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
 
 /// Development tasks for the Tagmail workspace.
@@ -38,6 +38,12 @@ enum Command {
     Stalwart {
         #[command(subcommand)]
         action: ServerAction,
+    },
+    /// Regenerate the TypeScript API types in packages/api-types
+    GenTsTypes {
+        /// Fail if the committed bindings are stale instead of writing
+        #[arg(long)]
+        check: bool,
     },
 }
 
@@ -116,6 +122,20 @@ fn main() -> Result<()> {
             ServerAction::Up => harness::up(&[harness::STALWART])?,
             ServerAction::Down => harness::down(&[harness::STALWART])?,
         },
+        Command::GenTsTypes { check } => {
+            let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join(tagmail_api_core::ts::OUT_DIR);
+            if check {
+                let drifted = tagmail_api_core::ts::drift(&dir)?;
+                if !drifted.is_empty() {
+                    bail!("stale TypeScript bindings {drifted:?}: run `cargo xtask gen-ts-types`");
+                }
+            } else {
+                tagmail_api_core::ts::write(&dir)?;
+                println!("wrote {}", dir.display());
+            }
+        }
     }
     Ok(())
 }
