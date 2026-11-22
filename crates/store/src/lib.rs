@@ -10,6 +10,7 @@ pub mod error;
 pub mod fts;
 mod migrations;
 mod readers;
+pub mod search;
 mod writer;
 
 pub use blobs::{BlobKey, BlobStore, DEFAULT_RAW_CAP, RawWriter, TEXT_CAP};

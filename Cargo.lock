@@ -1641,11 +1641,13 @@ version = "0.0.0"
 dependencies = [
  "chacha20poly1305",
  "hex",
+ "proptest",
  "rusqlite",
  "sha2",
  "tagmail-core",
  "tempfile",
  "thiserror",
+ "time",
  "tokio",
  "tracing",
  "zeroize",
