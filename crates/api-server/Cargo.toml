@@ -26,6 +26,8 @@ getrandom.workspace = true
 hex.workspace = true
 ipnet.workspace = true
 percent-encoding.workspace = true
+reqwest = { workspace = true, features = ["rustls-no-provider"] }
+rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -39,10 +41,10 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
 webauthn-rs.workspace = true
+webpki-roots.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
 passkey.workspace = true
-reqwest.workspace = true
 tempfile.workspace = true

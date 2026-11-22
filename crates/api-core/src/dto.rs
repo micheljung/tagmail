@@ -256,3 +256,103 @@ pub struct LabelDto {
     pub name: String,
     pub color: Option<String>,
 }
+
+/// What a message body was written as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum BodyKind {
+    Html,
+    /// Plain text, rendered as escaped HTML with links.
+    Text,
+    None,
+}
+
+/// A downloadable or inline part of a message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PartDto {
+    /// Part number within the message.
+    pub id: u32,
+    pub content_type: String,
+    pub name: Option<String>,
+    /// Decoded size in bytes.
+    pub size: u64,
+    pub content_id: Option<String>,
+    /// Shown inside the body rather than listed as an attachment.
+    pub inline: bool,
+    /// Signed `/api/parts/{token}` URL, valid for 10 minutes; append
+    /// `?download=1` to force a download.
+    pub url: String,
+}
+
+/// `GET /api/messages/{id}`. The body itself is served by
+/// `GET /api/messages/{id}/render`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct MessageDto {
+    pub id: i64,
+    pub thread_id: i64,
+    pub account_id: i64,
+    pub subject: Option<String>,
+    pub from: Vec<AddressDto>,
+    pub to: Vec<AddressDto>,
+    pub cc: Vec<AddressDto>,
+    pub reply_to: Vec<AddressDto>,
+    /// Unix seconds.
+    pub date: i64,
+    /// `Message-ID` without angle brackets.
+    pub message_id: Option<String>,
+    pub unread: bool,
+    pub starred: bool,
+    pub body: BodyKind,
+    /// Remote images in the body; they load only through the image proxy
+    /// when `imagesAllowed` or the render URL has `images=1`.
+    pub remote_images: u32,
+    /// A sender is on the "always show images" list.
+    pub images_allowed: bool,
+    pub parts: Vec<PartDto>,
+}
+
+/// One message of `GET /api/threads/{id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadMessageDto {
+    pub id: i64,
+    pub from: Option<AddressDto>,
+    pub to: Vec<AddressDto>,
+    pub cc: Vec<AddressDto>,
+    /// Unix seconds.
+    pub date: i64,
+    pub subject: Option<String>,
+    pub snippet: String,
+    pub unread: bool,
+    pub starred: bool,
+    pub has_attachment: bool,
+    /// `null` until the raw message is cached (first open).
+    pub has_remote_images: Option<bool>,
+}
+
+/// `GET /api/threads/{id}`: messages oldest first. A merged thread id
+/// resolves to the thread it was merged into (`thread.id` differs).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadDetailDto {
+    pub thread: ThreadRowDto,
+    pub messages: Vec<ThreadMessageDto>,
+}
+
+/// `GET /api/image-senders` and the response of `POST`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageSendersDto {
+    /// Lowercased addresses whose remote images always load.
+    pub addresses: Vec<String>,
+}
+
+/// `POST /api/image-senders` body.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ImageSenderDto {
+    pub address: String,
+    pub allow: bool,
+}

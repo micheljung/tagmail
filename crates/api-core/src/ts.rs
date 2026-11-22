@@ -34,6 +34,7 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<ApiErrorDto>(&cfg, &mut files)?;
     file::<ApiVersion>(&cfg, &mut files)?;
     file::<AuthVia>(&cfg, &mut files)?;
+    file::<BodyKind>(&cfg, &mut files)?;
     file::<ChangeDto>(&cfg, &mut files)?;
     file::<ChangeOpDto>(&cfg, &mut files)?;
     file::<ChangesDto>(&cfg, &mut files)?;
@@ -42,13 +43,17 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<DeviceTokenDto>(&cfg, &mut files)?;
     file::<DevicesDto>(&cfg, &mut files)?;
     file::<EntityDto>(&cfg, &mut files)?;
+    file::<ImageSenderDto>(&cfg, &mut files)?;
+    file::<ImageSendersDto>(&cfg, &mut files)?;
     file::<LabelDto>(&cfg, &mut files)?;
     file::<LoginDto>(&cfg, &mut files)?;
     file::<MailboxDto>(&cfg, &mut files)?;
+    file::<MessageDto>(&cfg, &mut files)?;
     file::<NewAccountDto>(&cfg, &mut files)?;
     file::<NewPasskeyDto>(&cfg, &mut files)?;
     file::<PairingCodeDto>(&cfg, &mut files)?;
     file::<PairingExchangeDto>(&cfg, &mut files)?;
+    file::<PartDto>(&cfg, &mut files)?;
     file::<PasskeyChallengeDto>(&cfg, &mut files)?;
     file::<PasskeyDto>(&cfg, &mut files)?;
     file::<PasskeyResponseDto>(&cfg, &mut files)?;
@@ -59,6 +64,8 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<SpecialUseDto>(&cfg, &mut files)?;
     file::<StatusDto>(&cfg, &mut files)?;
     file::<SyncPhase>(&cfg, &mut files)?;
+    file::<ThreadDetailDto>(&cfg, &mut files)?;
+    file::<ThreadMessageDto>(&cfg, &mut files)?;
     file::<ThreadRowDto>(&cfg, &mut files)?;
     file::<ThreadsDto>(&cfg, &mut files)?;
     file::<TlsMode>(&cfg, &mut files)?;

@@ -5,6 +5,7 @@ pub mod auth;
 pub mod credentials;
 pub mod http;
 mod pairing;
+pub mod proxy;
 pub mod ratelimit;
 pub mod session;
 pub mod sqlite_store;
@@ -28,6 +29,7 @@ use tagmail_store::MasterKey;
 
 use crate::auth::{Auth, AuthConfig};
 use crate::credentials::{KeyWarning, load_master_key};
+use crate::proxy::ImageFetcher;
 use crate::sqlite_store::SqliteStore;
 use crate::web::WebDir;
 
@@ -91,6 +93,8 @@ impl Server {
 
     async fn start_with(config: &Config, sync: Sync) -> anyhow::Result<Server> {
         auth::check_listen(config.listen, &config.auth)?;
+        // Err means a provider is already installed, which is all we need.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         std::fs::create_dir_all(&config.data_dir)
             .with_context(|| format!("creating data directory {}", config.data_dir.display()))?;
         let (master, warnings) =
@@ -109,15 +113,11 @@ impl Server {
         let (registry, engine) = match sync {
             Sync::Registry(registry) => (registry, None),
             Sync::Engine(engine_config) => {
-                let blobs_dir = config.data_dir.join(BLOBS_DIR);
-                let blobs = tokio::task::spawn_blocking(move || BlobStore::open(&blobs_dir))
-                    .await?
-                    .context("opening the blob store")?;
                 let stores = Stores {
                     config: store.config().clone(),
                     vault: store.vault().clone(),
                     cache: store.cache().clone(),
-                    blobs: Arc::new(blobs),
+                    blobs: store.blobs().clone(),
                     feed: feed.clone(),
                 };
                 if config.insecure_plain_imap {
@@ -146,7 +146,10 @@ impl Server {
         let auth = Arc::new(Auth::new(store.config().clone(), &config.auth, addr.port()).await?);
         let (stop, shutdown) = watch::channel(false);
         let state = http::AppState {
-            api: Arc::new(Api::new(store.clone(), registry)),
+            api: Arc::new(
+                Api::new(store.clone(), registry)
+                    .with_image_proxy(Arc::new(ImageFetcher::with_webpki_roots()?)),
+            ),
             events: feed.clone() as Arc<dyn EventSource>,
             sse_slots: Arc::new(Semaphore::new(config.max_sse_clients)),
             shutdown: shutdown.clone(),
@@ -224,13 +227,15 @@ impl Server {
 async fn open_store(data_dir: &Path, master: &MasterKey) -> anyhow::Result<SqliteStore> {
     let config_path = data_dir.join(CONFIG_DB);
     let cache_path = data_dir.join(CACHE_DB);
-    let (config, cache) = tokio::task::spawn_blocking(move || {
+    let blobs_dir = data_dir.join(BLOBS_DIR);
+    let (config, cache, blobs) = tokio::task::spawn_blocking(move || {
         let config = ConfigDb::open(&config_path)
             .with_context(|| format!("opening {}", config_path.display()))?;
         let cache = CacheDb::open(&cache_path)
             .with_context(|| format!("opening {}", cache_path.display()))?;
-        anyhow::Ok((config, cache))
+        let blobs = BlobStore::open(&blobs_dir).context("opening the blob store")?;
+        anyhow::Ok((config, cache, blobs))
     })
     .await??;
-    Ok(SqliteStore::open(config, cache, master).await?)
+    Ok(SqliteStore::open(config, cache, blobs, master).await?)
 }

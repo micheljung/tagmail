@@ -11,13 +11,18 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+ammonia.workspace = true
+base64.workspace = true
 form_urlencoded.workspace = true
+hmac.workspace = true
+mail-parser = { workspace = true, features = ["full_encoding"] }
 percent-encoding.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tagmail-core.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync", "time"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing.workspace = true
 ts-rs.workspace = true
 zeroize.workspace = true

@@ -6,13 +6,16 @@ use tagmail_api_core::dto::{
     ChangeDto, ChangeOpDto, EntityDto, LabelDto, MailboxDto, SpecialUseDto, ThreadRowDto,
 };
 use tagmail_api_core::id_index;
+use tagmail_api_core::signing::UrlKeys;
 use tagmail_api_core::{
-    AccountRegistry, AccountSummary, Api, ChangeFeed, ChangePage, Event, EventSession, Method,
-    NewAccount, OpenError, Request, Response, RuntimeStatus, Store, StoreResult, ThreadRows, View,
-    ViewIndex,
+    AccountRegistry, AccountSummary, Api, BoxFuture, ChangeFeed, ChangePage, Event, EventSession,
+    FetchRawError, MessageRecord, Method, NewAccount, OpenError, Request, Response, RuntimeStatus,
+    Store, StoreResult, ThreadDetail, ThreadRows, View, ViewIndex,
 };
 use tagmail_core::query::parse;
-use tagmail_core::{AccountId, CacheEpoch, ChangeCursor, LabelKey, MailboxRowId, ThreadId};
+use tagmail_core::{
+    AccountId, CacheEpoch, ChangeCursor, LabelKey, MailboxRowId, MessageRowId, ThreadId,
+};
 
 const EPOCH: CacheEpoch = CacheEpoch(0xabc);
 
@@ -153,6 +156,30 @@ impl Store for MemStore {
         ));
         Ok(id)
     }
+
+    async fn message(&self, _: MessageRowId) -> StoreResult<Option<MessageRecord>> {
+        Ok(None)
+    }
+
+    async fn thread_detail(&self, _: ThreadId) -> StoreResult<Option<ThreadDetail>> {
+        Ok(None)
+    }
+
+    async fn raw_message(&self, _: MessageRowId) -> StoreResult<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    async fn url_keys(&self) -> StoreResult<UrlKeys> {
+        Err("no keys".into())
+    }
+
+    async fn image_senders(&self) -> StoreResult<Vec<String>> {
+        Ok(Vec::new())
+    }
+
+    async fn set_image_sender(&self, _: String, _: bool) -> StoreResult<()> {
+        Err("read-only".into())
+    }
 }
 
 #[derive(Default)]
@@ -171,6 +198,10 @@ impl AccountRegistry for Registry {
             capabilities: vec!["QRESYNC".to_owned()],
             degraded: vec![],
         })
+    }
+
+    fn fetch_raw(&self, _: AccountId, _: MessageRowId) -> BoxFuture<Result<(), FetchRawError>> {
+        Box::pin(async { Err(FetchRawError::Unavailable("test".to_owned())) })
     }
 }
 

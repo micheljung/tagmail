@@ -9,22 +9,28 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use tagmail_api_core::{AccountRegistry, ChangeFeed, RuntimeStatus};
-use tagmail_core::AccountId;
+use tagmail_api_core::{AccountRegistry, BoxFuture, ChangeFeed, FetchRawError, RuntimeStatus};
+use tagmail_core::{AccountId, MessageRowId};
 use tagmail_imap::{
     Capabilities, CapabilityOverride, Connector, IdleStop, ImapSession, Password, Pool, PoolConfig,
     Pooled, Security, SelectOptions, ServerConfig,
 };
 use tagmail_store::rusqlite::OptionalExtension;
-use tagmail_store::{BlobStore, CacheDb, ConfigDb, Sealed, Vault};
-use tokio::sync::{Notify, watch};
+use tagmail_store::{BlobStore, CacheDb, ConfigDb, DEFAULT_RAW_CAP, Sealed, Vault};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::cache::{MailboxRow, SyncState};
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
+use crate::raw;
 use crate::sync::{self, Progress};
+
+/// Compressed size of the raw message cache before LRU eviction.
+pub const DEFAULT_RAW_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
+/// Queued on-open fetches per account.
+const OPEN_QUEUE: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -39,6 +45,11 @@ pub struct EngineConfig {
     /// Authentication backoff and pool settings; `max_connections` comes
     /// from the account.
     pub pool: PoolConfig,
+    /// Largest raw message fetched on open.
+    pub raw_cap: u64,
+    /// The raw cache is trimmed to this many compressed bytes after each
+    /// fetch.
+    pub raw_cache_bytes: u64,
 }
 
 impl Default for EngineConfig {
@@ -49,6 +60,8 @@ impl Default for EngineConfig {
             retry_min: Duration::from_secs(1),
             retry_max: Duration::from_secs(60),
             pool: PoolConfig::default(),
+            raw_cap: DEFAULT_RAW_CAP,
+            raw_cache_bytes: DEFAULT_RAW_CACHE_BYTES,
         }
     }
 }
@@ -164,10 +177,27 @@ fn update(status: &Status, f: impl FnOnce(&mut RuntimeStatus)) {
     f(&mut status.lock().unwrap_or_else(PoisonError::into_inner));
 }
 
+struct OpenRequest {
+    message: MessageRowId,
+    reply: oneshot::Sender<Result<(), FetchRawError>>,
+}
+
+/// The account worker's queue of on-open fetches; the worker serves it
+/// between sync steps, ahead of other work.
+#[derive(Clone)]
+struct Opens {
+    tx: mpsc::Sender<OpenRequest>,
+    /// Wakes the worker from its wait or inline IDLE.
+    wake: Arc<Notify>,
+    /// Requests are queued; pauses non-INBOX initial sync between windows.
+    pending: Arc<AtomicBool>,
+}
+
 struct Handle {
     status: Status,
     stop: watch::Sender<bool>,
     task: JoinHandle<()>,
+    opens: Opens,
 }
 
 struct Inner<F> {
@@ -230,11 +260,28 @@ impl<F: ConnectorFactory> Engine<F> {
         }
         let status = Status::default();
         let (stop, stopped) = watch::channel(false);
-        let task = self
-            .inner
-            .runtime
-            .spawn(run(self.inner.clone(), id, status.clone(), stopped));
-        accounts.insert(id, Handle { status, stop, task });
+        let (tx, rx) = mpsc::channel(OPEN_QUEUE);
+        let opens = Opens {
+            tx,
+            wake: Arc::new(Notify::new()),
+            pending: Arc::new(AtomicBool::new(false)),
+        };
+        let task = self.inner.runtime.spawn(run(
+            self.inner.clone(),
+            id,
+            status.clone(),
+            stopped,
+            (opens.clone(), rx),
+        ));
+        accounts.insert(
+            id,
+            Handle {
+                status,
+                stop,
+                task,
+                opens,
+            },
+        );
     }
 
     /// Stops all accounts and waits for their tasks.
@@ -279,6 +326,34 @@ impl<F: ConnectorFactory> AccountRegistry for Engine<F> {
             .clone();
         Some(status)
     }
+
+    fn fetch_raw(
+        &self,
+        account: AccountId,
+        message: MessageRowId,
+    ) -> BoxFuture<Result<(), FetchRawError>> {
+        let opens = self
+            .inner
+            .accounts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&account)
+            .filter(|h| !h.task.is_finished())
+            .map(|h| h.opens.clone());
+        Box::pin(async move {
+            let stopped = || FetchRawError::Unavailable("the account is not syncing".to_owned());
+            let opens = opens.ok_or_else(stopped)?;
+            let (reply, answer) = oneshot::channel();
+            opens
+                .tx
+                .send(OpenRequest { message, reply })
+                .await
+                .map_err(|_| stopped())?;
+            opens.pending.store(true, Ordering::SeqCst);
+            opens.wake.notify_one();
+            answer.await.unwrap_or_else(|_| Err(stopped()))
+        })
+    }
 }
 
 /// `base` scaled by a random factor in [0.5, 1.5).
@@ -292,6 +367,7 @@ async fn run<F: ConnectorFactory>(
     id: AccountId,
     status: Status,
     mut stop: watch::Receiver<bool>,
+    (opens, mut queue): (Opens, mpsc::Receiver<OpenRequest>),
 ) {
     let settings = match load_account(&inner.stores, id).await {
         Ok(s) => s,
@@ -318,7 +394,7 @@ async fn run<F: ConnectorFactory>(
     let mut retry = inner.config.retry_min;
     loop {
         let result = tokio::select! {
-            r = account_loop(&inner.config, &pool, &ctx, &status, &mut retry) => r,
+            r = account_loop(&inner.config, &pool, &ctx, &status, &mut retry, &opens, &mut queue) => r,
             _ = stop.wait_for(|s| *s) => return,
         };
         let wait = match result {
@@ -344,11 +420,56 @@ async fn run<F: ConnectorFactory>(
                 wait
             }
         };
-        tokio::select! {
-            () = tokio::time::sleep(wait) => {}
-            _ = stop.wait_for(|s| *s) => return,
+        let until = Instant::now() + wait;
+        loop {
+            tokio::select! {
+                () = tokio::time::sleep_until(until) => break,
+                _ = stop.wait_for(|s| *s) => return,
+                Some(req) = queue.recv() => {
+                    let why = status
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .last_error
+                        .clone()
+                        .unwrap_or_else(|| "reconnecting".to_owned());
+                    let _ = req.reply.send(Err(FetchRawError::Unavailable(why)));
+                }
+            }
         }
     }
+}
+
+/// Serves the queued on-open fetches.
+async fn serve_opens<C: Connector>(
+    config: &EngineConfig,
+    worker: &mut Pooled<C>,
+    ctx: &Ctx,
+    opens: &Opens,
+    queue: &mut mpsc::Receiver<OpenRequest>,
+) -> Result<()> {
+    opens.pending.store(false, Ordering::SeqCst);
+    while let Ok(req) = queue.try_recv() {
+        let result = raw::fetch_raw(
+            &mut **worker,
+            ctx,
+            req.message.0,
+            config.raw_cap,
+            config.raw_cache_bytes,
+        )
+        .await;
+        match result {
+            Ok(answer) => {
+                let _ = req.reply.send(answer);
+            }
+            Err(e) => {
+                let _ = req
+                    .reply
+                    .send(Err(FetchRawError::Unavailable(e.to_string())));
+                return Err(e);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn capability_names(caps: &Capabilities) -> Vec<String> {
@@ -440,10 +561,13 @@ async fn sync_one<C: Connector>(
     ctx: &Ctx,
     row: &MailboxRow,
     dirty: &Arc<AtomicBool>,
+    opens: &Opens,
 ) -> Result<Progress> {
     let flag = dirty.clone();
+    let pending = opens.pending.clone();
     let inbox = row.is_inbox();
-    let interrupt = move || !inbox && flag.load(Ordering::SeqCst);
+    let interrupt =
+        move || !inbox && (flag.load(Ordering::SeqCst) || pending.load(Ordering::SeqCst));
     sync::sync_mailbox(&mut **worker, ctx, row, &interrupt).await
 }
 
@@ -455,6 +579,8 @@ async fn account_loop<C: Connector>(
     ctx: &Ctx,
     status: &Status,
     retry: &mut Duration,
+    opens: &Opens,
+    queue: &mut mpsc::Receiver<OpenRequest>,
 ) -> Result<()> {
     let mut worker = pool.acquire().await?;
     let caps = worker.capabilities().clone();
@@ -478,6 +604,7 @@ async fn account_loop<C: Connector>(
     let mut text_skip = BTreeSet::new();
     let mut settled = false;
     loop {
+        serve_opens(config, &mut worker, ctx, opens, queue).await?;
         let inbox_live = rows
             .iter()
             .find(|r| r.is_inbox() && r.state == SyncState::Live)
@@ -485,20 +612,20 @@ async fn account_loop<C: Connector>(
         if let Some(inbox) = inbox_live
             && dirty.swap(false, Ordering::SeqCst)
         {
-            sync_one(&mut worker, ctx, &inbox, &dirty).await?;
+            sync_one(&mut worker, ctx, &inbox, &dirty, opens).await?;
             rows = sync::ordered(ctx).await?;
             continue;
         }
         if let Some(row) = rows.iter().find(|r| r.state != SyncState::Live).cloned() {
             settled = false;
-            sync_one(&mut worker, ctx, &row, &dirty).await?;
+            sync_one(&mut worker, ctx, &row, &dirty, opens).await?;
             rows = sync::ordered(ctx).await?;
             continue;
         }
         if Instant::now() >= next_poll {
             rows = sync::list(&mut *worker, ctx).await?;
             for row in rows.clone() {
-                sync_one(&mut worker, ctx, &row, &dirty).await?;
+                sync_one(&mut worker, ctx, &row, &dirty, opens).await?;
             }
             sync::purge(ctx).await?;
             rows = sync::ordered(ctx).await?;
@@ -531,8 +658,12 @@ async fn account_loop<C: Connector>(
             let deadline = Arc::new(Notify::new());
             let timer = {
                 let deadline = deadline.clone();
+                let open = opens.wake.clone();
                 AbortOnDrop(tokio::spawn(async move {
-                    tokio::time::sleep_until(next_poll).await;
+                    tokio::select! {
+                        () = tokio::time::sleep_until(next_poll) => {}
+                        () = open.notified() => {}
+                    }
                     deadline.notify_one();
                 }))
             };
@@ -545,6 +676,7 @@ async fn account_loop<C: Connector>(
         } else {
             tokio::select! {
                 () = wake.notified() => {}
+                () = opens.wake.notified() => {}
                 () = tokio::time::sleep_until(next_poll) => {}
             }
         }
@@ -564,6 +696,7 @@ mod tests {
     use crate::testutil::{TestCache, open};
 
     const CAPS: &[&str] = &["IMAP4rev1", "ENABLE", "IDLE", "CONDSTORE", "QRESYNC"];
+    const RAW_CAP: u64 = 4096;
 
     struct Fixture {
         engine: Engine<FakeConnector>,
@@ -608,6 +741,7 @@ mod tests {
                 auth_backoff_base: Duration::from_secs(60),
                 ..PoolConfig::default()
             },
+            raw_cap: RAW_CAP,
             ..EngineConfig::default()
         };
         Fixture {
@@ -732,5 +866,82 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(lock(&srv).logins, 1, "no login retries during the backoff");
         f.engine.shutdown().await;
+    }
+
+    async fn message_id(t: &TestCache, msgid: &'static str) -> i64 {
+        t.query("SELECT id, msgid_hdr FROM message", |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })
+        .await
+        .into_iter()
+        .find(|(_, m)| m == msgid)
+        .unwrap()
+        .0
+    }
+
+    #[tokio::test]
+    async fn opening_a_message_fetches_its_raw_body() {
+        for max_connections in [2, 1] {
+            let srv = server(CAPS);
+            lock(&srv).append(
+                "INBOX",
+                FakeMsg::new("o1@x", "Open me", "ann@x", "me@x", 1_790_000_000),
+            );
+            let mut big = FakeMsg::new("big@x", "Big", "ann@x", "me@x", 1_790_000_001);
+            big.body = "x".repeat(RAW_CAP as usize);
+            lock(&srv).append("Archive", big);
+            let f = fixture(&srv, max_connections, Duration::from_secs(3600)).await;
+
+            assert_eq!(
+                f.engine.fetch_raw(AccountId(1), MessageRowId(1)).await,
+                Err(FetchRawError::Unavailable(
+                    "the account is not syncing".to_owned()
+                ))
+            );
+            f.engine.start_all().await.unwrap();
+            eventually("initial sync", || all_live(&f.cache)).await;
+
+            let id = message_id(&f.cache, "o1@x").await;
+            let answer = tokio::time::timeout(
+                Duration::from_secs(10),
+                f.engine.fetch_raw(AccountId(1), MessageRowId(id)),
+            )
+            .await
+            .expect("served while the worker waits or IDLEs");
+            assert_eq!(answer, Ok(()));
+            let email_id = f
+                .cache
+                .query("SELECT id, email_id FROM message", |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })
+                .await
+                .into_iter()
+                .find(|(m, _)| *m == id)
+                .unwrap()
+                .1;
+            let key = tagmail_store::BlobKey::for_message(
+                AccountId(1),
+                &tagmail_core::EmailId::parse(&email_id).unwrap(),
+            );
+            let mut raw = String::new();
+            std::io::Read::read_to_string(
+                &mut f.cache.ctx.blobs.open_raw(&key).unwrap().unwrap(),
+                &mut raw,
+            )
+            .unwrap();
+            assert!(raw.contains("Subject: Open me\r\n"), "{raw}");
+            assert!(raw.ends_with("Body of o1@x"), "{raw}");
+
+            let big = message_id(&f.cache, "big@x").await;
+            assert_eq!(
+                f.engine.fetch_raw(AccountId(1), MessageRowId(big)).await,
+                Err(FetchRawError::TooLarge)
+            );
+            assert_eq!(
+                f.engine.fetch_raw(AccountId(1), MessageRowId(9999)).await,
+                Err(FetchRawError::NotFound)
+            );
+            f.engine.shutdown().await;
+        }
     }
 }

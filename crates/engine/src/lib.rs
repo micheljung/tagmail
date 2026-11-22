@@ -8,6 +8,7 @@ mod error;
 #[cfg(test)]
 mod fake;
 mod message;
+mod raw;
 mod supervisor;
 mod sync;
 #[cfg(test)]

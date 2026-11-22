@@ -4,13 +4,15 @@
 
 use std::fmt;
 use std::future::Future;
+use std::pin::Pin;
 use std::str::FromStr;
 
 use tagmail_core::query::{self, Query, QueryError};
-use tagmail_core::{AccountId, ChangeCursor, LabelKey, MailboxRowId, ThreadId};
+use tagmail_core::{AccountId, ChangeCursor, LabelKey, MailboxRowId, MessageRowId, ThreadId};
 use zeroize::Zeroizing;
 
-use crate::dto::{ChangeDto, LabelDto, MailboxDto, ThreadRowDto, TlsMode};
+use crate::dto::{AddressDto, ChangeDto, LabelDto, MailboxDto, ThreadRowDto, TlsMode};
+use crate::signing::UrlKeys;
 
 pub type StoreError = Box<dyn std::error::Error + Send + Sync>;
 pub type StoreResult<T> = Result<T, StoreError>;
@@ -123,6 +125,78 @@ pub struct NewAccount {
     pub max_connections: u8,
 }
 
+/// A message's cached metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageRecord {
+    pub id: MessageRowId,
+    pub account_id: AccountId,
+    pub thread_id: ThreadId,
+    /// Unix seconds.
+    pub date: i64,
+    pub subject: Option<String>,
+    pub snippet: String,
+    pub from: Vec<AddressDto>,
+    pub to: Vec<AddressDto>,
+    pub cc: Vec<AddressDto>,
+    pub unread: bool,
+    pub starred: bool,
+    pub has_attachment: bool,
+}
+
+/// A thread with its live messages, oldest first.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ThreadDetail {
+    pub row: ThreadRowDto,
+    pub messages: Vec<MessageRecord>,
+}
+
+/// Why a raw message could not be fetched on open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FetchRawError {
+    /// The server no longer has the message.
+    NotFound,
+    /// Larger than the raw size cap.
+    TooLarge,
+    /// No connection, the account is not syncing, or the fetch failed.
+    Unavailable(String),
+}
+
+impl fmt::Display for FetchRawError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            FetchRawError::NotFound => f.write_str("the message is gone from the server"),
+            FetchRawError::TooLarge => f.write_str("the message is too large to display"),
+            FetchRawError::Unavailable(why) => write!(f, "the message is unavailable: {why}"),
+        }
+    }
+}
+
+pub type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
+
+/// A remote image fetched by the image proxy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxiedImage {
+    /// Sniffed from the bytes, not taken from the origin.
+    pub content_type: &'static str,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProxyError {
+    /// The URL, a redirect or a resolved address is not allowed.
+    Blocked(String),
+    /// The origin failed or answered with something that is not an image.
+    Upstream(String),
+    TooLarge,
+    Timeout,
+}
+
+/// Fetches remote images for display (`/api/proxy/img/{token}`); the
+/// server's implementation guards against SSRF.
+pub trait ImageProxy: Send + Sync + 'static {
+    fn fetch(&self, url: String) -> BoxFuture<Result<ProxiedImage, ProxyError>>;
+}
+
 /// Read access to mail data and the change log, plus account persistence.
 pub trait Store: Send + Sync + 'static {
     /// Cursor of the newest change.
@@ -156,6 +230,40 @@ pub trait Store: Send + Sync + 'static {
         &self,
         account: NewAccount,
     ) -> impl Future<Output = StoreResult<AccountId>> + Send;
+
+    /// A live (not tombstoned) message.
+    fn message(
+        &self,
+        id: MessageRowId,
+    ) -> impl Future<Output = StoreResult<Option<MessageRecord>>> + Send;
+
+    /// A thread, following merges to the surviving thread; `None` if it
+    /// does not exist or has no live messages.
+    fn thread_detail(
+        &self,
+        id: ThreadId,
+    ) -> impl Future<Output = StoreResult<Option<ThreadDetail>>> + Send;
+
+    /// The cached RFC 822 message; `None` if it was never fetched or has
+    /// been evicted.
+    fn raw_message(
+        &self,
+        id: MessageRowId,
+    ) -> impl Future<Output = StoreResult<Option<Vec<u8>>>> + Send;
+
+    /// Keys for signed part and proxy URLs, created on first use and
+    /// rotated by the store when due.
+    fn url_keys(&self) -> impl Future<Output = StoreResult<UrlKeys>> + Send;
+
+    /// Lowercased addresses whose remote images always load.
+    fn image_senders(&self) -> impl Future<Output = StoreResult<Vec<String>>> + Send;
+
+    /// Adds or removes a lowercased address.
+    fn set_image_sender(
+        &self,
+        address: String,
+        allow: bool,
+    ) -> impl Future<Output = StoreResult<()>> + Send;
 }
 
 /// Engine state that only lives in memory.
@@ -176,6 +284,14 @@ pub trait AccountRegistry: Send + Sync + 'static {
 
     /// `None` if the engine has not run the account yet.
     fn runtime_status(&self, id: AccountId) -> Option<RuntimeStatus>;
+
+    /// Fetches a message's raw body from the server into the store's raw
+    /// cache, so that [`Store::raw_message`] returns it.
+    fn fetch_raw(
+        &self,
+        account: AccountId,
+        message: MessageRowId,
+    ) -> BoxFuture<Result<(), FetchRawError>>;
 }
 
 #[cfg(test)]

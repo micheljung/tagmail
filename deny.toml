@@ -33,6 +33,9 @@ allow = [
 exceptions = [
   # Mozilla root certificates as data
   { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+  # The same roots as certificates; rustls-platform-verifier (reqwest) on
+  # targets without a system store
+  { crate = "webpki-root-certs", allow = ["CDLA-Permissive-2.0"] },
 ]
 
 [bans]

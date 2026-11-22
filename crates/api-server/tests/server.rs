@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tagmail_api_core::{AccountRegistry, RuntimeStatus, id_index};
+use tagmail_api_core::{AccountRegistry, BoxFuture, FetchRawError, RuntimeStatus, id_index};
 use tagmail_api_server::{CACHE_DB, CONFIG_DB, Config, Server};
-use tagmail_core::{AccountId, ChangeCursor};
+use tagmail_core::{AccountId, ChangeCursor, MessageRowId};
 use tagmail_store::{CacheDb, ChangeOp, Entity, NewChange, changes};
 use tempfile::TempDir;
 
@@ -54,6 +54,14 @@ impl AccountRegistry for Registry {
 
     fn runtime_status(&self, _: AccountId) -> Option<RuntimeStatus> {
         None
+    }
+
+    fn fetch_raw(&self, _: AccountId, _: MessageRowId) -> BoxFuture<Result<(), FetchRawError>> {
+        Box::pin(async {
+            Err(FetchRawError::Unavailable(
+                "no engine in this test".to_owned(),
+            ))
+        })
     }
 }
 

@@ -1,32 +1,49 @@
 //! [`Store`] over the server's `config.db` and `cache.db`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Read;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tagmail_api_core::dto::{
     AddressDto, ChangeDto, ChangeOpDto, EntityDto, LabelDto, MailboxDto, SpecialUseDto,
     ThreadRowDto,
 };
+use tagmail_api_core::signing::{KEY_LEN, UrlKeys};
 use tagmail_api_core::{
-    AccountSummary, ChangePage, NewAccount, Store, StoreResult, ThreadRows, View, ViewIndex,
+    AccountSummary, ChangePage, MessageRecord, NewAccount, Store, StoreResult, ThreadDetail,
+    ThreadRows, View, ViewIndex,
 };
 use tagmail_core::query::{Query, Term};
 use tagmail_core::{
-    AccountId, ChangeCursor, KeywordClass, SpecialUse, ThreadId, classify_keyword,
-    decode_mailbox_name,
+    AccountId, ChangeCursor, EmailId, Flags, KeywordClass, MessageRowId, SpecialUse, ThreadId,
+    classify_keyword, decode_mailbox_name,
 };
-use tagmail_store::rusqlite::{self, Connection, params, params_from_iter};
+use tagmail_store::rusqlite::{
+    self, Connection, OptionalExtension, named_params, params, params_from_iter,
+};
 use tagmail_store::{
-    CacheDb, Change, ChangeOp, Changes, ConfigDb, Entity, MasterKey, Sealed, Vault, changes, search,
+    BlobKey, BlobStore, CacheDb, Change, ChangeOp, Changes, ConfigDb, DEFAULT_RAW_CAP, Entity,
+    MasterKey, Sealed, Vault, changes, search,
 };
+use zeroize::Zeroizing;
 
 /// Senders listed per thread row.
 pub const MAX_SENDERS: usize = 4;
+/// Age after which the URL signing key is replaced; the previous key keeps
+/// verifying the links signed just before.
+pub const URL_KEY_ROTATION_SECS: i64 = 7 * 24 * 60 * 60;
+/// Longest merge chain followed when resolving a thread id.
+const MAX_MERGE_HOPS: usize = 16;
+const URL_KEY: &str = "url_key";
+const URL_KEY_PREVIOUS: &str = "url_key_previous";
+const URL_KEY_CREATED: &str = "url_key_created";
 
 pub struct SqliteStore {
     config: Arc<ConfigDb>,
     cache: Arc<CacheDb>,
     vault: Arc<Vault>,
+    blobs: Arc<BlobStore>,
 }
 
 impl SqliteStore {
@@ -35,6 +52,7 @@ impl SqliteStore {
     pub async fn open(
         config: ConfigDb,
         cache: CacheDb,
+        blobs: BlobStore,
         master: &MasterKey,
     ) -> tagmail_store::Result<SqliteStore> {
         let vault = Vault::unlock(&config, master).await?;
@@ -42,7 +60,13 @@ impl SqliteStore {
             config: Arc::new(config),
             cache: Arc::new(cache),
             vault: Arc::new(vault),
+            blobs: Arc::new(blobs),
         })
+    }
+
+    /// Message blobs, shared with the engine.
+    pub fn blobs(&self) -> &Arc<BlobStore> {
+        &self.blobs
     }
 
     pub fn config(&self) -> &Arc<ConfigDb> {
@@ -163,6 +187,98 @@ fn senders(from_json: Option<&str>, thread: i64) -> Vec<AddressDto> {
             Vec::new()
         }
     }
+}
+
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+/// Columns of [`message_record`], over `message m`.
+const MESSAGE_COLUMNS: &str = "m.id, m.account_id, coalesce(m.thread_id, 0), m.date, m.subject, \
+     m.snippet, m.from_json, m.to_json, m.cc_json, m.has_attachment, \
+     EXISTS (SELECT 1 FROM location l WHERE l.message_id = m.id AND (l.flags & :seen) = 0), \
+     EXISTS (SELECT 1 FROM location l WHERE l.message_id = m.id AND (l.flags & :flagged) != 0)";
+
+fn message_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRecord> {
+    let id: i64 = r.get(0)?;
+    let addresses = |i| -> rusqlite::Result<Vec<AddressDto>> {
+        Ok(senders(r.get::<_, Option<String>>(i)?.as_deref(), id))
+    };
+    Ok(MessageRecord {
+        id: MessageRowId(id),
+        account_id: AccountId(r.get(1)?),
+        thread_id: ThreadId(r.get(2)?),
+        date: r.get(3)?,
+        subject: r.get(4)?,
+        snippet: r.get::<_, Option<String>>(5)?.unwrap_or_default(),
+        from: addresses(6)?,
+        to: addresses(7)?,
+        cc: addresses(8)?,
+        has_attachment: r.get(9)?,
+        unread: r.get(10)?,
+        starred: r.get(11)?,
+    })
+}
+
+const SEEN: i64 = Flags::SEEN.bits() as i64;
+const FLAGGED: i64 = Flags::FLAGGED.bits() as i64;
+
+fn random_key() -> Zeroizing<[u8; KEY_LEN]> {
+    Zeroizing::new(*MasterKey::generate().expose())
+}
+
+fn decode_key(hex_key: &str) -> tagmail_store::Result<Zeroizing<[u8; KEY_LEN]>> {
+    let mut key = Zeroizing::new([0u8; KEY_LEN]);
+    hex::decode_to_slice(hex_key, key.as_mut_slice())
+        .map_err(|_| tagmail_store::Error::Corrupt("url signing key".to_owned()))?;
+    Ok(key)
+}
+
+fn meta(tx: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
+    tx.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+        .optional()
+}
+
+fn set_meta(tx: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO meta (key, value) VALUES (?1, ?2) \
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+        [key, value],
+    )?;
+    Ok(())
+}
+
+/// Reads the URL signing keys, creating the first or rotating a key older
+/// than [`URL_KEY_ROTATION_SECS`] at `now`.
+pub fn url_keys_at(tx: &Connection, now: i64) -> tagmail_store::Result<UrlKeys> {
+    let current = meta(tx, URL_KEY)?;
+    let created: Option<i64> = meta(tx, URL_KEY_CREATED)?.and_then(|c| c.parse().ok());
+    let due = created.is_none_or(|c| now - c >= URL_KEY_ROTATION_SECS);
+    if let Some(current) = current.as_deref().filter(|_| !due) {
+        return Ok(UrlKeys {
+            current: decode_key(current)?,
+            previous: meta(tx, URL_KEY_PREVIOUS)?
+                .as_deref()
+                .map(decode_key)
+                .transpose()?,
+        });
+    }
+    let fresh = random_key();
+    set_meta(tx, URL_KEY, &hex::encode(fresh.as_slice()))?;
+    set_meta(tx, URL_KEY_CREATED, &now.to_string())?;
+    let previous = match current {
+        Some(old) => {
+            set_meta(tx, URL_KEY_PREVIOUS, &old)?;
+            Some(decode_key(&old)?)
+        }
+        None => None,
+    };
+    Ok(UrlKeys {
+        current: fresh,
+        previous,
+    })
 }
 
 fn thread_rows(conn: &Connection, ids: &[ThreadId]) -> tagmail_store::Result<Vec<ThreadRowDto>> {
@@ -469,6 +585,135 @@ impl Store for SqliteStore {
             }
         }
         Ok(accounts)
+    }
+
+    async fn message(&self, id: MessageRowId) -> StoreResult<Option<MessageRecord>> {
+        Ok(self
+            .cache
+            .read(move |conn| {
+                let mut stmt = conn.prepare_cached(&format!(
+                    "SELECT {MESSAGE_COLUMNS} FROM message m \
+                     WHERE m.id = :id AND m.tombstoned_at IS NULL"
+                ))?;
+                Ok(stmt
+                    .query_row(
+                        named_params! {":id": id.0, ":seen": SEEN, ":flagged": FLAGGED},
+                        message_record,
+                    )
+                    .optional()?)
+            })
+            .await?)
+    }
+
+    async fn thread_detail(&self, id: ThreadId) -> StoreResult<Option<ThreadDetail>> {
+        Ok(self
+            .cache
+            .read(move |conn| {
+                snapshot(conn, |conn| {
+                    let mut thread = id;
+                    for _ in 0..MAX_MERGE_HOPS {
+                        let merged: Option<Option<i64>> = conn
+                            .query_row(
+                                "SELECT merged_into FROM thread WHERE id = ?1",
+                                [thread.0],
+                                |r| r.get(0),
+                            )
+                            .optional()?;
+                        match merged {
+                            None => return Ok(None),
+                            Some(Some(target)) => thread = ThreadId(target),
+                            Some(None) => break,
+                        }
+                    }
+                    let Some(row) = thread_rows(conn, &[thread])?.pop() else {
+                        return Ok(None);
+                    };
+                    let mut stmt = conn.prepare_cached(&format!(
+                        "SELECT {MESSAGE_COLUMNS} FROM message m \
+                         WHERE m.thread_id = :id AND m.tombstoned_at IS NULL \
+                         ORDER BY m.date, m.id"
+                    ))?;
+                    let messages = stmt
+                        .query_map(
+                            named_params! {":id": thread.0, ":seen": SEEN, ":flagged": FLAGGED},
+                            message_record,
+                        )?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    Ok((!messages.is_empty()).then_some(ThreadDetail { row, messages }))
+                })
+            })
+            .await?)
+    }
+
+    async fn raw_message(&self, id: MessageRowId) -> StoreResult<Option<Vec<u8>>> {
+        let identity: Option<(i64, String)> = self
+            .cache
+            .read(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT account_id, email_id FROM message WHERE id = ?1",
+                        [id.0],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?)
+            })
+            .await?;
+        let Some((account, email_id)) = identity else {
+            return Ok(None);
+        };
+        let email_id = EmailId::parse(&email_id)?;
+        let key = BlobKey::for_message(AccountId(account), &email_id);
+        let blobs = self.blobs.clone();
+        let raw = tokio::task::spawn_blocking(move || {
+            let Some(reader) = blobs.open_raw(&key)? else {
+                return Ok(None);
+            };
+            let mut raw = Vec::new();
+            reader.take(DEFAULT_RAW_CAP + 1).read_to_end(&mut raw)?;
+            if raw.len() as u64 > DEFAULT_RAW_CAP {
+                return Err(tagmail_store::Error::BlobTooLarge {
+                    cap: DEFAULT_RAW_CAP,
+                });
+            }
+            Ok::<_, tagmail_store::Error>(Some(raw))
+        })
+        .await??;
+        Ok(raw)
+    }
+
+    async fn url_keys(&self) -> StoreResult<UrlKeys> {
+        let now = now_secs();
+        Ok(self.config.write(move |tx| url_keys_at(tx, now)).await?)
+    }
+
+    async fn image_senders(&self) -> StoreResult<Vec<String>> {
+        Ok(self
+            .config
+            .read(|conn| {
+                let mut stmt =
+                    conn.prepare_cached("SELECT address FROM image_sender ORDER BY address")?;
+                Ok(stmt
+                    .query_map([], |r| r.get(0))?
+                    .collect::<rusqlite::Result<Vec<String>>>()?)
+            })
+            .await?)
+    }
+
+    async fn set_image_sender(&self, address: String, allow: bool) -> StoreResult<()> {
+        Ok(self
+            .config
+            .write(move |tx| {
+                if allow {
+                    tx.execute(
+                        "INSERT INTO image_sender (address) VALUES (?1) ON CONFLICT DO NOTHING",
+                        [&address],
+                    )?;
+                } else {
+                    tx.execute("DELETE FROM image_sender WHERE address = ?1", [&address])?;
+                }
+                Ok(())
+            })
+            .await?)
     }
 
     async fn create_account(&self, account: NewAccount) -> StoreResult<AccountId> {

@@ -55,6 +55,14 @@ impl FakeMsg {
         self
     }
 
+    /// The whole message as `BODY[]` returns it.
+    pub fn raw(&self) -> String {
+        format!(
+            "Message-ID: <{}>\r\nSubject: {}\r\nFrom: {}\r\nTo: {}\r\n\r\n{}",
+            self.id, self.subject, self.from, self.to, self.body
+        )
+    }
+
     fn address(email: &str) -> Address {
         let (mailbox, host) = email.split_once('@').unwrap_or((email, ""));
         Address {
@@ -452,12 +460,16 @@ impl ImapSession for FakeSession {
         sink: &mut (dyn AsyncWrite + Unpin + Send),
         max_bytes: u64,
     ) -> Result<BodyFetch> {
-        assert_eq!(section, "1");
         let name = self.selected_name()?;
-        let body = {
+        let msg = {
             let mut server = self.server();
             let msg = server.mailbox(&name).msgs.get(&uid.0).cloned();
-            msg.ok_or(Error::NotFound)?.body
+            msg.ok_or(Error::NotFound)?
+        };
+        let body = match section {
+            "1" => msg.body,
+            "" => msg.raw(),
+            other => panic!("unexpected section {other:?}"),
         };
         let n = usize::try_from(max_bytes)
             .unwrap_or(usize::MAX)

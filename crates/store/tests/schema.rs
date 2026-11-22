@@ -52,13 +52,14 @@ async fn config_migrations_apply_to_fresh_db_and_reopen() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("config.db");
     let db = ConfigDb::open(&path).unwrap();
-    assert_eq!(user_version(&db).await, 1);
+    assert_eq!(user_version(&db).await, 2);
     assert_eq!(
         tables(&db).await,
         [
             "account",
             "device",
             "identity",
+            "image_sender",
             "label_job",
             "label_registry",
             "meta",
@@ -76,7 +77,7 @@ async fn config_migrations_apply_to_fresh_db_and_reopen() {
     db.close().await.unwrap();
 
     let db = ConfigDb::open(&path).unwrap();
-    assert_eq!(user_version(&db).await, 1);
+    assert_eq!(user_version(&db).await, 2);
     db.close().await.unwrap();
 }
 
@@ -123,7 +124,7 @@ async fn newer_schema_is_refused() {
         ConfigDb::open(&path),
         Err(Error::SchemaTooNew {
             found: 99,
-            supported: 1
+            supported: 2
         })
     ));
 }

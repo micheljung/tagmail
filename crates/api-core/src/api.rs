@@ -13,9 +13,10 @@ use crate::dto::{
     StatusDto, SyncPhase, ThreadsDto, VersionDto,
 };
 use crate::id_index;
+use crate::signing::UrlKeys;
 use crate::store::{
-    AccountRegistry, AccountSummary, ChangePage, NewAccount, Secret, Store, StoreError, View,
-    ViewError,
+    AccountRegistry, AccountSummary, ChangePage, ImageProxy, NewAccount, Secret, Store, StoreError,
+    View, ViewError,
 };
 
 pub const API_VERSION: ApiVersion = ApiVersion { major: 1, minor: 0 };
@@ -139,7 +140,7 @@ fn invalid(field: &str, message: impl Into<String>) -> Response {
     )
 }
 
-fn bad_request(message: impl Into<String>) -> Response {
+pub(crate) fn bad_request(message: impl Into<String>) -> Response {
     Response::error(400, "bad_request", message)
 }
 
@@ -149,15 +150,23 @@ fn internal(err: StoreError) -> Response {
 }
 
 pub struct Api<S> {
-    store: Arc<S>,
-    registry: Option<Arc<dyn AccountRegistry>>,
+    pub(crate) store: Arc<S>,
+    pub(crate) registry: Option<Arc<dyn AccountRegistry>>,
+    pub(crate) proxy: Option<Arc<dyn ImageProxy>>,
+    /// URL signing keys and when they were read.
+    pub(crate) keys: tokio::sync::Mutex<Option<(std::time::Instant, UrlKeys)>>,
 }
 
 impl<S: Store> Api<S> {
     /// `registry` is the sync engine. Without it the API serves reads only
     /// and refuses to add accounts (`503`), since nothing would sync them.
     pub fn new(store: Arc<S>, registry: Option<Arc<dyn AccountRegistry>>) -> Api<S> {
-        Api { store, registry }
+        Api {
+            store,
+            registry,
+            proxy: None,
+            keys: tokio::sync::Mutex::new(None),
+        }
     }
 
     pub fn store(&self) -> &Arc<S> {
@@ -185,12 +194,22 @@ impl<S: Store> Api<S> {
             (Method::Get, ["mailboxes"]) => self.mailboxes().await,
             (Method::Get, ["labels"]) => self.labels().await,
             (Method::Post, ["accounts"]) => self.create_account(req.body).await,
+            (Method::Get, ["threads", id]) => self.thread(id).await,
+            (Method::Get, ["messages", id]) => self.message(id).await,
+            (Method::Get, ["messages", id, "render"]) => self.render_message(id, req.query).await,
+            (Method::Get, ["parts", token]) => self.part(token, req.query).await,
+            (Method::Get, ["proxy", "img", token]) => self.proxy_image(token).await,
+            (Method::Get, ["image-senders"]) => self.image_senders().await,
+            (Method::Post, ["image-senders"]) => self.set_image_sender(req.body).await,
             (
                 _,
                 [
                     "version" | "status" | "threads" | "changes" | "accounts" | "mailboxes"
-                    | "labels",
-                ],
+                    | "labels" | "image-senders",
+                ]
+                | ["threads" | "messages" | "parts", _]
+                | ["messages", _, "render"]
+                | ["proxy", "img", _],
             )
             | (_, ["views", _, "index"]) => Ok(Response::error(
                 405,
@@ -367,7 +386,7 @@ fn phase(a: &AccountSummary) -> SyncPhase {
     }
 }
 
-fn query_param(query: &str, name: &str) -> Option<String> {
+pub(crate) fn query_param(query: &str, name: &str) -> Option<String> {
     form_urlencoded::parse(query.as_bytes())
         .find(|(k, _)| k == name)
         .map(|(_, v)| v.into_owned())

@@ -2,7 +2,10 @@ use rusqlite::Connection;
 
 use crate::error::{Error, Result};
 
-pub(crate) const CONFIG: &[&str] = &[include_str!("../migrations/config/V1__init.sql")];
+pub(crate) const CONFIG: &[&str] = &[
+    include_str!("../migrations/config/V1__init.sql"),
+    include_str!("../migrations/config/V2__image_sender.sql"),
+];
 pub(crate) const CACHE: &[&str] = &[
     include_str!("../migrations/cache/V1__init.sql"),
     include_str!("../migrations/cache/V2__pending_text_index.sql"),
