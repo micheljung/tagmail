@@ -11,10 +11,12 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+base64.workspace = true
 caseless.workspace = true
 hex.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+time.workspace = true
 unicode-normalization.workspace = true
 
 [dev-dependencies]
