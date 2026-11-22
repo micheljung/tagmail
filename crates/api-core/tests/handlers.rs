@@ -120,6 +120,7 @@ impl Store for MemStore {
                 mailboxes_initial: 0,
                 mailboxes_catchup: 0,
                 mailboxes_live: 0,
+                text_pending: 0,
             },
             account,
         ));
@@ -400,6 +401,7 @@ async fn status_merges_persisted_and_runtime_state() {
         let mut accounts = api.store().accounts.lock().unwrap();
         accounts[0].0.mailboxes_initial = 1;
         accounts[0].0.mailboxes_live = 2;
+        accounts[0].0.text_pending = 7;
         accounts[1].0.status = "disabled".to_owned();
     }
     let body = json_body(&get(&api, "/api/status").await);
@@ -407,6 +409,7 @@ async fn status_merges_persisted_and_runtime_state() {
     assert_eq!(a["phase"], "initial");
     assert_eq!(a["mailboxesTotal"], 3);
     assert_eq!(a["mailboxesLive"], 2);
+    assert_eq!(a["textPending"], 7);
     assert_eq!(a["lastError"], "auth failed");
     assert_eq!(a["capabilities"], json!(["QRESYNC"]));
     let b = &body["accounts"][1];

@@ -210,6 +210,7 @@ impl<S: Store> Api<S> {
                     phase: phase(&a),
                     mailboxes_total: a.mailboxes_initial + a.mailboxes_catchup + a.mailboxes_live,
                     mailboxes_live: a.mailboxes_live,
+                    text_pending: a.text_pending,
                     name: a.name,
                     status: a.status,
                     last_error: runtime.last_error,

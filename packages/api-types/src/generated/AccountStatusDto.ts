@@ -4,4 +4,8 @@ import type { SyncPhase } from "./SyncPhase";
 /**
  * `GET /api/status`, one entry per account.
  */
-export type AccountStatusDto = { id: number, name: string, status: string, phase: SyncPhase, mailboxesTotal: number, mailboxesLive: number, lastError: string | null, capabilities: Array<string>, degraded: Array<string>, };
+export type AccountStatusDto = { id: number, name: string, status: string, phase: SyncPhase, mailboxesTotal: number, mailboxesLive: number, 
+/**
+ * Messages whose text is not fetched (and searchable) yet.
+ */
+textPending: number, lastError: string | null, capabilities: Array<string>, degraded: Array<string>, };

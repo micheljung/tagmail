@@ -44,6 +44,8 @@ pub struct AccountStatusDto {
     pub phase: SyncPhase,
     pub mailboxes_total: u32,
     pub mailboxes_live: u32,
+    /// Messages whose text is not fetched (and searchable) yet.
+    pub text_pending: u32,
     pub last_error: Option<String>,
     pub capabilities: Vec<String>,
     pub degraded: Vec<String>,

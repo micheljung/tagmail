@@ -72,6 +72,8 @@ pub struct AccountSummary {
     pub mailboxes_initial: u32,
     pub mailboxes_catchup: u32,
     pub mailboxes_live: u32,
+    /// Messages the text pass has yet to fetch.
+    pub text_pending: u32,
 }
 
 /// A credential in memory: zeroed on drop, never printed.

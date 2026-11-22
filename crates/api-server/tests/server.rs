@@ -389,6 +389,30 @@ async fn accounts_store_encrypted_credentials() {
         .unwrap();
     assert_eq!(status["accounts"][0]["phase"], "pending");
     assert_eq!(status["accounts"][0]["name"], "Work");
+    assert_eq!(status["accounts"][0]["textPending"], 0);
+
+    server
+        .store()
+        .cache()
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO message (account_id, email_id, date, text_blob, tombstoned_at) VALUES
+                     (1, 'a', 1, NULL, NULL), (1, 'b', 2, NULL, NULL),
+                     (1, 'c', 3, 'text/c', NULL), (1, 'd', 4, NULL, 5), (2, 'e', 5, NULL, NULL);",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let status: Value = client
+        .get(url(&server, "/api/status"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status["accounts"][0]["textPending"], 2);
 
     let secret = server.store().account_secret(AccountId(1)).await.unwrap();
     assert_eq!(secret.expose(), "s3cret-imap-password");

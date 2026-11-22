@@ -305,6 +305,7 @@ impl Store for SqliteStore {
                         mailboxes_initial: 0,
                         mailboxes_catchup: 0,
                         mailboxes_live: 0,
+                        text_pending: 0,
                     })
                 })?;
                 Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -326,6 +327,18 @@ impl Store for SqliteStore {
                 Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
             })
             .await?;
+        let text_pending = self
+            .cache
+            .read(|conn| {
+                let mut stmt = conn.prepare_cached(
+                    "SELECT account_id, count(*) FROM message \
+                     WHERE text_blob IS NULL AND tombstoned_at IS NULL GROUP BY account_id",
+                )?;
+                let rows =
+                    stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, u32>(1)?)))?;
+                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            })
+            .await?;
         for (account, state, n) in counts {
             if let Some(a) = accounts.iter_mut().find(|a| a.id.0 == account) {
                 match state.as_str() {
@@ -333,6 +346,11 @@ impl Store for SqliteStore {
                     "catchup" => a.mailboxes_catchup = n,
                     _ => a.mailboxes_live = n,
                 }
+            }
+        }
+        for (account, n) in text_pending {
+            if let Some(a) = accounts.iter_mut().find(|a| a.id.0 == account) {
+                a.text_pending = n;
             }
         }
         Ok(accounts)
