@@ -1,0 +1,54 @@
+name: E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  SEED: 1
+  SEED_COUNT: 100000
+  SEED_AVG_KB: 8
+  SEED_DIR: ${{ github.workspace }}/../tagmail-seed
+
+jobs:
+  seed-readable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100"
+      - uses: Swatinem/rust-cache@v2
+      - name: Restore seeded Maildir
+        id: seed-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.SEED_DIR }}
+          key: seed-${{ hashFiles('xtask/src/seed.rs') }}-${{ env.SEED }}-${{ env.SEED_COUNT }}-${{ env.SEED_AVG_KB }}
+      - name: Seed Maildir
+        if: steps.seed-cache.outputs.cache-hit != 'true'
+        run: cargo xtask seed --seed "$SEED" --count "$SEED_COUNT" --avg-kb "$SEED_AVG_KB" --out "$SEED_DIR"
+      - name: Start Dovecot, Gmail-mode Dovecot, Stalwart and Mailpit
+        run: |
+          cargo xtask dovecot up --gmail
+          cargo xtask stalwart up
+      - name: Load seed into Dovecot
+        run: |
+          cargo xtask dovecot load --from "$SEED_DIR"
+          cargo xtask dovecot load --gmail --from "$SEED_DIR"
+      - name: Read seed with an independent IMAP client
+        run: |
+          python3 test/smoke/check_seed.py --port 10143 --manifest "$SEED_DIR/tagmail-seed.json"
+          python3 test/smoke/check_seed.py --port 10144 --manifest "$SEED_DIR/tagmail-seed.json" --all-mailbox "[Gmail]/All"
+      - name: Server logs
+        if: failure()
+        run: docker compose -f test/compose.yml logs
