@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "tagmail-desktop-spike",
+  "identifier": "dev.tagmail.desktop-spike",
+  "version": "0.0.0",
+  "app": {
+    "withGlobalTauri": true,
+    "windows": []
+  },
+  "bundle": {
+    "active": false
+  }
+}
