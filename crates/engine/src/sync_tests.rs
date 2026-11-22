@@ -553,3 +553,23 @@ async fn cache_row(t: &TestCache, name: &'static str) -> cache::MailboxRow {
         .find(|r| r.name == name)
         .unwrap()
 }
+
+#[tokio::test]
+async fn pending_text_reads_its_partial_index_in_order() {
+    let t = open();
+    let plan = t
+        .ctx
+        .read(|c| {
+            let mut stmt = c.prepare(&format!("EXPLAIN QUERY PLAN {}", cache::PENDING_TEXT_SQL))?;
+            let rows = stmt.query_map([1, 50], |r| r.get::<_, String>(3))?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|d| d.starts_with("SEARCH m USING INDEX message_pending_text")),
+        "{plan:?}"
+    );
+    assert!(!plan.iter().any(|d| d.contains("TEMP B-TREE")), "{plan:?}");
+}

@@ -3,7 +3,10 @@ use rusqlite::Connection;
 use crate::error::{Error, Result};
 
 pub(crate) const CONFIG: &[&str] = &[include_str!("../migrations/config/V1__init.sql")];
-pub(crate) const CACHE: &[&str] = &[include_str!("../migrations/cache/V1__init.sql")];
+pub(crate) const CACHE: &[&str] = &[
+    include_str!("../migrations/cache/V1__init.sql"),
+    include_str!("../migrations/cache/V2__pending_text_index.sql"),
+];
 
 /// Applies the migrations after `PRAGMA user_version`, each in its own
 /// transaction together with the version bump.

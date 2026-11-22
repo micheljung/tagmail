@@ -191,6 +191,14 @@ pub struct PendingText {
     pub uid: u32,
 }
 
+/// Served by the partial index `message_pending_text`.
+pub(crate) const PENDING_TEXT_SQL: &str = "SELECT m.id, m.email_id, \
+       (SELECT l.mailbox_id FROM location l WHERE l.message_id = m.id ORDER BY l.mailbox_id LIMIT 1), \
+       (SELECT l.uid FROM location l WHERE l.message_id = m.id ORDER BY l.mailbox_id LIMIT 1) \
+     FROM message m \
+     WHERE m.account_id = ?1 AND m.text_blob IS NULL AND m.tombstoned_at IS NULL \
+     ORDER BY m.date DESC, m.id DESC LIMIT ?2";
+
 /// Up to `limit` messages without text, newest first, skipping `exclude`.
 pub fn pending_text(
     conn: &Connection,
@@ -198,14 +206,7 @@ pub fn pending_text(
     limit: usize,
     exclude: &BTreeSet<i64>,
 ) -> Result<Vec<PendingText>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT m.id, m.email_id, \
-           (SELECT l.mailbox_id FROM location l WHERE l.message_id = m.id ORDER BY l.mailbox_id LIMIT 1), \
-           (SELECT l.uid FROM location l WHERE l.message_id = m.id ORDER BY l.mailbox_id LIMIT 1) \
-         FROM message m \
-         WHERE m.account_id = ?1 AND m.text_blob IS NULL AND m.tombstoned_at IS NULL \
-         ORDER BY m.date DESC, m.id DESC LIMIT ?2",
-    )?;
+    let mut stmt = conn.prepare_cached(PENDING_TEXT_SQL)?;
     let fetch = i64::try_from(limit + exclude.len()).unwrap_or(i64::MAX);
     let rows = stmt.query_map(params![account, fetch], |r| {
         Ok((
