@@ -68,3 +68,34 @@ jobs:
       - name: Server logs
         if: failure()
         run: docker compose -f test/compose.yml logs dovecot
+
+  engine-dovecot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100"
+      - uses: Swatinem/rust-cache@v2
+      - name: Restore seeded Maildir
+        id: seed-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.SEED_DIR }}
+          key: seed-${{ hashFiles('xtask/src/seed.rs') }}-${{ env.SEED }}-${{ env.SEED_COUNT }}-${{ env.SEED_AVG_KB }}
+      - name: Seed Maildir
+        if: steps.seed-cache.outputs.cache-hit != 'true'
+        run: cargo xtask seed --seed "$SEED" --count "$SEED_COUNT" --avg-kb "$SEED_AVG_KB" --out "$SEED_DIR"
+      - name: Start Dovecot
+        run: cargo xtask dovecot up
+      - name: Load seed into Dovecot
+        run: cargo xtask dovecot load --from "$SEED_DIR"
+      - name: Build engine integration tests
+        run: cargo test -p tagmail-engine --features dovecot-tests --test dovecot --test dovecot_seed --no-run
+      - name: Engine integration tests
+        env:
+          TAGMAIL_SEED_MANIFEST: ${{ env.SEED_DIR }}/tagmail-seed.json
+        run: cargo test -p tagmail-engine --features dovecot-tests --test dovecot --test dovecot_seed -- --nocapture
+      - name: Server logs
+        if: failure()
+        run: docker compose -f test/compose.yml logs dovecot

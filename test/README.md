@@ -18,7 +18,8 @@ cargo xtask stalwart down
 | `mailpit` | SMTP 10025, UI 10825 | `axllent/mailpit:v1.27` | SMTP sink |
 
 Every server has the users `user1` / `pass1` and `user2` / `pass2`, with
-cleartext login over plain IMAP. These are test-only credentials.
+cleartext login over plain IMAP. Dovecot also has `engine1` … `engine9` /
+`engine`, one per engine integration test. These are test-only credentials.
 
 ## Seeding
 
@@ -67,3 +68,23 @@ c=$(docker create --network container:$id -e TAGMAIL_IMAP_ADDR=127.0.0.1:31143 b
 docker cp <test binary> $c:/it && docker start $c && docker wait $c
 docker logs $c; docker rm $c
 ```
+
+## Engine integration tests
+
+`crates/engine/tests/dovecot.rs` runs the sync engine against the
+`dovecot` service; each test empties and uses its own `engineN` user.
+`dovecot_seed.rs` checks that the newest INBOX message of the seed loaded
+into `user1` is cached within 30 s:
+
+```bash
+cargo xtask dovecot up
+cargo xtask seed --count 100000 --avg-kb 8 --seed 1 --out target/seed
+cargo xtask dovecot load --from target/seed
+TAGMAIL_SEED_MANIFEST=target/seed/tagmail-seed.json cargo test -p tagmail-engine \
+  --features dovecot-tests --test dovecot --test dovecot_seed -- --nocapture
+```
+
+For the static musl build, the bundled SQLite needs
+`LIBSQLITE3_FLAGS=-DSQLITE_DISABLE_LFS` (glibc headers otherwise reference
+`open64` and friends, which musl does not export). Pass the manifest into the
+container with `-e TAGMAIL_SEED_MANIFEST=/seed.json` after copying it there.
