@@ -1,0 +1,41 @@
+name: tagmail-test
+
+services:
+  dovecot:
+    build: dovecot
+    ports:
+      - "10143:31143"
+    healthcheck: &dovecot-health
+      test: ["CMD", "doveadm", "service", "status"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  dovecot-gmail:
+    build: dovecot
+    command: ["/dovecot/sbin/dovecot", "-F", "-c", "/etc/dovecot/gmail.conf"]
+    ports:
+      - "10144:31143"
+    healthcheck: *dovecot-health
+
+  stalwart:
+    build: stalwart
+    ports:
+      - "10145:143"
+      - "10080:8080"
+    healthcheck:
+      test: ["CMD", "stalwart-cli", "-u", "http://127.0.0.1:8080", "-c", "admin:admin", "server", "list-config"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports:
+      - "10025:1025"
+      - "10825:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 2s
+      timeout: 5s
+      retries: 30

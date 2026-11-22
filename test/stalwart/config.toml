@@ -1,0 +1,54 @@
+[server]
+hostname = "stalwart.tagmail.test"
+
+[server.listener.imap]
+bind = "[::]:143"
+protocol = "imap"
+
+[server.listener.smtp]
+bind = "[::]:25"
+protocol = "smtp"
+
+[server.listener.http]
+bind = "[::]:8080"
+protocol = "http"
+
+[imap.auth]
+allow-plain-text = true
+
+[storage]
+data = "rocksdb"
+fts = "rocksdb"
+blob = "rocksdb"
+lookup = "rocksdb"
+directory = "memory"
+
+[store.rocksdb]
+type = "rocksdb"
+path = "/opt/stalwart/data"
+compression = "lz4"
+
+[directory.memory]
+type = "memory"
+
+[[directory.memory.principals]]
+name = "user1"
+class = "individual"
+secret = "pass1"
+email = ["user1@tagmail.test"]
+
+[[directory.memory.principals]]
+name = "user2"
+class = "individual"
+secret = "pass2"
+email = ["user2@tagmail.test"]
+
+[tracer.stdout]
+type = "stdout"
+level = "info"
+ansi = false
+enable = true
+
+[authentication.fallback-admin]
+user = "admin"
+secret = "admin"
