@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use axum::body::Body;
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response as HttpResponse};
-use tagmail_api_core::api::APP_CSP;
+use tagmail_api_core::api::WEB_APP_CSP;
 
 pub const INDEX: &str = "index.html";
 /// SvelteKit's content-hashed assets.
@@ -101,8 +101,7 @@ impl WebDir {
         headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
         headers.insert(
             header::CONTENT_SECURITY_POLICY,
-            HeaderValue::from_str(&format!("{APP_CSP}; frame-ancestors 'none'"))
-                .expect("CSP is ASCII"),
+            HeaderValue::from_static(WEB_APP_CSP),
         );
         headers.insert(
             header::X_CONTENT_TYPE_OPTIONS,

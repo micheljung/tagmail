@@ -1,9 +1,7 @@
 import { ME, XSS_INDEX, positionOf, remoteImages, type Message, type Row } from './fixture.ts';
 
-/** CSP the real server sends with every rendered message (plan §3.9). */
-export const RENDER_CSP =
-	"default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'none'; " +
-	"form-action 'none'; frame-ancestors 'self'";
+/** The real server's CSPs, generated from the Rust constants. */
+export { RENDER_CSP, WEB_APP_CSP } from '../../../packages/api-types/src/generated/csp.ts';
 
 export const ATTACKER = 'http://attacker.invalid';
 

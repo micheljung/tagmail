@@ -18,14 +18,12 @@ import {
 	type Row
 } from './fixture.ts';
 import { encodeIdIndex } from './idIndex.ts';
-import { RENDER_CSP, renderMessage } from './render.ts';
+import { RENDER_CSP, WEB_APP_CSP, renderMessage } from './render.ts';
 
 const PORT = Number(process.env.PORT ?? 4180);
 const ROOT = resolve(process.env.WEB_ROOT ?? join(import.meta.dirname, '../../build'));
 const LATENCY_MS = Number(process.env.MOCK_LATENCY_MS ?? 8);
 const EPOCH = '000000000000000a';
-const APP_CSP =
-	"default-src 'self'; script-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'";
 const COOKIE = 'tagmail_session';
 const SESSION_TOKEN = 'mock-session-token';
 const MAX_IDS = 100;
@@ -389,7 +387,7 @@ function serveStatic(res: ServerResponse, path: string) {
 	const immutable = path.startsWith('/_app/immutable/');
 	res.writeHead(200, {
 		'content-type': TYPES[extname(file)] ?? 'application/octet-stream',
-		'content-security-policy': APP_CSP,
+		'content-security-policy': WEB_APP_CSP,
 		'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
 		'x-content-type-options': 'nosniff'
 	});

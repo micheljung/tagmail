@@ -24,6 +24,25 @@ fn file<T: TS + 'static>(
     Ok(())
 }
 
+/// Content-Security-Policy values, for test doubles of the server.
+const CSP_FILE: &str = "csp.ts";
+
+fn csp() -> String {
+    let consts = [
+        ("API_CSP", crate::api::API_CSP),
+        ("APP_CSP", crate::api::APP_CSP),
+        ("WEB_APP_CSP", crate::api::WEB_APP_CSP),
+        ("RENDER_CSP", crate::messages::RENDER_CSP),
+        ("PART_CSP", crate::messages::PART_CSP),
+    ];
+    std::iter::once(INDEX_HEADER.to_owned())
+        .chain(consts.iter().map(|(name, value)| {
+            let value = serde_json::to_string(value).expect("strings serialize");
+            format!("export const {name} = {value};\n")
+        }))
+        .collect()
+}
+
 /// File name → content of every binding plus `index.ts`.
 pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     let cfg = Config::new().with_large_int("number");
@@ -70,12 +89,16 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<ThreadsDto>(&cfg, &mut files)?;
     file::<TlsMode>(&cfg, &mut files)?;
     file::<VersionDto>(&cfg, &mut files)?;
+    files.insert(CSP_FILE.to_owned(), csp());
     let index: String = std::iter::once(INDEX_HEADER.to_owned())
-        .chain(
-            files
-                .keys()
-                .map(|f| format!("export type * from './{}';\n", f.trim_end_matches(".ts"))),
-        )
+        .chain(files.keys().map(|f| {
+            let module = f.trim_end_matches(".ts");
+            if f == CSP_FILE {
+                format!("export * from './{module}';\n")
+            } else {
+                format!("export type * from './{module}';\n")
+            }
+        }))
         .collect();
     files.insert("index.ts".to_owned(), index);
     Ok(files)

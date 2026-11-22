@@ -41,10 +41,17 @@ pub const JSON: &str = "application/json";
 pub const OCTET_STREAM: &str = "application/octet-stream";
 /// CSP of every API response; the SPA's own CSP is [`APP_CSP`].
 pub const API_CSP: &str = "default-src 'none'; frame-ancestors 'none'";
+macro_rules! app_csp {
+    () => {
+        "default-src 'self'; script-src 'self'; frame-src 'self'; object-src 'none'; \
+         base-uri 'none'"
+    };
+}
 /// CSP for the SPA document, identical on the web and in the desktop
 /// custom protocol (plan §3.9, spike 4: Tauri's CSP does not cover it).
-pub const APP_CSP: &str = "default-src 'self'; script-src 'self'; frame-src 'self'; \
-                           object-src 'none'; base-uri 'none'";
+pub const APP_CSP: &str = app_csp!();
+/// [`APP_CSP`] as `tagmail-server` sends it with the SPA's files.
+pub const WEB_APP_CSP: &str = concat!(app_csp!(), "; frame-ancestors 'none'");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
