@@ -13,6 +13,7 @@ use crate::dto::{
     StatusDto, SyncPhase, ThreadsDto, VersionDto,
 };
 use crate::id_index;
+use crate::routes::{self, Miss, RouteId};
 use crate::signing::UrlKeys;
 use crate::store::{
     AccountRegistry, AccountSummary, ChangePage, ImageProxy, NewAccount, Secret, Store, StoreError,
@@ -185,38 +186,30 @@ impl<S: Store> Api<S> {
             return Response::error(400, "bad_request", "path is not UTF-8");
         };
         let segments: Vec<&str> = segments.iter().map(|s| s.as_ref()).collect();
-        let route = match (req.method, segments.as_slice()) {
-            (Method::Get, ["version"]) => Ok(self.version()),
-            (Method::Get, ["status"]) => self.status().await,
-            (Method::Get, ["views", view, "index"]) => self.view_index(view).await,
-            (Method::Get, ["threads"]) => self.threads(req.query).await,
-            (Method::Get, ["changes"]) => self.changes(req.query).await,
-            (Method::Get, ["mailboxes"]) => self.mailboxes().await,
-            (Method::Get, ["labels"]) => self.labels().await,
-            (Method::Post, ["accounts"]) => self.create_account(req.body).await,
-            (Method::Get, ["threads", id]) => self.thread(id).await,
-            (Method::Get, ["messages", id]) => self.message(id).await,
-            (Method::Get, ["messages", id, "render"]) => self.render_message(id, req.query).await,
-            (Method::Get, ["parts", token]) => self.part(token, req.query).await,
-            (Method::Get, ["proxy", "img", token]) => self.proxy_image(token).await,
-            (Method::Get, ["image-senders"]) => self.image_senders().await,
-            (Method::Post, ["image-senders"]) => self.set_image_sender(req.body).await,
-            (
-                _,
-                [
-                    "version" | "status" | "threads" | "changes" | "accounts" | "mailboxes"
-                    | "labels" | "image-senders",
-                ]
-                | ["threads" | "messages" | "parts", _]
-                | ["messages", _, "render"]
-                | ["proxy", "img", _],
-            )
-            | (_, ["views", _, "index"]) => Ok(Response::error(
+        let route = match routes::resolve(req.method, &segments) {
+            Ok((id, params)) => match id {
+                RouteId::Version => Ok(self.version()),
+                RouteId::Status => self.status().await,
+                RouteId::ViewIndex => self.view_index(params[0]).await,
+                RouteId::Threads => self.threads(req.query).await,
+                RouteId::Changes => self.changes(req.query).await,
+                RouteId::Mailboxes => self.mailboxes().await,
+                RouteId::Labels => self.labels().await,
+                RouteId::CreateAccount => self.create_account(req.body).await,
+                RouteId::Thread => self.thread(params[0]).await,
+                RouteId::Message => self.message(params[0]).await,
+                RouteId::RenderMessage => self.render_message(params[0], req.query).await,
+                RouteId::Part => self.part(params[0], req.query).await,
+                RouteId::ProxyImage => self.proxy_image(params[0]).await,
+                RouteId::ImageSenders => self.image_senders().await,
+                RouteId::SetImageSender => self.set_image_sender(req.body).await,
+            },
+            Err(Miss::MethodNotAllowed) => Ok(Response::error(
                 405,
                 "method_not_allowed",
                 "method not allowed",
             )),
-            _ => Ok(Response::error(404, "not_found", "no such route")),
+            Err(Miss::NotFound) => Ok(Response::error(404, "not_found", "no such route")),
         };
         route.unwrap_or_else(internal)
     }

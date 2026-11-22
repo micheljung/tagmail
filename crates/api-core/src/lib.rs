@@ -9,6 +9,7 @@ pub mod events;
 pub mod id_index;
 pub mod messages;
 pub mod mime;
+pub mod routes;
 pub mod signing;
 pub mod store;
 pub mod ts;

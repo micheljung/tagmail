@@ -14,8 +14,7 @@ use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 use tagmail_api_server::auth::{AuthConfig, parse_origin};
-use tagmail_api_server::ratelimit;
-use tagmail_api_server::{Config, Server};
+use tagmail_api_server::{Config, Server, auth, http, ratelimit};
 use tempfile::TempDir;
 
 const PASSWORD: &str = "correct horse battery";
@@ -114,35 +113,14 @@ async fn error_code(resp: reqwest::Response) -> String {
     body["error"].as_str().unwrap_or_default().to_owned()
 }
 
-/// Every route that needs credentials, including unknown paths, which are
-/// denied before routing.
-const PROTECTED: &[(&str, &str)] = &[
-    ("GET", "/api/status"),
-    ("GET", "/api/views/inbox/index"),
-    ("GET", "/api/threads?ids=1"),
-    ("GET", "/api/changes?since=0000000000000001:0"),
-    ("GET", "/api/mailboxes"),
-    ("GET", "/api/labels"),
-    ("GET", "/api/views/search%3Afrom%3Ax/index"),
-    ("POST", "/api/accounts"),
-    ("GET", "/api/events"),
-    ("GET", "/api/auth/session"),
-    ("POST", "/api/auth/logout"),
-    ("POST", "/api/auth/passkey/register/start"),
-    ("POST", "/api/auth/passkey/register/finish"),
-    ("GET", "/api/passkeys"),
-    ("DELETE", "/api/passkeys/1"),
-    ("GET", "/api/sessions"),
-    ("DELETE", "/api/sessions/00"),
-    ("GET", "/api/devices"),
-    ("DELETE", "/api/devices/1"),
-    ("POST", "/api/pairing"),
+/// Requests that must be denied without credentials besides the route
+/// table: wrong methods, unknown paths and encoded spellings.
+const EXTRA_PROTECTED: &[(&str, &str)] = &[
     ("GET", "/api/auth/login"),
     ("GET", "/api/auth/setup"),
     ("GET", "/api/pairing/exchange"),
     ("PUT", "/api/version"),
-    ("GET", "/api/messages/1/render"),
-    ("GET", "/api/search?q=x"),
+    ("DELETE", "/api/status"),
     ("GET", "/api/no-such-route"),
     ("GET", "/api"),
     ("GET", "/api/"),
@@ -150,14 +128,63 @@ const PROTECTED: &[(&str, &str)] = &[
     ("GET", "/api/%73tatus"),
 ];
 
+/// Every protected request: each route from the server's route table with
+/// its `{…}` segments filled in, plus [`EXTRA_PROTECTED`].
+fn protected() -> Vec<(Method, String)> {
+    let filled = http::api_routes()
+        .into_iter()
+        .filter(|(method, path)| !auth::is_public(method, path))
+        .map(|(method, path)| {
+            let path = path
+                .split('/')
+                .map(|s| if s.starts_with('{') { "1" } else { s })
+                .collect::<Vec<_>>()
+                .join("/");
+            (method, path)
+        });
+    let extra = EXTRA_PROTECTED
+        .iter()
+        .map(|(m, p)| (Method::from_bytes(m.as_bytes()).unwrap(), (*p).to_owned()));
+    filled.chain(extra).collect()
+}
+
+#[test]
+fn the_route_table_covers_every_api_area() {
+    let routes: Vec<String> = http::api_routes()
+        .into_iter()
+        .map(|(method, path)| format!("{method} {path}"))
+        .collect();
+    for expected in [
+        "GET /api/events",
+        "GET /api/status",
+        "GET /api/views/{view}/index",
+        "GET /api/threads",
+        "GET /api/threads/{id}",
+        "GET /api/messages/{id}",
+        "GET /api/messages/{id}/render",
+        "GET /api/parts/{token}",
+        "GET /api/proxy/img/{token}",
+        "GET /api/image-senders",
+        "POST /api/image-senders",
+        "GET /api/mailboxes",
+        "GET /api/labels",
+        "POST /api/accounts",
+        "GET /api/sessions",
+        "DELETE /api/devices/{id}",
+        "POST /api/pairing",
+    ] {
+        assert!(
+            routes.iter().any(|r| r == expected),
+            "{expected} not in {routes:?}"
+        );
+    }
+}
+
 async fn assert_all_protected(server: &Server, expected: &str) {
     let client = reqwest::Client::new();
-    for (method, path) in PROTECTED {
+    for (method, path) in protected() {
         let resp = client
-            .request(
-                Method::from_bytes(method.as_bytes()).unwrap(),
-                url(server, path),
-            )
+            .request(method.clone(), url(server, &path))
             .header("x-requested-with", "tagmail")
             .send()
             .await
@@ -178,8 +205,8 @@ async fn every_protected_route_answers_401_without_credentials() {
     let anon = reqwest::Client::new();
     assert_eq!(status(&anon, &server, "/healthz").await, 200);
     assert_eq!(status(&anon, &server, "/api/version").await, 200);
-    for (method, path) in PROTECTED.iter().filter(|(m, _)| *m == "GET") {
-        let resp = owner.get(url(&server, path)).send().await.unwrap();
+    for (method, path) in protected().into_iter().filter(|(m, _)| *m == Method::GET) {
+        let resp = owner.get(url(&server, &path)).send().await.unwrap();
         assert_ne!(resp.status(), 401, "{method} {path} with a session");
     }
     let bad = reqwest::Client::new()

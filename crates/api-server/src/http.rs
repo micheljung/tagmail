@@ -42,35 +42,61 @@ pub struct AppState {
     pub web: Option<Arc<WebDir>>,
 }
 
+/// Declares the routes axum serves itself as [`SERVER_ROUTES`] and builds
+/// them, so the table cannot miss a route.
+macro_rules! server_routes {
+    ($($method:ident $path:literal => $handler:expr,)*) => {
+        /// `/api` routes served here rather than by api-core's
+        /// [`tagmail_api_core::routes::ROUTES`], as (method, path).
+        pub const SERVER_ROUTES: &[(&str, &str)] = &[$((stringify!($method), $path)),*];
+
+        fn server_routes(router: Router<AppState>) -> Router<AppState> {
+            router$(.route($path, $method($handler)))*
+        }
+    };
+}
+
+server_routes! {
+    get "/api/events" => events,
+    post "/api/auth/setup" => auth::setup,
+    post "/api/auth/login" => auth::login,
+    get "/api/auth/session" => auth::current,
+    post "/api/auth/logout" => auth::logout,
+    post "/api/auth/passkey/register/start" => webauthn::register_start,
+    post "/api/auth/passkey/register/finish" => webauthn::register_finish,
+    post "/api/auth/passkey/login/start" => webauthn::login_start,
+    post "/api/auth/passkey/login/finish" => webauthn::login_finish,
+    get "/api/passkeys" => webauthn::list,
+    delete "/api/passkeys/{id}" => webauthn::delete,
+    get "/api/sessions" => auth::sessions,
+    delete "/api/sessions/{id}" => auth::revoke_session,
+    get "/api/devices" => auth::devices,
+    delete "/api/devices/{id}" => auth::revoke_device,
+    post "/api/pairing" => pairing::create,
+    post "/api/pairing/exchange" => pairing::exchange,
+}
+
+/// Every `/api` route as (method, path template): the server's own and
+/// api-core's.
+pub fn api_routes() -> Vec<(HttpMethod, &'static str)> {
+    let server = SERVER_ROUTES.iter().map(|(method, path)| {
+        let method = HttpMethod::from_bytes(method.to_ascii_uppercase().as_bytes())
+            .expect("route methods are valid");
+        (method, *path)
+    });
+    let core = tagmail_api_core::routes::ROUTES.iter().map(|r| {
+        let method = match r.method {
+            Method::Get => HttpMethod::GET,
+            Method::Post => HttpMethod::POST,
+            Method::Other => unreachable!("api-core routes are GET or POST"),
+        };
+        (method, r.path)
+    });
+    server.chain(core).collect()
+}
+
 pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/healthz", get(|| async { "ok" }))
-        .route("/api/events", get(events))
-        .route("/api/auth/setup", post(auth::setup))
-        .route("/api/auth/login", post(auth::login))
-        .route("/api/auth/session", get(auth::current))
-        .route("/api/auth/logout", post(auth::logout))
-        .route(
-            "/api/auth/passkey/register/start",
-            post(webauthn::register_start),
-        )
-        .route(
-            "/api/auth/passkey/register/finish",
-            post(webauthn::register_finish),
-        )
-        .route("/api/auth/passkey/login/start", post(webauthn::login_start))
-        .route(
-            "/api/auth/passkey/login/finish",
-            post(webauthn::login_finish),
-        )
-        .route("/api/passkeys", get(webauthn::list))
-        .route("/api/passkeys/{id}", delete(webauthn::delete))
-        .route("/api/sessions", get(auth::sessions))
-        .route("/api/sessions/{id}", delete(auth::revoke_session))
-        .route("/api/devices", get(auth::devices))
-        .route("/api/devices/{id}", delete(auth::revoke_device))
-        .route("/api/pairing", post(pairing::create))
-        .route("/api/pairing/exchange", post(pairing::exchange))
+    server_routes(Router::new().route("/healthz", get(|| async { "ok" })))
         .fallback(dispatch)
         .layer(middleware::from_fn_with_state(
             state.clone(),
