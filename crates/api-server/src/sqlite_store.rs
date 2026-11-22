@@ -17,8 +17,8 @@ use tagmail_store::{
 pub const MAX_SENDERS: usize = 4;
 
 pub struct SqliteStore {
-    config: ConfigDb,
-    cache: CacheDb,
+    config: Arc<ConfigDb>,
+    cache: Arc<CacheDb>,
     vault: Arc<Vault>,
 }
 
@@ -32,18 +32,23 @@ impl SqliteStore {
     ) -> tagmail_store::Result<SqliteStore> {
         let vault = Vault::unlock(&config, master).await?;
         Ok(SqliteStore {
-            config,
-            cache,
+            config: Arc::new(config),
+            cache: Arc::new(cache),
             vault: Arc::new(vault),
         })
     }
 
-    pub fn config(&self) -> &ConfigDb {
+    pub fn config(&self) -> &Arc<ConfigDb> {
         &self.config
     }
 
-    pub fn cache(&self) -> &CacheDb {
+    pub fn cache(&self) -> &Arc<CacheDb> {
         &self.cache
+    }
+
+    /// The unlocked credential vault, shared with the engine.
+    pub fn vault(&self) -> &Arc<Vault> {
+        &self.vault
     }
 
     /// Decrypts an account's stored password.
@@ -67,9 +72,18 @@ impl SqliteStore {
         Ok(tagmail_api_core::Secret::new(plain.as_str().to_owned()))
     }
 
+    /// Closes both databases once nothing else (the engine) holds them.
     pub async fn close(self) -> tagmail_store::Result<()> {
-        self.config.close().await?;
-        self.cache.close().await
+        match (Arc::try_unwrap(self.config), Arc::try_unwrap(self.cache)) {
+            (Ok(config), Ok(cache)) => {
+                config.close().await?;
+                cache.close().await
+            }
+            _ => {
+                tracing::warn!("databases still in use at shutdown; not closing explicitly");
+                Ok(())
+            }
+        }
     }
 }
 

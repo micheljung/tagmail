@@ -26,6 +26,7 @@ percent-encoding.workspace = true
 serde_json.workspace = true
 tagmail-api-core.workspace = true
 tagmail-core.workspace = true
+tagmail-engine.workspace = true
 tagmail-store.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "time"] }

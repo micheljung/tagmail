@@ -1,9 +1,11 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::{Parser, ValueEnum};
 use tagmail_api_server::credentials::{self, KEY_FILE_ENV};
 use tagmail_api_server::{Config, DEFAULT_LISTEN, DEFAULT_MAX_SSE_CLIENTS, Server};
+use tagmail_engine::EngineConfig;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -38,6 +40,9 @@ struct Cli {
     /// Maximum concurrent event streams
     #[arg(long, default_value_t = DEFAULT_MAX_SSE_CLIENTS)]
     max_sse_clients: usize,
+    /// Seconds between polls of mailboxes not covered by IDLE
+    #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
+    poll_interval: u64,
     #[arg(long, value_enum, default_value_t = LogFormat::Text)]
     log_format: LogFormat,
 }
@@ -89,7 +94,11 @@ async fn main() -> anyhow::Result<()> {
         version = env!("CARGO_PKG_VERSION"),
         "starting tagmail-server"
     );
-    let mut server = Server::start(&config, None).await?;
+    let engine = EngineConfig {
+        poll_interval: Duration::from_secs(cli.poll_interval),
+        ..EngineConfig::default()
+    };
+    let mut server = Server::start_with_engine(&config, engine).await?;
     tokio::select! {
         result = server.stopped() => result?,
         () = terminated() => {

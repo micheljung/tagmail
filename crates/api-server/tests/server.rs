@@ -438,3 +438,53 @@ async fn refuses_to_start_without_a_key_or_on_a_public_address() {
     let err = Server::start(&config, None).await.err().unwrap();
     assert!(err.to_string().contains("--insecure-no-auth"), "{err}");
 }
+
+#[tokio::test]
+async fn engine_syncs_added_accounts_and_reports_errors() {
+    let dirs = Dirs::new();
+    let config = dirs.config(&dirs.key());
+    let dead = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = dead.local_addr().unwrap().port();
+    drop(dead);
+    let server = Server::start_with_engine(&config, tagmail_engine::EngineConfig::default())
+        .await
+        .unwrap();
+    let client = reqwest::Client::new();
+    let mut account = new_account();
+    account["imapHost"] = json!("127.0.0.1");
+    account["imapPort"] = json!(port);
+    let resp = client
+        .post(url(&server, "/api/accounts"))
+        .json(&account)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    let deadline = tokio::time::Instant::now() + TIMEOUT;
+    loop {
+        let status: Value = client
+            .get(url(&server, "/api/status"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if status["accounts"][0]["lastError"].is_string() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no sync error reported: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    server.shutdown().await.unwrap();
+    assert!(dirs.data.path().join("blobs").is_dir());
+
+    let restarted = Server::start_with_engine(&config, tagmail_engine::EngineConfig::default())
+        .await
+        .unwrap();
+    restarted.shutdown().await.unwrap();
+}

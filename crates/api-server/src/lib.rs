@@ -12,7 +12,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use tagmail_api_core::{AccountRegistry, Api, ChangeFeed, EventSource};
-use tagmail_store::{CacheDb, ConfigDb};
+use tagmail_engine::{Engine, EngineConfig, ImapConnectorFactory, Stores};
+use tagmail_store::{BlobStore, CacheDb, ConfigDb};
 use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, watch};
 use tokio::task::JoinHandle;
@@ -26,6 +27,8 @@ pub const DEFAULT_LISTEN: &str = "127.0.0.1:7878";
 pub const DEFAULT_MAX_SSE_CLIENTS: usize = 8;
 pub const CONFIG_DB: &str = "config.db";
 pub const CACHE_DB: &str = "cache.db";
+/// Message blobs (raw and text), next to `cache.db` and as disposable.
+pub const BLOBS_DIR: &str = "blobs";
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -59,17 +62,38 @@ pub struct Server {
     addr: SocketAddr,
     store: Arc<SqliteStore>,
     feed: Arc<ChangeFeed>,
+    engine: Option<Arc<Engine>>,
     stop: watch::Sender<bool>,
     task: JoinHandle<io::Result<()>>,
 }
 
+/// What syncs the accounts.
+enum Sync {
+    Registry(Option<Arc<dyn AccountRegistry>>),
+    Engine(EngineConfig),
+}
+
 impl Server {
     /// Opens the databases, unlocks credentials and starts serving.
-    /// `registry` is the sync engine; without it accounts cannot be added.
+    /// `registry` stands in for the sync engine; without it accounts cannot
+    /// be added.
     pub async fn start(
         config: &Config,
         registry: Option<Arc<dyn AccountRegistry>>,
     ) -> anyhow::Result<Server> {
+        Server::start_with(config, Sync::Registry(registry)).await
+    }
+
+    /// Like [`Server::start`] with the sync engine: it starts every active
+    /// account and syncs accounts added through the API.
+    pub async fn start_with_engine(
+        config: &Config,
+        engine: EngineConfig,
+    ) -> anyhow::Result<Server> {
+        Server::start_with(config, Sync::Engine(engine)).await
+    }
+
+    async fn start_with(config: &Config, sync: Sync) -> anyhow::Result<Server> {
         check_listen(config.listen, config.insecure_no_auth)?;
         std::fs::create_dir_all(&config.data_dir)
             .with_context(|| format!("creating data directory {}", config.data_dir.display()))?;
@@ -86,6 +110,33 @@ impl Server {
         drop(master);
         let store = Arc::new(store);
         let feed = Arc::new(ChangeFeed::new(store.cache().head().await?));
+        let (registry, engine) = match sync {
+            Sync::Registry(registry) => (registry, None),
+            Sync::Engine(engine_config) => {
+                let blobs_dir = config.data_dir.join(BLOBS_DIR);
+                let blobs = tokio::task::spawn_blocking(move || BlobStore::open(&blobs_dir))
+                    .await?
+                    .context("opening the blob store")?;
+                let stores = Stores {
+                    config: store.config().clone(),
+                    vault: store.vault().clone(),
+                    cache: store.cache().clone(),
+                    blobs: Arc::new(blobs),
+                    feed: feed.clone(),
+                };
+                let engine = Arc::new(Engine::new(
+                    stores,
+                    ImapConnectorFactory::default(),
+                    engine_config,
+                ));
+                let started = engine.start_all().await?;
+                tracing::info!(accounts = started, "sync engine started");
+                (
+                    Some(engine.clone() as Arc<dyn AccountRegistry>),
+                    Some(engine),
+                )
+            }
+        };
 
         let listener = TcpListener::bind(config.listen)
             .await
@@ -112,6 +163,7 @@ impl Server {
             addr,
             store,
             feed,
+            engine,
             stop,
             task,
         })
@@ -136,13 +188,17 @@ impl Server {
         Ok(())
     }
 
-    /// Ends event streams, finishes in-flight requests and closes the
-    /// databases.
+    /// Stops syncing, ends event streams, finishes in-flight requests and
+    /// closes the databases.
     pub async fn shutdown(self) -> anyhow::Result<()> {
+        if let Some(engine) = &self.engine {
+            engine.shutdown().await;
+        }
         self.stop.send_replace(true);
         if !self.task.is_finished() {
             self.task.await??;
         }
+        drop(self.engine);
         drop(self.feed);
         match Arc::try_unwrap(self.store) {
             Ok(store) => store.close().await?,
