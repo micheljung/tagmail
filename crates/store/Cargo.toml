@@ -9,3 +9,14 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+tagmail-core.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
