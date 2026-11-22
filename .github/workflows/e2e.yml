@@ -99,3 +99,29 @@ jobs:
       - name: Server logs
         if: failure()
         run: docker compose -f test/compose.yml logs dovecot
+
+  web-playwright:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Chromium and WebKit
+        run: pnpm exec playwright install --with-deps chromium webkit
+      - run: pnpm run build
+      - name: Playwright against the mock API (100k threads)
+        run: pnpm exec playwright test
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: playwright-report
+          path: web/playwright-report
+          retention-days: 7

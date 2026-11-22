@@ -1,0 +1,412 @@
+import { createReadStream, existsSync, statSync } from 'node:fs';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { extname, join, normalize, resolve } from 'node:path';
+import {
+	LABELS,
+	MAILBOXES,
+	PASSWORD,
+	SETUP_TOKEN,
+	THREAD_COUNT,
+	idAt,
+	isSent,
+	messageById,
+	messagesOf,
+	partsOf,
+	positionOf,
+	remoteImages,
+	rowAt,
+	type Row
+} from './fixture.ts';
+import { encodeIdIndex } from './idIndex.ts';
+import { RENDER_CSP, renderMessage } from './render.ts';
+
+const PORT = Number(process.env.PORT ?? 4180);
+const ROOT = resolve(process.env.WEB_ROOT ?? join(import.meta.dirname, '../../build'));
+const LATENCY_MS = Number(process.env.MOCK_LATENCY_MS ?? 8);
+const EPOCH = '000000000000000a';
+const APP_CSP =
+	"default-src 'self'; script-src 'self'; frame-src 'self'; object-src 'none'; base-uri 'none'";
+const COOKIE = 'tagmail_session';
+const SESSION_TOKEN = 'mock-session-token';
+const MAX_IDS = 100;
+/** A thread id that was merged into the newest thread. */
+const MERGED_ID = 999_999;
+
+const TYPES: Record<string, string> = {
+	'.html': 'text/html; charset=utf-8',
+	'.js': 'text/javascript',
+	'.css': 'text/css',
+	'.svg': 'image/svg+xml',
+	'.woff2': 'font/woff2',
+	'.json': 'application/json',
+	'.txt': 'text/plain'
+};
+
+let seq = 100;
+const extraRows = new Map<number, Row>();
+const extraOrder: number[] = [];
+const sseClients = new Set<ServerResponse>();
+const DAY = 86_400;
+const T0 = 1_795_000_000;
+let ownerExists = true;
+const imageSenders = new Set<string>();
+const initialSessions = () => [
+	{
+		id: 'c2Vzc2lvbi0x',
+		current: true,
+		userAgent: 'Mozilla/5.0 (X11; Linux x86_64) Chrome/147.0 Safari/537.36',
+		createdAt: T0,
+		lastSeenAt: T0 + 4 * DAY,
+		expiresAt: T0 + 30 * DAY,
+		idleExpiresAt: T0 + 18 * DAY
+	},
+	{
+		id: 'c2Vzc2lvbi0y',
+		current: false,
+		userAgent:
+			'Mozilla/5.0 (iPhone; CPU iPhone OS 19_1 like Mac OS X) Version/19.1 Mobile Safari/604.1',
+		createdAt: T0 - 10 * DAY,
+		lastSeenAt: T0 + 2 * DAY,
+		expiresAt: T0 + 20 * DAY,
+		idleExpiresAt: T0 + 16 * DAY
+	}
+];
+const initialDevices = () => [
+	{ id: 1, name: 'Workstation', createdAt: T0 - 20 * DAY, lastSeenAt: T0 + 3 * DAY }
+];
+let sessions = initialSessions();
+let devices = initialDevices();
+const currentAuth = () => ({ via: 'session', session: sessions[0], deviceId: null });
+
+const baseIds = Array.from({ length: THREAD_COUNT }, (_, i) => idAt(i));
+const inboxIndex = encodeIdIndex(baseIds);
+
+function cursor(): string {
+	return `${EPOCH}:${seq}`;
+}
+
+function row(id: number): Row | undefined {
+	const extra = extraRows.get(id);
+	if (extra) return extra;
+	const at = positionOf(id);
+	return at === undefined ? undefined : rowAt(at);
+}
+
+function allIds(): number[] {
+	return [...extraOrder, ...baseIds];
+}
+
+function matches(r: Row, i: number, query: string): boolean {
+	for (const term of query.toLowerCase().split(/\s+/).filter(Boolean)) {
+		if (term === 'is:starred' && !r.starred) return false;
+		else if (term === 'is:unread' && r.unreadCount === 0) return false;
+		else if (term === 'in:sent' && !isSent(i)) return false;
+		else if (term === 'has:attachment' && !r.hasAttachment) return false;
+		else if (term.startsWith('label:') && !r.labels.includes(term.slice(6))) return false;
+		else if (term.startsWith('from:')) {
+			const who = term.slice(5);
+			if (!r.senders.some((s) => s.email.includes(who) || s.name?.toLowerCase().includes(who)))
+				return false;
+		} else if (!term.includes(':')) {
+			const text = `${r.subject} ${r.snippet}`.toLowerCase();
+			if (!text.includes(term.replace(/"/g, ''))) return false;
+		}
+	}
+	return true;
+}
+
+function viewIds(view: string): number[] | null {
+	if (view === 'inbox') return null;
+	let query: string;
+	if (view.startsWith('label:')) query = `label:${view.slice(6)}`;
+	else if (view.startsWith('search:')) query = view.slice(7);
+	else return [];
+	const out: number[] = [];
+	for (const id of extraOrder) if (matches(extraRows.get(id)!, -1, query)) out.push(id);
+	for (let i = 0; i < THREAD_COUNT; i++) if (matches(rowAt(i), i, query)) out.push(baseIds[i]);
+	return out;
+}
+
+function send(
+	res: ServerResponse,
+	status: number,
+	body: unknown,
+	headers: Record<string, string> = {}
+) {
+	const data = typeof body === 'string' || body instanceof Uint8Array ? body : JSON.stringify(body);
+	res.writeHead(status, {
+		'content-type':
+			typeof body === 'string'
+				? 'text/plain'
+				: body instanceof Uint8Array
+					? 'application/octet-stream'
+					: 'application/json',
+		'cache-control': 'no-store',
+		'x-content-type-options': 'nosniff',
+		...headers
+	});
+	res.end(data);
+}
+
+function error(res: ServerResponse, status: number, code: string, message: string) {
+	send(res, status, { error: code, message });
+}
+
+function authed(req: IncomingMessage): boolean {
+	return (req.headers.cookie ?? '').split(/;\s*/).includes(`${COOKIE}=${SESSION_TOKEN}`);
+}
+
+async function body(req: IncomingMessage): Promise<Record<string, string>> {
+	const chunks: Buffer[] = [];
+	for await (const c of req) chunks.push(c as Buffer);
+	const text = Buffer.concat(chunks).toString('utf8');
+	return text ? (JSON.parse(text) as Record<string, string>) : {};
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+function login(res: ServerResponse, status = 200) {
+	send(res, status, currentAuth(), {
+		'set-cookie': `${COOKIE}=${SESSION_TOKEN}; HttpOnly; SameSite=Strict; Path=/`
+	});
+}
+
+function pushChanges(changes: unknown[]) {
+	const data = JSON.stringify({ changes, next: cursor(), more: false });
+	for (const client of sseClients)
+		client.write(`event: changes\nid: ${cursor()}\ndata: ${data}\n\n`);
+}
+
+async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
+	const method = req.method ?? 'GET';
+	const path = url.pathname;
+	if (method !== 'GET' && method !== 'HEAD' && req.headers['x-requested-with'] !== 'tagmail') {
+		return error(res, 403, 'csrf', 'missing X-Requested-With');
+	}
+	if (path === '/api/auth/login' && method === 'POST') {
+		const { password } = await body(req);
+		if (!ownerExists) return error(res, 401, 'setup_required', 'set up the owner first');
+		return password === PASSWORD
+			? login(res)
+			: error(res, 401, 'invalid_credentials', 'wrong password');
+	}
+	if (path === '/api/auth/setup' && method === 'POST') {
+		const { token, password } = await body(req);
+		if (ownerExists) return error(res, 409, 'already_set_up', 'the owner exists');
+		if (token !== SETUP_TOKEN) return error(res, 403, 'invalid_setup_token', 'bad token');
+		if ((password ?? '').length < 8) {
+			return send(res, 422, {
+				error: 'invalid',
+				message: 'at least 8 characters',
+				field: 'password'
+			});
+		}
+		ownerExists = true;
+		return login(res, 201);
+	}
+	if (path === '/api/auth/passkey/login/start' && method === 'POST') {
+		return error(res, 404, 'no_passkeys', 'no passkeys registered');
+	}
+	if (!ownerExists) return error(res, 401, 'setup_required', 'set up the owner first');
+	if (!authed(req)) return error(res, 401, 'unauthorized', 'sign in first');
+	if (path === '/api/auth/session') return send(res, 200, currentAuth());
+	if (path === '/api/auth/logout' && method === 'POST') {
+		res.setHeader('set-cookie', `${COOKIE}=; Max-Age=0; Path=/`);
+		return send(res, 204, '');
+	}
+	if (path === '/api/mailboxes') return send(res, 200, MAILBOXES);
+	if (path === '/api/labels')
+		return send(
+			res,
+			200,
+			LABELS.map((l) => ({ ...l, color: null }))
+		);
+	if (path === '/api/sessions') return send(res, 200, { sessions });
+	if (path === '/api/devices') return send(res, 200, { devices });
+	if (path === '/api/passkeys') return send(res, 200, { passkeys: [] });
+	if (path === '/api/pairing' && method === 'POST') {
+		return send(res, 201, {
+			code: 'K7QD2XPM',
+			expiresAt: Math.floor(Date.now() / 1000) + 300,
+			url: `tagmail://pair?server=${encodeURIComponent(url.origin)}&code=K7QD2XPM`
+		});
+	}
+	let m = /^\/api\/sessions\/([^/]+)$/.exec(path);
+	if (m && method === 'DELETE') {
+		sessions = sessions.filter((s) => s.id !== decodeURIComponent(m![1]));
+		return send(res, 204, '');
+	}
+	m = /^\/api\/devices\/(\d+)$/.exec(path);
+	if (m && method === 'DELETE') {
+		devices = devices.filter((d) => d.id !== Number(m![1]));
+		return send(res, 204, '');
+	}
+	m = /^\/api\/views\/([^/]+)\/index$/.exec(path);
+	if (m) {
+		await sleep(LATENCY_MS);
+		const view = decodeURIComponent(m[1]);
+		const ids = viewIds(view);
+		const bytes =
+			ids === null
+				? extraOrder.length
+					? encodeIdIndex(allIds())
+					: inboxIndex
+				: encodeIdIndex(ids);
+		return send(res, 200, bytes, { 'x-tagmail-cursor': cursor() });
+	}
+	if (path === '/api/threads') {
+		const ids = (url.searchParams.get('ids') ?? '').split(',').map(Number);
+		if (ids.length > MAX_IDS || ids.some((id) => !Number.isSafeInteger(id))) {
+			return error(res, 400, 'bad_request', 'ids must be comma-separated thread ids');
+		}
+		await sleep(LATENCY_MS);
+		const threads = ids.map(row).filter((r): r is Row => r !== undefined);
+		return send(res, 200, { cursor: cursor(), threads });
+	}
+	m = /^\/api\/threads\/(\d+)$/.exec(path);
+	if (m) {
+		const requested = Number(m[1]);
+		const r = row(requested === MERGED_ID ? idAt(0) : requested);
+		if (!r) return error(res, 404, 'not_found', 'no such thread');
+		await sleep(LATENCY_MS);
+		return send(res, 200, { thread: r, messages: messagesOf(r) });
+	}
+	if (path === '/api/image-senders' && method === 'POST') {
+		const { address, allow } = (await body(req)) as unknown as { address: string; allow: boolean };
+		if (allow) imageSenders.add(address.toLowerCase());
+		else imageSenders.delete(address.toLowerCase());
+		return send(res, 200, { addresses: [...imageSenders] });
+	}
+	m = /^\/api\/messages\/(\d+)$/.exec(path);
+	if (m) {
+		const found = messageById(Number(m[1]));
+		if (!found) return error(res, 404, 'not_found', 'no such message');
+		const { row: r, message: msg } = found;
+		await sleep(LATENCY_MS);
+		return send(res, 200, {
+			id: msg.id,
+			threadId: r.id,
+			accountId: r.accountId,
+			subject: msg.subject,
+			from: msg.from ? [msg.from] : [],
+			to: msg.to,
+			cc: msg.cc,
+			replyTo: [],
+			date: msg.date,
+			messageId: `${msg.id}@mock.tagmail.test`,
+			unread: msg.unread,
+			starred: msg.starred,
+			body: 'html',
+			remoteImages: remoteImages(r, msg),
+			imagesAllowed: !!msg.from && imageSenders.has(msg.from.email.toLowerCase()),
+			parts: partsOf(msg)
+		});
+	}
+	m = /^\/api\/parts\/([^/]+)$/.exec(path);
+	if (m) {
+		res.writeHead(200, {
+			'content-type': 'application/pdf',
+			'content-disposition': 'attachment; filename="Statement-November.pdf"',
+			'x-content-type-options': 'nosniff'
+		});
+		return res.end('%PDF-1.4\n%mock\n');
+	}
+	m = /^\/api\/messages\/(\d+)\/render$/.exec(path);
+	if (m) {
+		const found = messageById(Number(m[1]));
+		if (!found) return error(res, 404, 'not_found', 'no such message');
+		const images =
+			url.searchParams.get('images') === '1' ||
+			(!!found.message.from && imageSenders.has(found.message.from.email.toLowerCase()));
+		const html = renderMessage(found.row, found.message, images);
+		res.writeHead(200, {
+			'content-type': 'text/html; charset=utf-8',
+			'cache-control': 'no-store',
+			'x-content-type-options': 'nosniff',
+			'content-security-policy': RENDER_CSP
+		});
+		return res.end(html);
+	}
+	if (path === '/api/events') {
+		res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' });
+		res.write(': connected\n\n');
+		sseClients.add(res);
+		req.on('close', () => sseClients.delete(res));
+		return;
+	}
+	return error(res, 404, 'not_found', 'no such route');
+}
+
+/** Test hooks: deliver new mail through the change feed. */
+async function mock(req: IncomingMessage, res: ServerResponse, url: URL) {
+	if (url.pathname === '/__mock/new-mail' && req.method === 'POST') {
+		const { subject } = await body(req);
+		const id = THREAD_COUNT + 1000 + extraOrder.length;
+		const r: Row = {
+			...rowAt(0),
+			id,
+			subject: subject ?? 'Fresh off the wire',
+			snippet: 'Delivered through the change feed while you were looking',
+			lastDate: Math.floor(Date.now() / 1000),
+			unreadCount: 1,
+			messageCount: 1,
+			labels: []
+		};
+		extraRows.set(id, r);
+		extraOrder.unshift(id);
+		seq++;
+		pushChanges([
+			{
+				seq,
+				entity: 'thread',
+				id,
+				op: { kind: 'upsert' },
+				payload: { lastDate: r.lastDate, mailboxes: [1], removedFrom: [] }
+			}
+		]);
+		return send(res, 200, { id });
+	}
+	if (url.pathname === '/__mock/reset' && req.method === 'POST') {
+		ownerExists = true;
+		sessions = initialSessions();
+		devices = initialDevices();
+		extraRows.clear();
+		imageSenders.clear();
+		extraOrder.length = 0;
+		return send(res, 204, '');
+	}
+	if (url.pathname === '/__mock/fresh-install' && req.method === 'POST') {
+		ownerExists = false;
+		return send(res, 204, '');
+	}
+	return error(res, 404, 'not_found', 'no such mock hook');
+}
+
+function serveStatic(res: ServerResponse, path: string) {
+	let file = normalize(join(ROOT, decodeURIComponent(path)));
+	if (!file.startsWith(ROOT)) return error(res, 400, 'bad_request', 'bad path');
+	if (!existsSync(file) || statSync(file).isDirectory()) file = join(ROOT, 'index.html');
+	const immutable = path.startsWith('/_app/immutable/');
+	res.writeHead(200, {
+		'content-type': TYPES[extname(file)] ?? 'application/octet-stream',
+		'content-security-policy': APP_CSP,
+		'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-cache',
+		'x-content-type-options': 'nosniff'
+	});
+	createReadStream(file).pipe(res);
+}
+
+createServer((req, res) => {
+	const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+	const run = url.pathname.startsWith('/api/')
+		? api(req, res, url)
+		: url.pathname.startsWith('/__mock/')
+			? mock(req, res, url)
+			: Promise.resolve(serveStatic(res, url.pathname));
+	run.catch((e: unknown) => {
+		console.error(e);
+		if (!res.headersSent) error(res, 500, 'internal', 'mock failure');
+	});
+}).listen(PORT, '127.0.0.1', () =>
+	console.log(`mock API on http://127.0.0.1:${PORT} serving ${ROOT}`)
+);
