@@ -199,8 +199,15 @@
 		margin: 0 16px 16px 0;
 		overflow: hidden;
 		border-radius: var(--radius-lg);
+		border: 1px solid var(--line);
 		background: var(--surface);
-		box-shadow: var(--shadow);
+	}
+
+	/* A blurred shadow on main cost WebKit ~100 ms per startup frame and was
+	   repainted on every scroll frame; the border and this layer avoid both. */
+	main > :global(*) {
+		height: 100%;
+		will-change: transform;
 	}
 
 	@media (max-width: 720px) {
@@ -254,8 +261,8 @@
 
 		main {
 			margin: 0;
+			border: 0;
 			border-radius: 0;
-			box-shadow: none;
 		}
 	}
 </style>
