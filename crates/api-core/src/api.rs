@@ -57,6 +57,9 @@ pub const WEB_APP_CSP: &str = concat!(app_csp!(), "; frame-ancestors 'none'");
 pub enum Method {
     Get,
     Post,
+    Put,
+    Patch,
+    Delete,
     Other,
 }
 

@@ -84,15 +84,32 @@ pub fn api_routes() -> Vec<(HttpMethod, &'static str)> {
             .expect("route methods are valid");
         (method, *path)
     });
-    let core = tagmail_api_core::routes::ROUTES.iter().map(|r| {
-        let method = match r.method {
-            Method::Get => HttpMethod::GET,
-            Method::Post => HttpMethod::POST,
-            Method::Other => unreachable!("api-core routes are GET or POST"),
-        };
-        (method, r.path)
-    });
+    let core = tagmail_api_core::routes::ROUTES
+        .iter()
+        .map(|r| (to_http_method(r.method), r.path));
     server.chain(core).collect()
+}
+
+fn to_http_method(method: Method) -> HttpMethod {
+    match method {
+        Method::Get => HttpMethod::GET,
+        Method::Post => HttpMethod::POST,
+        Method::Put => HttpMethod::PUT,
+        Method::Patch => HttpMethod::PATCH,
+        Method::Delete => HttpMethod::DELETE,
+        Method::Other => unreachable!("api-core routes name a concrete method"),
+    }
+}
+
+fn from_http_method(method: &HttpMethod) -> Method {
+    match *method {
+        HttpMethod::GET => Method::Get,
+        HttpMethod::POST => Method::Post,
+        HttpMethod::PUT => Method::Put,
+        HttpMethod::PATCH => Method::Patch,
+        HttpMethod::DELETE => Method::Delete,
+        _ => Method::Other,
+    }
 }
 
 pub fn router(state: AppState) -> Router {
@@ -152,11 +169,7 @@ async fn api(
     query: &str,
     body: &[u8],
 ) -> HttpResponse {
-    let method = match method {
-        HttpMethod::GET => Method::Get,
-        HttpMethod::POST => Method::Post,
-        _ => Method::Other,
-    };
+    let method = from_http_method(&method);
     let resp = state
         .api
         .handle(Request {
@@ -282,6 +295,20 @@ async fn events(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn methods_map_both_ways() {
+        for method in [
+            Method::Get,
+            Method::Post,
+            Method::Put,
+            Method::Patch,
+            Method::Delete,
+        ] {
+            assert_eq!(from_http_method(&to_http_method(method)), method);
+        }
+        assert_eq!(from_http_method(&HttpMethod::HEAD), Method::Other);
+    }
 
     #[test]
     fn resume_prefers_last_event_id() {
