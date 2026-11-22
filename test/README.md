@@ -44,3 +44,26 @@ docker run --rm -i --network container:$id python:3.13-alpine \
   python3 -c "$(cat test/smoke/check_seed.py)" --port 31143 --manifest - \
   < target/seed/tagmail-seed.json
 ```
+
+## IMAP integration tests
+
+`crates/imap/tests/dovecot.rs` runs against the `dovecot` service as
+`user2`, each test in its own fresh mailbox:
+
+```bash
+cargo xtask dovecot up
+cargo test -p tagmail-imap --features dovecot-tests --test dovecot
+```
+
+`TAGMAIL_IMAP_ADDR` (default `127.0.0.1:10143`) points them elsewhere. With
+a remote Docker daemon, build a static test binary and run it in the
+container's network namespace:
+
+```bash
+CC_x86_64_unknown_linux_musl=gcc cargo test -p tagmail-imap \
+  --features dovecot-tests --test dovecot --target x86_64-unknown-linux-musl --no-run
+id=$(docker compose -f test/compose.yml ps -q dovecot)
+c=$(docker create --network container:$id -e TAGMAIL_IMAP_ADDR=127.0.0.1:31143 busybox /it)
+docker cp <test binary> $c:/it && docker start $c && docker wait $c
+docker logs $c; docker rm $c
+```
