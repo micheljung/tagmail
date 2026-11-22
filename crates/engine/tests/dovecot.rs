@@ -158,6 +158,8 @@ async fn external_changes_are_reflected_per_capability_path() {
         let b1_row = running.locations(&b1).await[0].1;
 
         s.select("INBOX", SelectOptions::default()).await.unwrap();
+        let changed = Instant::now();
+        let inbox_deadline = changed + LIVE_BUDGET;
         s.store_flags(
             &[u1].into_iter().collect(),
             StoreOp::Add,
@@ -179,8 +181,8 @@ async fn external_changes_are_reflected_per_capability_path() {
             .await
             .unwrap();
 
-        let started = Instant::now();
-        eventually("flags and keyword", LIVE_BUDGET, || async {
+        let left = || inbox_deadline.saturating_duration_since(Instant::now());
+        eventually("flags and keyword", left(), || async {
             running
                 .locations(&a1)
                 .await
@@ -188,11 +190,11 @@ async fn external_changes_are_reflected_per_capability_path() {
                 .is_some_and(|l| l.2 == 2 && l.3 == "$label_Work")
         })
         .await;
-        eventually("expunge", LIVE_BUDGET, || async {
+        eventually("expunge", left(), || async {
             running.locations(&a2).await.is_empty()
         })
         .await;
-        eventually("move", LIVE_BUDGET, || async {
+        eventually("move", left(), || async {
             let locs = running.locations(&b1).await;
             locs.len() == 1 && locs[0].0 == "INBOX" && locs[0].1 == b1_row
         })
@@ -203,7 +205,7 @@ async fn external_changes_are_reflected_per_capability_path() {
         .await;
         println!(
             "{user}: external changes visible after {:?}",
-            started.elapsed()
+            changed.elapsed()
         );
         let threads = running
             .query(
