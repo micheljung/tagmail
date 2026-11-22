@@ -30,6 +30,8 @@ serde_json = "1"
 sha2 = "0.11"
 tagmail-api-core = { path = "crates/api-core" }
 tagmail-core = { path = "crates/core" }
+tagmail-engine = { path = "crates/engine" }
+tagmail-imap = { path = "crates/imap" }
 tagmail-store = { path = "crates/store" }
 tar = "0.4"
 tempfile = "3"
