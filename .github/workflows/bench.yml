@@ -20,6 +20,8 @@ env:
   SEED_COUNT: 100000
   SEED_AVG_KB: 8
   SEED_DIR: ${{ github.workspace }}/../tagmail-seed
+  SEED2: 2
+  SEED2_DIR: ${{ github.workspace }}/../tagmail-seed2
 
 jobs:
   changes:
@@ -80,6 +82,61 @@ jobs:
         with:
           name: bench-rss
           path: target/bench-rss.json
+          if-no-files-found: warn
+      - name: Server logs
+        if: failure()
+        run: docker compose -f test/compose.yml logs dovecot
+
+  search:
+    needs: changes
+    if: >-
+      always() && (
+        github.event_name != 'pull_request' ||
+        (github.event.action == 'labeled' && github.event.label.name == 'perf') ||
+        (github.event.action != 'labeled' && (
+          needs.changes.outputs.crates == 'true' ||
+          contains(github.event.pull_request.labels.*.name, 'perf')))
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100"
+      - uses: Swatinem/rust-cache@v2
+      - name: Restore seeded Maildir (user1)
+        id: seed-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.SEED_DIR }}
+          key: seed-${{ hashFiles('xtask/src/seed.rs') }}-${{ env.SEED }}-${{ env.SEED_COUNT }}-${{ env.SEED_AVG_KB }}
+      - name: Seed Maildir (user1)
+        if: steps.seed-cache.outputs.cache-hit != 'true'
+        run: cargo xtask seed --seed "$SEED" --count "$SEED_COUNT" --avg-kb "$SEED_AVG_KB" --out "$SEED_DIR"
+      - name: Restore seeded Maildir (user2)
+        id: seed2-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.SEED2_DIR }}
+          key: seed-${{ hashFiles('xtask/src/seed.rs') }}-${{ env.SEED2 }}-${{ env.SEED_COUNT }}-${{ env.SEED_AVG_KB }}
+      - name: Seed Maildir (user2)
+        if: steps.seed2-cache.outputs.cache-hit != 'true'
+        run: cargo xtask seed --seed "$SEED2" --count "$SEED_COUNT" --avg-kb "$SEED_AVG_KB" --out "$SEED2_DIR"
+      - name: Start Dovecot
+        run: cargo xtask dovecot up
+      - name: Load seeds into Dovecot
+        run: |
+          cargo xtask dovecot load --from "$SEED_DIR" --user user1
+          cargo xtask dovecot load --from "$SEED2_DIR" --user user2
+      - name: Search latency gate
+        run: cargo xtask bench-search --out target/bench-search.json
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: bench-search
+          path: target/bench-search.json
           if-no-files-found: warn
       - name: Server logs
         if: failure()

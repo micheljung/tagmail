@@ -23,6 +23,8 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 const LOG_TAIL_LINES: usize = 50;
 const KIB: f64 = 1024.0;
+const BYTES_PER_KIB: u64 = 1024;
+const BYTES_PER_MB: f64 = 1_000_000.0;
 /// Where Dovecot listens inside its container (`test/compose.yml`).
 const DOVECOT_INNER_ADDR: &str = "127.0.0.1:31143";
 const MUSL_TARGET: &str = "x86_64-unknown-linux-musl";
@@ -38,7 +40,8 @@ pub struct Options {
     pub password: String,
     pub idle: Duration,
     pub window: Duration,
-    pub limit_mib: u64,
+    /// Gate in decimal megabytes (10^6 bytes), as the spec's "64 MB".
+    pub limit_mb: u64,
     pub sync_timeout: Duration,
     pub out: PathBuf,
 }
@@ -47,6 +50,23 @@ pub struct Options {
 /// Dovecot container's network namespace, for Docker daemons whose
 /// published ports are not reachable from here.
 pub fn run_in_dovecot_network(opts: &Options) -> Result<()> {
+    let args = format!(
+        "--user {user} --password {password} --idle-secs {idle} --window-secs {window} \
+         --limit-mb {limit} --sync-timeout-secs {timeout}",
+        user = opts.user,
+        password = opts.password,
+        idle = opts.idle.as_secs(),
+        window = opts.window.as_secs(),
+        limit = opts.limit_mb,
+        timeout = opts.sync_timeout.as_secs(),
+    );
+    run_xtask_in_dovecot_network("bench-rss", &args, &opts.out)
+}
+
+/// Runs `cargo xtask <command> <args> --server … --imap … --out …` with
+/// static binaries in a container sharing the Dovecot container's network
+/// namespace and copies the JSON result to `out`.
+pub(crate) fn run_xtask_in_dovecot_network(command: &str, args: &str, out: &Path) -> Result<()> {
     let root = workspace_root();
     let mut build = cargo();
     build
@@ -62,18 +82,11 @@ pub fn run_in_dovecot_network(opts: &Options) -> Result<()> {
     let dovecot = harness::container(harness::DOVECOT)?;
     let inner = |name: &str| format!("{RUNNER_DIR}/{name}");
     let script = format!(
-        "{xtask} bench-rss --server {server} --imap {DOVECOT_INNER_ADDR} --user {user} \
-         --password {password} --idle-secs {idle} --window-secs {window} --limit-mib {limit} \
-         --sync-timeout-secs {timeout} --out {out} > {log} 2>&1",
+        "{xtask} {command} --server {server} --imap {DOVECOT_INNER_ADDR} {args} \
+         --out {result} > {log} 2>&1",
         xtask = inner("xtask"),
         server = inner("tagmail-server"),
-        user = opts.user,
-        password = opts.password,
-        idle = opts.idle.as_secs(),
-        window = opts.window.as_secs(),
-        limit = opts.limit_mib,
-        timeout = opts.sync_timeout.as_secs(),
-        out = inner("result.json"),
+        result = inner("result.json"),
         log = inner("bench.log"),
     );
     let runner = output(Command::new("docker").args([
@@ -86,7 +99,7 @@ pub fn run_in_dovecot_network(opts: &Options) -> Result<()> {
         &script,
     ]))?;
     let runner = runner.trim().to_owned();
-    let result = run_runner(&runner, &bin, opts);
+    let result = run_runner(&runner, &bin, command, out);
     let _ = Command::new("docker")
         .args(["rm", "--force", &runner])
         .stdout(Stdio::null())
@@ -94,8 +107,10 @@ pub fn run_in_dovecot_network(opts: &Options) -> Result<()> {
     result
 }
 
-fn run_runner(runner: &str, bin: &Path, opts: &Options) -> Result<()> {
-    let staging = workspace_root().join("target").join("bench-rss-runner");
+fn run_runner(runner: &str, bin: &Path, command: &str, out: &Path) -> Result<()> {
+    let staging = workspace_root()
+        .join("target")
+        .join(format!("{command}-runner"));
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging)?;
     for name in ["xtask", "tagmail-server"] {
@@ -119,15 +134,15 @@ fn run_runner(runner: &str, bin: &Path, opts: &Options) -> Result<()> {
         .args([
             "cp",
             &format!("{runner}:{RUNNER_DIR}/result.json"),
-            &opts.out.display().to_string(),
+            &out.display().to_string(),
         ])
         .status()?;
     if copied.success() {
-        println!("result: {}", opts.out.display());
+        println!("result: {}", out.display());
     }
     if code.trim() != "0" {
         bail!(
-            "bench-rss in the Dovecot network exited with {}",
+            "{command} in the Dovecot network exited with {}",
             code.trim()
         );
     }
@@ -135,8 +150,14 @@ fn run_runner(runner: &str, bin: &Path, opts: &Options) -> Result<()> {
 }
 
 pub fn run_local(opts: &Options) -> Result<()> {
-    let server = match &opts.server {
-        Some(path) => path.clone(),
+    let server = server_binary(opts.server.as_deref())?;
+    in_work_dir("bench-rss", |work| bench(opts, &server, work))
+}
+
+/// `server`, or a fresh release build of `tagmail-server`.
+pub(crate) fn server_binary(server: Option<&Path>) -> Result<PathBuf> {
+    Ok(match server {
+        Some(path) => path.to_owned(),
         None => {
             run(cargo().args([
                 "build",
@@ -151,11 +172,16 @@ pub fn run_local(opts: &Options) -> Result<()> {
                 .join("release")
                 .join("tagmail-server")
         }
-    };
-    let work = std::env::temp_dir().join(format!("tagmail-bench-rss-{}", std::process::id()));
+    })
+}
+
+/// Runs `f` in a fresh temporary directory; on failure the directory is
+/// kept and the server log tail printed.
+pub(crate) fn in_work_dir(name: &str, f: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+    let work = std::env::temp_dir().join(format!("tagmail-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&work);
     fs::create_dir_all(&work)?;
-    let result = bench(opts, &server, &work);
+    let result = f(&work);
     if result.is_ok() {
         let _ = fs::remove_dir_all(&work);
     } else {
@@ -169,9 +195,18 @@ pub fn run_local(opts: &Options) -> Result<()> {
     result
 }
 
-struct Running {
-    child: Child,
-    addr: SocketAddr,
+pub(crate) struct Running {
+    pub(crate) child: Child,
+    pub(crate) addr: SocketAddr,
+    /// Owner session cookie, `name=value`.
+    pub(crate) session: String,
+}
+
+impl Running {
+    pub(crate) fn get(&self, path: &str) -> Result<(u16, Vec<u8>)> {
+        let (status, _, body) = request(self.addr, "GET", path, None, Some(&self.session))?;
+        Ok((status, body))
+    }
 }
 
 impl Drop for Running {
@@ -181,9 +216,15 @@ impl Drop for Running {
     }
 }
 
-fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
+/// Starts `tagmail-server` on a free loopback port with its data in `work`,
+/// appending to `work/server.log`, waits until it answers and logs in as
+/// the owner (setting the owner up on the first start).
+pub(crate) fn spawn_server(server: &Path, work: &Path) -> Result<Running> {
     let addr = free_loopback_addr()?;
-    let log = fs::File::create(work.join("server.log"))?;
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(work.join("server.log"))?;
     let child = Command::new(server)
         .arg("--listen")
         .arg(addr.to_string())
@@ -196,33 +237,95 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
         .stderr(log)
         .spawn()
         .with_context(|| format!("starting {}", server.display()))?;
-    let mut running = Running { child, addr };
-    let pid = running.child.id();
+    let mut running = Running {
+        child,
+        addr,
+        session: String::new(),
+    };
     wait_until_serving(&mut running)?;
-    let session = set_up_owner(addr, &work.join("server.log"))?;
-    let session = Some(session.as_str());
+    running.session = owner_session(addr, &work.join("server.log"))?;
+    Ok(running)
+}
 
+const OWNER_PASSWORD: &str = "bench-owner-password";
+
+fn owner_session(addr: SocketAddr, log: &Path) -> Result<String> {
+    let login = json!({ "password": OWNER_PASSWORD }).to_string();
+    let (status, head, _) = request(addr, "POST", "/api/auth/login", Some(&login), None)?;
+    if status == 200 {
+        return session_cookie(&head);
+    }
+    set_up_owner(addr, log)
+}
+
+/// Sets the owner password with the setup token from the server log and
+/// returns the session cookie.
+fn set_up_owner(addr: SocketAddr, log: &Path) -> Result<String> {
+    const MARKER: &str = "one-time setup token ";
+    let log = fs::read_to_string(log)?;
+    let token: String = log
+        .rsplit_once(MARKER)
+        .context("no setup token in the server log")?
+        .1
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    let setup = json!({ "token": token, "password": OWNER_PASSWORD }).to_string();
+    let (status, head, body) = request(addr, "POST", "/api/auth/setup", Some(&setup), None)?;
+    if status != 201 {
+        bail!(
+            "POST /api/auth/setup: {status} {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    session_cookie(&head)
+}
+
+fn session_cookie(head: &str) -> Result<String> {
+    head.lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("set-cookie")
+                .then(|| value.trim().split(';').next().unwrap_or("").to_owned())
+        })
+        .context("no session cookie")
+}
+
+/// Adds an account for `user` on the IMAP server at `imap`.
+pub(crate) fn add_account(
+    running: &Running,
+    imap: SocketAddr,
+    user: &str,
+    password: &str,
+) -> Result<()> {
     let account = json!({
-        "name": "bench",
-        "imapHost": opts.imap.ip().to_string(),
-        "imapPort": opts.imap.port(),
+        "name": user,
+        "imapHost": imap.ip().to_string(),
+        "imapPort": imap.port(),
         "imapTls": "starttls",
-        "smtpHost": opts.imap.ip().to_string(),
+        "smtpHost": imap.ip().to_string(),
         "smtpPort": 25,
         "smtpTls": "starttls",
-        "username": opts.user,
-        "password": opts.password,
+        "username": user,
+        "password": password,
     });
     let (status, body) = http(
-        addr,
+        running.addr,
         "POST",
         "/api/accounts",
         Some(&account.to_string()),
-        session,
+        Some(&running.session),
     )?;
     if status != 201 {
         bail!("POST /api/accounts: {status} {body}");
     }
+    Ok(())
+}
+
+fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
+    let mut running = spawn_server(server, work)?;
+    let pid = running.child.id();
+    add_account(&running, opts.imap, &opts.user, &opts.password)?;
 
     println!("syncing {} at {}", opts.user, opts.imap);
     let sync_started = Instant::now();
@@ -232,7 +335,7 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
     let settled = loop {
         check_alive(&mut running)?;
         sync_peak_kib = sync_peak_kib.max(proc_status_kib(pid, "VmRSS")?);
-        let account = account_status(addr, session)?;
+        let account = account_status(&running)?;
         let live = account["phase"] == "live";
         let pending = account["textPending"].as_u64().unwrap_or(u64::MAX);
         if live && pending == 0 {
@@ -286,13 +389,15 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
         .max()
         .context("no RSS samples in the gate window")?;
     let idle_max_kib = samples.iter().map(|(_, kib)| *kib).max().unwrap_or(0);
-    let pass = window_max_kib <= opts.limit_mib * 1024;
+    let pass = window_max_kib * BYTES_PER_KIB <= opts.limit_mb * BYTES_PER_MB as u64;
     stop(&mut running);
 
     let result = json!({
         "scenario": SCENARIO,
         "pass": pass,
-        "limitMib": opts.limit_mib,
+        "limitMb": opts.limit_mb,
+        "limitMib": round(opts.limit_mb as f64 * BYTES_PER_MB / (KIB * KIB)),
+        "idleWindowMaxRssMb": round(mb(window_max_kib)),
         "idleWindowMaxRssMib": round(mib(window_max_kib)),
         "idleMaxRssMib": round(mib(idle_max_kib)),
         "syncPeakRssMib": round(mib(sync_peak_kib)),
@@ -307,27 +412,48 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
         fs::create_dir_all(dir)?;
     }
     fs::write(&opts.out, serde_json::to_string_pretty(&result)? + "\n")?;
+    let verdict = if pass { "PASS" } else { "FAIL" };
+    let limit_mib = opts.limit_mb as f64 * BYTES_PER_MB / (KIB * KIB);
     println!(
-        "{SCENARIO}\n  idle max RSS, last {} s: {:.1} MiB (limit {} MiB) {}\n  \
-         idle max RSS: {:.1} MiB\n  peak RSS during sync: {:.1} MiB (not gated)\n  \
+        "{SCENARIO}\n  idle max RSS, last {} s: {:.1} MB = {:.1} MiB (limit {} MB = {limit_mib:.2} MiB) \
+         {verdict}\n  idle max RSS: {:.1} MiB\n  peak RSS during sync: {:.1} MiB (not gated)\n  \
          VmHWM: {:.1} MiB\n  sync: {:.0} s",
         opts.window.as_secs(),
+        mb(window_max_kib),
         mib(window_max_kib),
-        opts.limit_mib,
-        if pass { "PASS" } else { "FAIL" },
+        opts.limit_mb,
         mib(idle_max_kib),
         mib(sync_peak_kib),
         mib(hwm_kib),
         sync_duration.as_secs_f64(),
     );
+    step_summary(&format!(
+        "### Idle RSS gate (AC 9): {verdict}\n\n{SCENARIO}\n\n\
+         | Measure | Value |\n|---|---|\n\
+         | Idle max RSS, last {} s (gated) | {:.1} MB ({:.1} MiB) |\n\
+         | Limit | {} MB ({limit_mib:.2} MiB) |\n\
+         | Idle max RSS | {:.1} MiB |\n\
+         | Peak RSS during sync (not gated) | {:.1} MiB |\n\
+         | VmHWM | {:.1} MiB |\n\
+         | Sync | {:.0} s |\n",
+        opts.window.as_secs(),
+        mb(window_max_kib),
+        mib(window_max_kib),
+        opts.limit_mb,
+        mib(idle_max_kib),
+        mib(sync_peak_kib),
+        mib(hwm_kib),
+        sync_duration.as_secs_f64(),
+    ))?;
     if !pass {
         bail!("idle RSS gate failed");
     }
     Ok(())
 }
 
-fn account_status(addr: SocketAddr, session: Option<&str>) -> Result<Value> {
-    let (status, body) = http(addr, "GET", "/api/status", None, session)?;
+fn account_status(running: &Running) -> Result<Value> {
+    let (status, body) = running.get("/api/status")?;
+    let body = String::from_utf8_lossy(&body);
     if status != 200 {
         bail!("GET /api/status: {status} {body}");
     }
@@ -352,7 +478,7 @@ fn wait_until_serving(running: &mut Running) -> Result<()> {
     }
 }
 
-fn check_alive(running: &mut Running) -> Result<()> {
+pub(crate) fn check_alive(running: &mut Running) -> Result<()> {
     if let Some(status) = running.child.try_wait()? {
         bail!("tagmail-server exited with {status}");
     }
@@ -360,7 +486,7 @@ fn check_alive(running: &mut Running) -> Result<()> {
 }
 
 /// SIGTERM for a graceful shutdown; killed by [`Running`]'s drop otherwise.
-fn stop(running: &mut Running) {
+pub(crate) fn stop(running: &mut Running) {
     let terminated = Command::new("kill")
         .args(["-TERM", &running.child.id().to_string()])
         .status()
@@ -377,14 +503,14 @@ fn stop(running: &mut Running) {
     }
 }
 
-fn sleep_until_next(tick: Instant) -> Instant {
+pub(crate) fn sleep_until_next(tick: Instant) -> Instant {
     let next = tick + SAMPLE_INTERVAL;
     std::thread::sleep(next.saturating_duration_since(Instant::now()));
     next
 }
 
 /// A `kB` field of `/proc/<pid>/status`.
-fn proc_status_kib(pid: u32, field: &str) -> Result<u64> {
+pub(crate) fn proc_status_kib(pid: u32, field: &str) -> Result<u64> {
     let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
     status
         .lines()
@@ -397,7 +523,23 @@ fn mib(kib: u64) -> f64 {
     kib as f64 / KIB
 }
 
-fn round(v: f64) -> f64 {
+fn mb(kib: u64) -> f64 {
+    (kib * BYTES_PER_KIB) as f64 / BYTES_PER_MB
+}
+
+/// Appends Markdown to the GitHub Actions job summary, if there is one.
+pub(crate) fn step_summary(markdown: &str) -> Result<()> {
+    if let Some(path) = std::env::var_os("GITHUB_STEP_SUMMARY") {
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?
+            .write_all(markdown.as_bytes())?;
+    }
+    Ok(())
+}
+
+pub(crate) fn round(v: f64) -> f64 {
     (v * 10.0).round() / 10.0
 }
 
@@ -406,34 +548,7 @@ fn free_loopback_addr() -> Result<SocketAddr> {
 }
 
 /// One HTTP/1.0 exchange, so the response is neither chunked nor kept alive.
-/// Sets the owner password with the setup token from the server log and
-/// returns the session cookie.
-fn set_up_owner(addr: SocketAddr, log: &Path) -> Result<String> {
-    const MARKER: &str = "one-time setup token ";
-    let log = fs::read_to_string(log)?;
-    let token: String = log
-        .split_once(MARKER)
-        .context("no setup token in the server log")?
-        .1
-        .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .collect();
-    let password = format!("bench-{}", std::process::id());
-    let setup = json!({ "token": token, "password": password }).to_string();
-    let (status, head, body) = request(addr, "POST", "/api/auth/setup", Some(&setup), None)?;
-    if status != 201 {
-        bail!("POST /api/auth/setup: {status} {body}");
-    }
-    head.lines()
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("set-cookie")
-                .then(|| value.trim().split(';').next().unwrap_or("").to_owned())
-        })
-        .context("no session cookie")
-}
-
-fn http(
+pub(crate) fn http(
     addr: SocketAddr,
     method: &str,
     path: &str,
@@ -441,17 +556,18 @@ fn http(
     session: Option<&str>,
 ) -> Result<(u16, String)> {
     let (status, _, body) = request(addr, method, path, body, session)?;
-    Ok((status, body))
+    Ok((status, String::from_utf8_lossy(&body).into_owned()))
 }
 
-/// Returns status, head and body.
+/// Status, head and body. Every request carries `X-Requested-With`, which
+/// the server requires on POSTs.
 fn request(
     addr: SocketAddr,
     method: &str,
     path: &str,
     body: Option<&str>,
     session: Option<&str>,
-) -> Result<(u16, String, String)> {
+) -> Result<(u16, String, Vec<u8>)> {
     let mut stream = TcpStream::connect_timeout(&addr, HTTP_TIMEOUT)?;
     stream.set_read_timeout(Some(HTTP_TIMEOUT))?;
     stream.set_write_timeout(Some(HTTP_TIMEOUT))?;
@@ -465,24 +581,26 @@ fn request(
             .map(|c| format!("Cookie: {c}\r\n"))
             .unwrap_or_default(),
     )?;
-    let mut response = String::new();
-    stream.read_to_string(&mut response)?;
-    let (head, body) = response
-        .split_once("\r\n\r\n")
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    let split = response
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
         .context("malformed HTTP response")?;
+    let head = String::from_utf8_lossy(&response[..split]);
     let status = head
         .split(' ')
         .nth(1)
         .and_then(|s| s.parse().ok())
         .context("malformed HTTP status line")?;
-    Ok((status, head.to_owned(), body.to_owned()))
+    Ok((status, head.into_owned(), response[split + 4..].to_vec()))
 }
 
-fn workspace_root() -> PathBuf {
+pub(crate) fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
-fn cargo() -> Command {
+pub(crate) fn cargo() -> Command {
     let mut cmd = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
     cmd.current_dir(workspace_root());
     cmd

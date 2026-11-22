@@ -1,4 +1,5 @@
 mod bench_rss;
+mod bench_search;
 mod harness;
 mod seed;
 
@@ -60,8 +61,9 @@ enum Command {
         /// Gated tail of the idle period
         #[arg(long, default_value_t = 60)]
         window_secs: u64,
+        /// Gate in decimal megabytes (64 MB = 61.04 MiB)
         #[arg(long, default_value_t = 64)]
-        limit_mib: u64,
+        limit_mb: u64,
         /// Give up if the sync and text pass take longer
         #[arg(long, default_value_t = 3600)]
         sync_timeout_secs: u64,
@@ -70,6 +72,33 @@ enum Command {
         out: PathBuf,
         /// Run the server inside the Dovecot container's network namespace
         /// (for Docker daemons whose published ports are unreachable)
+        #[arg(long)]
+        in_dovecot_network: bool,
+    },
+    /// Search gate (AC 11): sync the seeded accounts with tagmail-server,
+    /// run the named queries through the API and fail if the warm p95
+    /// latency reaches the limit
+    BenchSearch {
+        /// Prebuilt tagmail-server; built in release mode when absent
+        #[arg(long)]
+        server: Option<PathBuf>,
+        #[arg(long, default_value = "127.0.0.1:10143")]
+        imap: SocketAddr,
+        /// `user:password`, once per account
+        #[arg(long = "account", default_values = ["user1:pass1", "user2:pass2"])]
+        accounts: Vec<String>,
+        /// Warm runs of every query after the cold run
+        #[arg(long, default_value_t = 5)]
+        warm_runs: usize,
+        #[arg(long, default_value_t = 500)]
+        limit_ms: u64,
+        /// Give up if the sync and text pass take longer
+        #[arg(long, default_value_t = 3600)]
+        sync_timeout_secs: u64,
+        /// JSON result
+        #[arg(long, default_value = "target/bench-search.json")]
+        out: PathBuf,
+        /// Run the server inside the Dovecot container's network namespace
         #[arg(long)]
         in_dovecot_network: bool,
     },
@@ -163,7 +192,7 @@ fn main() -> Result<()> {
             password,
             idle_secs,
             window_secs,
-            limit_mib,
+            limit_mb,
             sync_timeout_secs,
             out,
             in_dovecot_network,
@@ -178,7 +207,7 @@ fn main() -> Result<()> {
                 password,
                 idle: Duration::from_secs(idle_secs),
                 window: Duration::from_secs(window_secs),
-                limit_mib,
+                limit_mb,
                 sync_timeout: Duration::from_secs(sync_timeout_secs),
                 out,
             };
@@ -186,6 +215,41 @@ fn main() -> Result<()> {
                 bench_rss::run_in_dovecot_network(&opts)?;
             } else {
                 bench_rss::run_local(&opts)?;
+            }
+        }
+        Command::BenchSearch {
+            server,
+            imap,
+            accounts,
+            warm_runs,
+            limit_ms,
+            sync_timeout_secs,
+            out,
+            in_dovecot_network,
+        } => {
+            let accounts = accounts
+                .iter()
+                .map(|a| match a.split_once(':') {
+                    Some((user, password)) => Ok((user.to_owned(), password.to_owned())),
+                    None => bail!("--account {a}: expected user:password"),
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if warm_runs == 0 {
+                bail!("--warm-runs must be at least 1");
+            }
+            let opts = bench_search::Options {
+                server,
+                imap,
+                accounts,
+                warm_runs,
+                limit_ms,
+                sync_timeout: Duration::from_secs(sync_timeout_secs),
+                out,
+            };
+            if in_dovecot_network {
+                bench_search::run_in_dovecot_network(&opts)?;
+            } else {
+                bench_search::run_local(&opts)?;
             }
         }
         Command::GenTsTypes { check } => {

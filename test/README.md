@@ -20,6 +20,9 @@ cargo xtask stalwart down
 Every server has the users `user1` / `pass1` and `user2` / `pass2`, with
 cleartext login over plain IMAP. Dovecot also has `engine1` … `engine9` /
 `engine`, one per engine integration test. These are test-only credentials.
+`tagmail-server` reaches them with `--insecure-plain-imap`, which turns TLS
+off for **all** of its accounts: never use it on a server that also syncs
+real mail.
 
 ## Seeding
 
@@ -94,9 +97,29 @@ container with `-e TAGMAIL_SEED_MANIFEST=/seed.json` after copying it there.
 `cargo xtask bench-rss` checks AC 9 against the seed loaded into `user1`:
 it starts a release `tagmail-server`, adds the account, waits until the sync
 and the text pass are done, idles 5 minutes and fails if the highest VmRSS
-of the last 60 s exceeds 64 MiB. It writes `target/bench-rss.json`
-(`--idle-secs`, `--window-secs`, `--limit-mib`, `--out` adjust it). With a
-remote Docker daemon, `--in-dovecot-network` builds static binaries and runs
+of the last 60 s exceeds 64 MB (decimal, 64 × 10^6 bytes = 61.04 MiB, as
+in the spec). It writes `target/bench-rss.json` and, under GitHub Actions,
+the job summary (`--idle-secs`, `--window-secs`, `--limit-mb`, `--out`
+adjust it). With a remote Docker daemon, `--in-dovecot-network` builds static binaries and runs
 the benchmark in the Dovecot container's network namespace. These binaries
 use musl's allocator, so their RSS is not comparable with the glibc build
 that `bench.yml` measures.
+
+## Search gate
+
+`cargo xtask bench-search` checks AC 11: it needs the seed with `--seed 1`
+in `user1` and `--seed 2` in `user2`, syncs both accounts to the end of
+the text pass, restarts the server, runs the 30 named queries of
+`xtask/src/bench_search.rs` once (the cold run: fresh process caches, but
+the OS page cache stays warm; reported, not gated) and then
+`--warm-runs` more times, and fails if the warm p95 reaches `--limit-ms`
+(500). A query's latency is `GET /api/views/search:<q>/index` plus the
+first page of `/api/threads`. It writes `target/bench-search.json` and,
+under GitHub Actions, the job summary. `--in-dovecot-network` works as for
+`bench-rss`.
+
+```bash
+cargo xtask seed --count 100000 --avg-kb 8 --seed 2 --out target/seed2
+cargo xtask dovecot load --from target/seed2 --user user2
+cargo xtask bench-search
+```
