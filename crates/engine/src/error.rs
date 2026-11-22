@@ -10,6 +10,9 @@ pub enum Error {
     NoAccount(i64),
     #[error("invalid account settings: {0}")]
     InvalidAccount(String),
+    /// The account's IMAP connection cannot take work now.
+    #[error("{0}")]
+    Unavailable(String),
     #[error("stopped")]
     Stopped,
 }

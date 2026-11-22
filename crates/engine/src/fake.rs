@@ -27,6 +27,9 @@ pub struct FakeMsg {
     pub refs: Vec<String>,
     pub body: String,
     pub flags: Vec<Flag>,
+    /// The message as appended by a client; `raw()` synthesizes one
+    /// otherwise.
+    pub appended: Option<Vec<u8>>,
     modseq: u64,
 }
 
@@ -41,6 +44,41 @@ impl FakeMsg {
             refs: Vec::new(),
             body: format!("Body of {id}"),
             flags: Vec::new(),
+            appended: None,
+            modseq: 0,
+        }
+    }
+
+    /// A message a client APPENDed, parsed like a server would.
+    pub fn parsed(raw: &[u8], flags: &[Flag]) -> FakeMsg {
+        let m = mail_parser::MessageParser::new()
+            .parse(raw)
+            .expect("parsable message");
+        let first = |list: Option<mail_parser::AddressList<'_>>| {
+            list.and_then(|a| a.first())
+                .and_then(|a| a.address())
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let mut refs: Vec<String> = m
+            .references()
+            .map(|l| l.iter().map(str::to_owned).collect())
+            .unwrap_or_default();
+        if let Some(parent) = m.in_reply_to().and_then(|l| l.last())
+            && !refs.iter().any(|r| r == parent)
+        {
+            refs.push(parent.to_owned());
+        }
+        FakeMsg {
+            id: m.message_id().unwrap_or_default().to_owned(),
+            subject: m.subject().unwrap_or_default().to_owned(),
+            from: first(m.from()),
+            to: first(m.to()),
+            date: m.date().map_or(0, |d| d.to_timestamp()),
+            refs,
+            body: m.body_text(0).unwrap_or_default().into_owned(),
+            flags: flags.to_vec(),
+            appended: Some(raw.to_vec()),
             modseq: 0,
         }
     }
@@ -57,6 +95,9 @@ impl FakeMsg {
 
     /// The whole message as `BODY[]` returns it.
     pub fn raw(&self) -> String {
+        if let Some(raw) = &self.appended {
+            return String::from_utf8_lossy(raw).into_owned();
+        }
         format!(
             "Message-ID: <{}>\r\nSubject: {}\r\nFrom: {}\r\nTo: {}\r\n\r\n{}",
             self.id, self.subject, self.from, self.to, self.body
@@ -117,6 +158,8 @@ pub struct FakeServer {
     /// fails like a dropped connection.
     pub fail_after_full_fetches: Option<usize>,
     pub reject_login: bool,
+    /// APPENDs fail with NO.
+    pub fail_appends: bool,
     pub logins: usize,
     changed: Arc<Notify>,
 }
@@ -149,12 +192,26 @@ pub fn server(caps: &[&str]) -> Shared {
         fetches: Vec::new(),
         fail_after_full_fetches: None,
         reject_login: false,
+        fail_appends: false,
         logins: 0,
         changed: Arc::new(Notify::new()),
     }))
 }
 
 impl FakeServer {
+    pub fn add_mailbox(&mut self, name: &str, special_use: Option<SpecialUse>, uidvalidity: u32) {
+        self.mailboxes.push(FakeMailbox {
+            name: name.into(),
+            special_use,
+            uidvalidity,
+            uidnext: 1,
+            modseq: 1,
+            nomodseq: false,
+            msgs: BTreeMap::new(),
+            expunged: Vec::new(),
+        });
+    }
+
     pub fn mailbox(&mut self, name: &str) -> &mut FakeMailbox {
         self.mailboxes
             .iter_mut()
@@ -392,10 +449,23 @@ impl ImapSession for FakeSession {
     }
 
     async fn uid_search(&mut self, criteria: SearchCriteria) -> Result<UidSet> {
-        assert_eq!(criteria, SearchCriteria::All);
         let name = self.selected_name()?;
         let mut server = self.server();
-        Ok(server.mailbox(&name).msgs.keys().map(|u| Uid(*u)).collect())
+        let msgs = &server.mailbox(&name).msgs;
+        let matches = |m: &FakeMsg| match &criteria {
+            SearchCriteria::All => true,
+            SearchCriteria::Deleted => m.flags.contains(&Flag::Deleted),
+            SearchCriteria::Header { name, value } => {
+                assert!(name.eq_ignore_ascii_case("Message-ID"), "header {name}");
+                value.contains(&m.id)
+            }
+            SearchCriteria::EmailId(_) => panic!("EMAILID search"),
+        };
+        Ok(msgs
+            .iter()
+            .filter(|(_, m)| matches(m))
+            .map(|(u, _)| Uid(*u))
+            .collect())
     }
 
     async fn fetch(&mut self, uids: &UidSet, spec: &FetchSpec) -> Result<Vec<MessageMeta>> {
@@ -497,11 +567,39 @@ impl ImapSession for FakeSession {
 
     async fn append(
         &mut self,
-        _mailbox: &str,
-        _flags: &[Flag],
-        _message: &[u8],
+        mailbox: &str,
+        flags: &[Flag],
+        message: &[u8],
     ) -> Result<AppendResult> {
-        Err(Error::Unsupported("APPEND"))
+        let mut server = self.server();
+        if server.fail_appends {
+            return Err(Error::No {
+                code: None,
+                text: "append refused".into(),
+            });
+        }
+        let uid = server.append(mailbox, FakeMsg::parsed(message, flags));
+        let uid_validity = server.mailbox(mailbox).uidvalidity;
+        Ok(AppendResult {
+            uid: Some(Uid(uid)),
+            uid_validity: Some(UidValidity(uid_validity)),
+        })
+    }
+
+    async fn expunge_uids(&mut self, uids: &UidSet) -> Result<()> {
+        let name = self.selected_name()?;
+        let mut server = self.server();
+        let present: Vec<u32> = server
+            .mailbox(&name)
+            .msgs
+            .keys()
+            .copied()
+            .filter(|u| uids.contains(Uid(*u)))
+            .collect();
+        for uid in present {
+            server.expunge(&name, uid);
+        }
+        Ok(())
     }
 
     async fn idle(&mut self, wake: &Notify) -> Result<IdleResult> {

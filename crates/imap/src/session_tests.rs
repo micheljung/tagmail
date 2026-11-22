@@ -715,6 +715,41 @@ async fn move_uses_move_or_copy_expunge() {
 }
 
 #[tokio::test]
+async fn expunge_uids_only_touches_the_given_messages() {
+    let steps = with(
+        login("UIDPLUS"),
+        vec![
+            cmd("SELECT Drafts", &select_ok(&[])),
+            cmd("UID STORE 4 +FLAGS.SILENT (\\Deleted)", &["{tag} OK"]),
+            cmd("UID EXPUNGE 4", &["* 3 EXPUNGE", "{tag} OK"]),
+        ],
+    );
+    let (mut s, server) = session(steps, &config()).await;
+    s.select("Drafts", SelectOptions::default()).await.unwrap();
+    s.expunge_uids(&uids(&[(4, 4)])).await.unwrap();
+    s.expunge_uids(&UidSet::new()).await.unwrap();
+    server.await.unwrap();
+    assert_eq!(s.take_events(), vec![MailboxEvent::Expunge(3)]);
+
+    let steps = with(
+        login(""),
+        vec![
+            cmd("SELECT Drafts", &select_ok(&[])),
+            cmd("UID SEARCH DELETED", &["* SEARCH 4 9", "{tag} OK"]),
+            cmd("UID SEARCH DELETED", &["* SEARCH", "{tag} OK"]),
+            cmd("UID STORE 4 +FLAGS.SILENT (\\Deleted)", &["{tag} OK"]),
+            cmd("EXPUNGE", &["* 3 EXPUNGE", "{tag} OK"]),
+        ],
+    );
+    let (mut s, server) = session(steps, &config()).await;
+    s.select("Drafts", SelectOptions::default()).await.unwrap();
+    let err = s.expunge_uids(&uids(&[(4, 4)])).await.unwrap_err();
+    assert!(matches!(err, Error::Unsupported(_)), "{err:?}");
+    s.expunge_uids(&uids(&[(4, 4)])).await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn append_trusts_status_uidvalidity() {
     let steps = with(
         login("UIDPLUS"),

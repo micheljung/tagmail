@@ -7,6 +7,7 @@ mod ctx;
 mod error;
 #[cfg(test)]
 mod fake;
+mod jobs;
 mod message;
 mod raw;
 mod supervisor;
@@ -18,6 +19,7 @@ mod testutil;
 mod threading;
 
 pub use error::{Error, Result};
+pub use jobs::{JobFuture, MAX_QUEUED, Priority};
 pub use supervisor::{
     AccountSettings, ConnectorFactory, Engine, EngineConfig, ImapConnectorFactory, Stores,
     load_account,

@@ -150,6 +150,9 @@ impl ImapSession for Counted {
     ) -> Result<AppendResult> {
         self.inner.append(mailbox, flags, message).await
     }
+    async fn expunge_uids(&mut self, uids: &UidSet) -> Result<()> {
+        self.inner.expunge_uids(uids).await
+    }
     async fn idle(&mut self, wake: &Notify) -> Result<IdleResult> {
         self.inner.idle(wake).await
     }

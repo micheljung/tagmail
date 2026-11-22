@@ -87,15 +87,41 @@ impl TokioSession {
             .await?;
         let copy_uid = copy_uid(out.codes().chain(done.code.as_ref()));
         self.split_events(out, |_| false);
+        self.expunge_checked(uids, uidplus).await?;
+        Ok(MoveResult { copy_uid })
+    }
+
+    pub(crate) async fn expunge_impl(&mut self, uids: &UidSet) -> Result<()> {
+        self.selected_state()?;
+        if uids.is_empty() {
+            return Ok(());
+        }
+        let uidplus = self.caps.uidplus();
+        if !uidplus {
+            let deleted = self.uid_search(SearchCriteria::Deleted).await?;
+            if !deleted.difference(uids).is_empty() {
+                return Err(Error::Unsupported(
+                    "expunge without UIDPLUS while other messages are \\Deleted",
+                ));
+            }
+        }
+        self.expunge_checked(uids, uidplus).await
+    }
+
+    /// Flags `uids` `\Deleted` and expunges them; without UIDPLUS the caller
+    /// has checked that no other message is `\Deleted`.
+    async fn expunge_checked(&mut self, uids: &UidSet, uidplus: bool) -> Result<()> {
         self.store_impl(uids, StoreOp::Add, &[Flag::Deleted], None)
             .await?;
         let body = if uidplus {
-            CommandBody::ExpungeUid { sequence_set }
+            CommandBody::ExpungeUid {
+                sequence_set: sequence_set(uids)?,
+            }
         } else {
             CommandBody::Expunge
         };
         let (out, _) = self.run(body).await?;
         self.split_events(out, |_| false);
-        Ok(MoveResult { copy_uid })
+        Ok(())
     }
 }

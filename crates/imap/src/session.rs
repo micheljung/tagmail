@@ -129,6 +129,12 @@ pub trait ImapSession: Send {
         message: &[u8],
     ) -> impl Future<Output = Result<AppendResult>> + Send;
 
+    /// Removes `uids` from the selected mailbox: `\Deleted` + `UID EXPUNGE`
+    /// (UIDPLUS), else plain EXPUNGE, which is refused with
+    /// [`crate::Error::Unsupported`] while other messages are `\Deleted`
+    /// because it would expunge them too.
+    fn expunge_uids(&mut self, uids: &UidSet) -> impl Future<Output = Result<()>> + Send;
+
     /// IDLE until the server reports a change, the renewal timer fires
     /// (below 29 minutes, RFC 2177) or `wake` is notified.
     fn idle(&mut self, wake: &Notify) -> impl Future<Output = Result<IdleResult>> + Send;
@@ -892,6 +898,10 @@ impl ImapSession for TokioSession {
         message: &[u8],
     ) -> Result<AppendResult> {
         self.append_impl(mailbox, flags, message).await
+    }
+
+    async fn expunge_uids(&mut self, uids: &UidSet) -> Result<()> {
+        self.expunge_impl(uids).await
     }
 
     async fn idle(&mut self, wake: &Notify) -> Result<IdleResult> {

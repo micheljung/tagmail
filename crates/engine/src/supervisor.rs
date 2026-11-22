@@ -17,20 +17,19 @@ use tagmail_imap::{
 };
 use tagmail_store::rusqlite::OptionalExtension;
 use tagmail_store::{BlobStore, CacheDb, ConfigDb, DEFAULT_RAW_CAP, Sealed, Vault};
-use tokio::sync::{Notify, mpsc, oneshot, watch};
+use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use crate::cache::{MailboxRow, SyncState};
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
+use crate::jobs::{JobFuture, Jobs, Priority, erase};
 use crate::raw;
 use crate::sync::{self, Progress};
 
 /// Compressed size of the raw message cache before LRU eviction.
 pub const DEFAULT_RAW_CACHE_BYTES: u64 = 1024 * 1024 * 1024;
-/// Queued on-open fetches per account.
-const OPEN_QUEUE: usize = 32;
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -177,34 +176,23 @@ fn update(status: &Status, f: impl FnOnce(&mut RuntimeStatus)) {
     f(&mut status.lock().unwrap_or_else(PoisonError::into_inner));
 }
 
-struct OpenRequest {
-    message: MessageRowId,
-    reply: oneshot::Sender<Result<(), FetchRawError>>,
-}
+/// The IMAP session type of a connector factory.
+pub(crate) type Session<F> = <<F as ConnectorFactory>::Connector as Connector>::Session;
 
-/// The account worker's queue of on-open fetches; the worker serves it
-/// between sync steps, ahead of other work.
-#[derive(Clone)]
-struct Opens {
-    tx: mpsc::Sender<OpenRequest>,
-    /// Wakes the worker from its wait or inline IDLE.
-    wake: Arc<Notify>,
-    /// Requests are queued; pauses non-INBOX initial sync between windows.
-    pending: Arc<AtomicBool>,
-}
+const NOT_SYNCING: &str = "the account is not syncing";
 
-struct Handle {
+struct Handle<S> {
     status: Status,
     stop: watch::Sender<bool>,
     task: JoinHandle<()>,
-    opens: Opens,
+    jobs: Arc<Jobs<S>>,
 }
 
-struct Inner<F> {
+struct Inner<F: ConnectorFactory> {
     config: EngineConfig,
     factory: F,
     stores: Stores,
-    accounts: Mutex<HashMap<AccountId, Handle>>,
+    accounts: Mutex<HashMap<AccountId, Handle<Session<F>>>>,
     runtime: tokio::runtime::Handle,
 }
 
@@ -260,18 +248,13 @@ impl<F: ConnectorFactory> Engine<F> {
         }
         let status = Status::default();
         let (stop, stopped) = watch::channel(false);
-        let (tx, rx) = mpsc::channel(OPEN_QUEUE);
-        let opens = Opens {
-            tx,
-            wake: Arc::new(Notify::new()),
-            pending: Arc::new(AtomicBool::new(false)),
-        };
+        let jobs = Arc::new(Jobs::new());
         let task = self.inner.runtime.spawn(run(
             self.inner.clone(),
             id,
             status.clone(),
             stopped,
-            (opens.clone(), rx),
+            jobs.clone(),
         ));
         accounts.insert(
             id,
@@ -279,14 +262,49 @@ impl<F: ConnectorFactory> Engine<F> {
                 status,
                 stop,
                 task,
-                opens,
+                jobs,
             },
         );
     }
 
+    /// Runs `job` on the account's worker connection between sync steps
+    /// and returns its result. [`Error::Unavailable`] when the account is
+    /// not syncing, is reconnecting or backing off, or its queue is full.
+    ///
+    /// The job owns the session while it runs: it may select any mailbox,
+    /// and must leave the session usable unless it fails with a fatal
+    /// error, after which the worker reconnects.
+    pub(crate) async fn run_job<T, J>(
+        &self,
+        account: AccountId,
+        priority: Priority,
+        job: J,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+        J: for<'a> FnOnce(&'a mut Session<F>, &'a Ctx) -> JobFuture<'a, T> + Send + 'static,
+    {
+        let jobs = self
+            .inner
+            .accounts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&account)
+            .filter(|h| !h.task.is_finished())
+            .map(|h| h.jobs.clone());
+        let jobs = jobs.ok_or_else(|| Error::Unavailable(NOT_SYNCING.to_owned()))?;
+        let (erased, answer) = erase(job);
+        if jobs.submit(priority, erased).is_err() {
+            return Err(Error::Unavailable("too much queued IMAP work".to_owned()));
+        }
+        answer
+            .await
+            .unwrap_or_else(|_| Err(Error::Unavailable(NOT_SYNCING.to_owned())))
+    }
+
     /// Stops all accounts and waits for their tasks.
     pub async fn shutdown(&self) {
-        let handles: Vec<Handle> = self
+        let handles: Vec<Handle<Session<F>>> = self
             .inner
             .accounts
             .lock()
@@ -332,26 +350,18 @@ impl<F: ConnectorFactory> AccountRegistry for Engine<F> {
         account: AccountId,
         message: MessageRowId,
     ) -> BoxFuture<Result<(), FetchRawError>> {
-        let opens = self
-            .inner
-            .accounts
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&account)
-            .filter(|h| !h.task.is_finished())
-            .map(|h| h.opens.clone());
+        let engine = Engine {
+            inner: self.inner.clone(),
+        };
+        let (cap, cache_max) = (self.inner.config.raw_cap, self.inner.config.raw_cache_bytes);
         Box::pin(async move {
-            let stopped = || FetchRawError::Unavailable("the account is not syncing".to_owned());
-            let opens = opens.ok_or_else(stopped)?;
-            let (reply, answer) = oneshot::channel();
-            opens
-                .tx
-                .send(OpenRequest { message, reply })
-                .await
-                .map_err(|_| stopped())?;
-            opens.pending.store(true, Ordering::SeqCst);
-            opens.wake.notify_one();
-            answer.await.unwrap_or_else(|_| Err(stopped()))
+            let job = engine.run_job(account, Priority::Interactive, move |s, ctx| {
+                Box::pin(raw::fetch_raw(s, ctx, message.0, cap, cache_max))
+            });
+            match job.await {
+                Ok(answer) => answer,
+                Err(e) => Err(FetchRawError::Unavailable(e.to_string())),
+            }
         })
     }
 }
@@ -366,8 +376,19 @@ async fn run<F: ConnectorFactory>(
     inner: Arc<Inner<F>>,
     id: AccountId,
     status: Status,
+    stop: watch::Receiver<bool>,
+    jobs: Arc<Jobs<Session<F>>>,
+) {
+    run_account(inner, id, status, stop, &jobs).await;
+    jobs.refuse_all(NOT_SYNCING).await;
+}
+
+async fn run_account<F: ConnectorFactory>(
+    inner: Arc<Inner<F>>,
+    id: AccountId,
+    status: Status,
     mut stop: watch::Receiver<bool>,
-    (opens, mut queue): (Opens, mpsc::Receiver<OpenRequest>),
+    jobs: &Jobs<Session<F>>,
 ) {
     let settings = match load_account(&inner.stores, id).await {
         Ok(s) => s,
@@ -394,7 +415,7 @@ async fn run<F: ConnectorFactory>(
     let mut retry = inner.config.retry_min;
     loop {
         let result = tokio::select! {
-            r = account_loop(&inner.config, &pool, &ctx, &status, &mut retry, &opens, &mut queue) => r,
+            r = account_loop(&inner.config, &pool, &ctx, &status, &mut retry, jobs) => r,
             _ = stop.wait_for(|s| *s) => return,
         };
         let wait = match result {
@@ -425,48 +446,30 @@ async fn run<F: ConnectorFactory>(
             tokio::select! {
                 () = tokio::time::sleep_until(until) => break,
                 _ = stop.wait_for(|s| *s) => return,
-                Some(req) = queue.recv() => {
-                    let why = status
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .last_error
-                        .clone()
-                        .unwrap_or_else(|| "reconnecting".to_owned());
-                    let _ = req.reply.send(Err(FetchRawError::Unavailable(why)));
-                }
+                () = jobs.wake.notified() => {}
             }
+            let why = status
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "reconnecting".to_owned());
+            jobs.refuse_all(&why).await;
         }
     }
 }
 
-/// Serves the queued on-open fetches.
-async fn serve_opens<C: Connector>(
-    config: &EngineConfig,
+/// Serves the queued jobs; fails when one left the session unusable.
+async fn serve_jobs<C: Connector>(
     worker: &mut Pooled<C>,
     ctx: &Ctx,
-    opens: &Opens,
-    queue: &mut mpsc::Receiver<OpenRequest>,
+    jobs: &Jobs<C::Session>,
 ) -> Result<()> {
-    opens.pending.store(false, Ordering::SeqCst);
-    while let Ok(req) = queue.try_recv() {
-        let result = raw::fetch_raw(
-            &mut **worker,
-            ctx,
-            req.message.0,
-            config.raw_cap,
-            config.raw_cache_bytes,
-        )
-        .await;
-        match result {
-            Ok(answer) => {
-                let _ = req.reply.send(answer);
-            }
-            Err(e) => {
-                let _ = req
-                    .reply
-                    .send(Err(FetchRawError::Unavailable(e.to_string())));
-                return Err(e);
-            }
+    jobs.pending.store(false, Ordering::SeqCst);
+    while let Some(job) = jobs.pop() {
+        job(Ok((&mut **worker, ctx))).await;
+        if !worker.is_usable() {
+            return Err(Error::Imap(tagmail_imap::Error::Closed { bye: None }));
         }
     }
     Ok(())
@@ -561,10 +564,10 @@ async fn sync_one<C: Connector>(
     ctx: &Ctx,
     row: &MailboxRow,
     dirty: &Arc<AtomicBool>,
-    opens: &Opens,
+    pending: &Arc<AtomicBool>,
 ) -> Result<Progress> {
     let flag = dirty.clone();
-    let pending = opens.pending.clone();
+    let pending = pending.clone();
     let inbox = row.is_inbox();
     let interrupt =
         move || !inbox && (flag.load(Ordering::SeqCst) || pending.load(Ordering::SeqCst));
@@ -579,8 +582,7 @@ async fn account_loop<C: Connector>(
     ctx: &Ctx,
     status: &Status,
     retry: &mut Duration,
-    opens: &Opens,
-    queue: &mut mpsc::Receiver<OpenRequest>,
+    jobs: &Jobs<C::Session>,
 ) -> Result<()> {
     let mut worker = pool.acquire().await?;
     let caps = worker.capabilities().clone();
@@ -604,7 +606,7 @@ async fn account_loop<C: Connector>(
     let mut text_skip = BTreeSet::new();
     let mut settled = false;
     loop {
-        serve_opens(config, &mut worker, ctx, opens, queue).await?;
+        serve_jobs(&mut worker, ctx, jobs).await?;
         let inbox_live = rows
             .iter()
             .find(|r| r.is_inbox() && r.state == SyncState::Live)
@@ -612,20 +614,20 @@ async fn account_loop<C: Connector>(
         if let Some(inbox) = inbox_live
             && dirty.swap(false, Ordering::SeqCst)
         {
-            sync_one(&mut worker, ctx, &inbox, &dirty, opens).await?;
+            sync_one(&mut worker, ctx, &inbox, &dirty, &jobs.pending).await?;
             rows = sync::ordered(ctx).await?;
             continue;
         }
         if let Some(row) = rows.iter().find(|r| r.state != SyncState::Live).cloned() {
             settled = false;
-            sync_one(&mut worker, ctx, &row, &dirty, opens).await?;
+            sync_one(&mut worker, ctx, &row, &dirty, &jobs.pending).await?;
             rows = sync::ordered(ctx).await?;
             continue;
         }
         if Instant::now() >= next_poll {
             rows = sync::list(&mut *worker, ctx).await?;
             for row in rows.clone() {
-                sync_one(&mut worker, ctx, &row, &dirty, opens).await?;
+                sync_one(&mut worker, ctx, &row, &dirty, &jobs.pending).await?;
             }
             sync::purge(ctx).await?;
             rows = sync::ordered(ctx).await?;
@@ -658,7 +660,7 @@ async fn account_loop<C: Connector>(
             let deadline = Arc::new(Notify::new());
             let timer = {
                 let deadline = deadline.clone();
-                let open = opens.wake.clone();
+                let open = jobs.wake.clone();
                 AbortOnDrop(tokio::spawn(async move {
                     tokio::select! {
                         () = tokio::time::sleep_until(next_poll) => {}
@@ -676,7 +678,7 @@ async fn account_loop<C: Connector>(
         } else {
             tokio::select! {
                 () = wake.notified() => {}
-                () = opens.wake.notified() => {}
+                () = jobs.wake.notified() => {}
                 () = tokio::time::sleep_until(next_poll) => {}
             }
         }
@@ -692,7 +694,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::fake::{FakeConnector, FakeMsg, Shared, lock, server};
+    use crate::fake::{FakeConnector, FakeMsg, FakeSession, Shared, lock, server};
     use crate::testutil::{TestCache, open};
 
     const CAPS: &[&str] = &["IMAP4rev1", "ENABLE", "IDLE", "CONDSTORE", "QRESYNC"];
@@ -865,6 +867,57 @@ mod tests {
         .await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(lock(&srv).logins, 1, "no login retries during the backoff");
+        f.engine.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn jobs_run_on_the_worker_connection() {
+        let srv = server(CAPS);
+        lock(&srv).add_mailbox("Drafts", Some(tagmail_core::SpecialUse::Drafts), 400);
+        let f = fixture(&srv, 1, Duration::from_secs(3600)).await;
+        fn job<'a>(s: &'a mut FakeSession, _: &'a Ctx) -> JobFuture<'a, u32> {
+            Box::pin(async move {
+                let raw = b"Message-ID: <d1@x>\r\nSubject: Draft\r\n\r\nHi";
+                let uid = s.append("Drafts", &[Flag::Draft], raw).await?.uid.unwrap();
+                Ok(uid.0)
+            })
+        }
+        let refused = f.engine.run_job(AccountId(1), Priority::Write, job).await;
+        assert!(
+            matches!(&refused, Err(Error::Unavailable(why)) if why == NOT_SYNCING),
+            "{refused:?}"
+        );
+
+        f.engine.start_all().await.unwrap();
+        eventually("initial sync", || all_live(&f.cache)).await;
+        let uid = tokio::time::timeout(
+            Duration::from_secs(10),
+            f.engine.run_job(AccountId(1), Priority::Write, job),
+        )
+        .await
+        .expect("served while the worker IDLEs")
+        .unwrap();
+        assert_eq!(lock(&srv).mailbox("Drafts").msgs[&uid].id, "d1@x");
+
+        let expunged = f
+            .engine
+            .run_job(AccountId(1), Priority::Write, move |s, _| {
+                Box::pin(async move {
+                    s.select("Drafts", SelectOptions::default()).await?;
+                    let found = s
+                        .uid_search(tagmail_imap::SearchCriteria::Header {
+                            name: "Message-ID".into(),
+                            value: "<d1@x>".into(),
+                        })
+                        .await?;
+                    s.expunge_uids(&found).await?;
+                    Ok(found.len())
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(expunged, 1);
+        assert!(lock(&srv).mailbox("Drafts").msgs.is_empty());
         f.engine.shutdown().await;
     }
 
