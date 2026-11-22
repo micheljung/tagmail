@@ -1,13 +1,15 @@
-# M0 spikes
+# Spikes
 
-Results of the three M0 spikes (2026-11, Rust 1.100). Numbers are from single
-developer-machine runs; treat them as orders of magnitude.
+Results of the three M0 spikes and the M1 replica spike (2026-11, Rust
+1.100). Numbers are from single developer-machine runs; treat them as orders
+of magnitude.
 
 | # | Spike | Decision |
 |---|-------|----------|
 | 1 | IMAP library | **Go:** `imap-next` 0.3.4 on `imap-codec` `=2.0.0-alpha.10`, behind the `ImapSession` trait; `async-imap` stays the fallback |
 | 2 | 100k-row conversation list | **Go:** Svelte 5 + in-house virtualizer; `@tanstack/svelte-virtual` rejected |
 | 3 | OpenSSL | **Go:** OpenSSL-free, musl static; enforced in `deny.toml` |
+| 4 | Replica + transport (M1) | **Go on WebKitGTK:** one `app://localhost` origin for SPA and `/api/*`, events via `emit`; WKWebView and WebView2 not run yet |
 
 ## 1. IMAP library
 
@@ -111,3 +113,77 @@ rusqlite bundled, webauthn-rs and web-push-native; stripped, LTO):
 - `imap-next`, which uses `tokio-rustls` without a provider
 
 `deny.toml` bans `openssl`, `openssl-sys`, `native-tls` and `aws-lc-sys`.
+
+## 4. Replica + transport
+
+Prototype in `desktop/spike/` (Tauri 2.12.7, wry 0.57.3). Its own Cargo
+workspace, because the main CI job has no WebKitGTK libraries. The replica
+logic and the protocol handler are a plain library (`cargo test`, no webview).
+The `app` feature adds the Tauri shell. On start, the SPA runs eight checks
+inside the webview, posts them to `/api/report`, and the process exits 0 only
+if all pass (`SPIKE_SELFTEST=1`). CI: `.github/workflows/desktop-spike.yml`.
+
+**Setup:** a synthetic mock server provides 1,000 messages in 334 threads as
+an NDJSON snapshot. They load into an in-memory SQLite replica (`message`,
+`message_label`, `intent`). One custom protocol, `app`, serves `/`, `/app.js`
+and the `/api/*` routes from the same handler.
+
+**Verified on WebKitGTK 2.54.3 (Linux, Xvfb), 3 release runs and 2 debug runs, all green:**
+
+| Question | Result |
+|----------|--------|
+| SPA and `/api/*` on one origin | Window loads `app://localhost/`. `fetch('/api/threads')` works with no CORS. POST bodies reach the handler. |
+| Render iframe height | `<iframe sandbox="allow-same-origin">` on `/api/messages/{id}/render`. The parent reads `contentDocument.documentElement.scrollHeight` = 1518 (1500 px body). |
+| Iframe header CSP enforced | `img-src data:` blocks the `<img>` beacon (0 hits). The same page without the CSP header hits it (control). |
+| Sandbox blocks scripts | With `allow-same-origin` and without `allow-scripts`, the inline-script beacon gets 0 hits. Without `sandbox`, it gets 1 hit (control). |
+| SPA header CSP enforced | `script-src 'self'` makes `eval` throw. Tauri's injected IPC scripts still work under it. |
+| IPC on a custom origin | `emit`/`listen` work with only `core:event:default`. Tauri treats a user-registered scheme as a local origin (`Webview::is_local_url`), so no remote-URL capability is needed. |
+| Event push | Rust `emit` → JS `listen` latency: median ≤ 1 ms, max ≤ 2 ms (8 ticks, `Date.now()` diff). |
+| `/api/threads` (50 threads) | First fetch 1–2 ms (release), 4 ms (debug). Median of 20 is 1 ms, the WebKit timer resolution. |
+| Bootstrap 1,000 messages | NDJSON generate + parse + insert in one transaction: 2 ms (release), 12–16 ms (debug), in-memory DB. |
+| Offline label op | Offline, the intent gets a UUID `op_id` and the overlay shows the label right away (`pending: true`). The server lacks the label. On reconnect, the flush emits `replica:flushed`. |
+| Op-id dedupe | Flush with a dropped ack: the server applies once and the intent stays pending. The replay is reported as `Duplicate` and the server's applied count stays at 1. Then the overlay clears. |
+
+**Streaming custom-protocol responses: not possible, by API.** The protocol
+responder takes one whole body: `UriSchemeResponder::respond(Response<Cow<[u8]>>)`
+in Tauri, the same in wry. So the server's SSE stream must end in Rust. Rust
+forwards changes with `emit`, as the plan says. Large bodies, such as a 25 MB
+raw message, are buffered whole per request. Serve them in ranges or from a
+file path if this matters.
+
+**Other findings**
+
+- Tauri's `app.security.csp` applies only to Tauri's own asset protocol, never
+  to a user protocol. The CSP the SPA gets is the header our handler sets, so
+  set it in `api-core`, the same as on the web. The spike config has no
+  Tauri CSP.
+- Windows/Android map custom schemes to `http://app.localhost/`. The spike
+  picks the window URL per platform. Same-origin paths are unchanged.
+- `cargo deny` against the repo `deny.toml` passes: no OpenSSL, native-tls or
+  aws-lc-sys on any target. There are 39 duplicate-version warnings (toml,
+  syn, phf, windows-sys…) and ~360 crates. The gtk3-rs "unmaintained"
+  advisories (RUSTSEC-2024-0411…0420) were withdrawn in 2026-08.
+- Local build without apt: `nix-shell` with `webkitgtk_4_1 gtk3 libsoup_3`
+  plus pkg-config, then run the binary with `LD_LIBRARY_PATH` built from
+  `$NIX_LDFLAGS` under `xvfb-run`.
+
+**Not verified**
+
+- WKWebView (macOS) and WebView2 (Windows). CI builds and runs the self-test
+  there with `continue-on-error`, so the first CI run gives data. Before it
+  counts, check by hand: header CSP on `http://app.localhost` (WebView2),
+  iframe sandbox and height, POST bodies.
+- The CI job itself: actionlint passes, but the workflow has not run yet. Only the Nix
+  WebKitGTK 2.54.3 was tested. Ubuntu's packaged WebKitGTK was not, because
+  the sandbox has no apt.
+- Real HTTP to a server (the mock is in-process), an on-disk replica, the 90-day
+  window, intent TTL and the 410 re-bootstrap. These belong to `crates/replica`
+  in M5.
+- Wayland, GPU and RSS of the webview.
+
+**Verdict: go** for the plan's §3.12 transport on Linux: one custom-protocol
+origin, all traffic through Rust, events via `emit`, intents deduped by
+`op_id`. If WKWebView or WebView2 fail the iframe/CSP checks, the likely
+fallback is to serve the SPA from Tauri's built-in `tauri://` asset protocol
+and `/api/*` through `invoke`. The render iframe would then need a `<meta>`
+CSP instead of a header.
