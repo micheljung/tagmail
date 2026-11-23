@@ -27,7 +27,27 @@ pub const LIVE_BUDGET: Duration = Duration::from_secs(10);
 pub const POLL: Duration = Duration::from_secs(2);
 
 pub fn addr() -> (String, u16) {
-    let addr = std::env::var("TAGMAIL_IMAP_ADDR").unwrap_or_else(|_| "127.0.0.1:10143".into());
+    addr_of(Server::Dovecot)
+}
+
+/// The test servers: `dovecot` and `dovecot-gmail` (a virtual `\All`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Server {
+    Dovecot,
+    Gmail,
+}
+
+/// `TAGMAIL_IMAP_ADDR` (default `127.0.0.1:10143`) or, for the Gmail-mode
+/// server, `TAGMAIL_IMAP_GMAIL_ADDR` (default `127.0.0.1:10144`).
+pub fn addr_of(server: Server) -> (String, u16) {
+    let addr = match server {
+        Server::Dovecot => {
+            std::env::var("TAGMAIL_IMAP_ADDR").unwrap_or_else(|_| "127.0.0.1:10143".into())
+        }
+        Server::Gmail => {
+            std::env::var("TAGMAIL_IMAP_GMAIL_ADDR").unwrap_or_else(|_| "127.0.0.1:10144".into())
+        }
+    };
     let (host, port) = addr.rsplit_once(':').expect("host:port");
     (host.to_owned(), port.parse().expect("port"))
 }
@@ -50,7 +70,16 @@ pub fn server_config(
     password: &str,
     capability_override: CapabilityOverride,
 ) -> ServerConfig {
-    let (host, port) = addr();
+    server_config_at(Server::Dovecot, user, password, capability_override)
+}
+
+pub fn server_config_at(
+    server: Server,
+    user: &str,
+    password: &str,
+    capability_override: CapabilityOverride,
+) -> ServerConfig {
+    let (host, port) = addr_of(server);
     let mut config = ServerConfig::new(host, port, Security::Plain, user, Password::new(password));
     config.capability_override = capability_override;
     config
@@ -195,6 +224,7 @@ impl ImapSession for Counted {
 pub struct DovecotFactory {
     capability_override: CapabilityOverride,
     log: Log,
+    server: Server,
 }
 
 pub struct CountingConnector {
@@ -218,7 +248,8 @@ impl ConnectorFactory for DovecotFactory {
 
     fn connector(&self, account: &AccountSettings) -> CountingConnector {
         CountingConnector {
-            config: server_config(
+            config: server_config_at(
+                self.server,
                 &account.username,
                 account.password.expose(),
                 self.capability_override.clone(),
@@ -233,6 +264,7 @@ pub struct Fixture {
     dir: TempDir,
     user: &'static str,
     password: &'static str,
+    server: Server,
 }
 
 pub struct Running {
@@ -246,8 +278,16 @@ pub struct Running {
 impl Fixture {
     /// A test-owned `engineN` user, emptied first.
     pub async fn new(user: &'static str) -> Fixture {
-        reset_user(user).await;
-        Fixture::existing(user, PASSWORD)
+        Fixture::on(Server::Dovecot, user).await
+    }
+
+    /// A test-owned `engineN` user of `server`, emptied first.
+    pub async fn on(server: Server, user: &'static str) -> Fixture {
+        reset_user_at(server, user).await;
+        Fixture {
+            server,
+            ..Fixture::existing(user, PASSWORD)
+        }
     }
 
     /// A user whose mail is left as it is (the seeded `user1`).
@@ -256,6 +296,7 @@ impl Fixture {
             dir: TempDir::new().unwrap(),
             user,
             password,
+            server: Server::Dovecot,
         }
     }
 
@@ -273,6 +314,37 @@ impl Fixture {
     }
 
     async fn start_with(
+        &self,
+        capability_override: CapabilityOverride,
+        fail_after: Option<usize>,
+        sending: Option<Sending>,
+    ) -> Running {
+        let running = self
+            .open_with(capability_override, fail_after, sending)
+            .await;
+        running.engine.start_all().await.unwrap();
+        running
+    }
+
+    /// Deletes `cache.db` and the blobs, as an operator rebuilding the
+    /// cache would (AC 6); `config.db` stays.
+    pub fn wipe_cache(&self) {
+        for f in ["cache.db", "cache.db-wal", "cache.db-shm"] {
+            let _ = std::fs::remove_file(self.dir.path().join(f));
+        }
+        let _ = std::fs::remove_dir_all(self.dir.path().join("blobs"));
+    }
+
+    /// The engine over this fixture's databases without starting it.
+    pub async fn open(
+        &self,
+        capability_override: CapabilityOverride,
+        fail_after: Option<usize>,
+    ) -> Running {
+        self.open_with(capability_override, fail_after, None).await
+    }
+
+    async fn open_with(
         &self,
         capability_override: CapabilityOverride,
         fail_after: Option<usize>,
@@ -340,6 +412,7 @@ impl Fixture {
             DovecotFactory {
                 capability_override,
                 log: fetch_log.clone(),
+                server: self.server,
             },
             EngineConfig {
                 poll_interval: POLL,
@@ -355,7 +428,6 @@ impl Fixture {
                 insecure_plaintext: true,
             }),
         );
-        engine.start_all().await.unwrap();
         Running {
             engine,
             config,
@@ -372,6 +444,9 @@ impl Running {
         drop(self.engine);
         if let Ok(cache) = Arc::try_unwrap(self.cache) {
             cache.close().await.unwrap();
+        }
+        if let Ok(config) = Arc::try_unwrap(self.config) {
+            config.close().await.unwrap();
         }
     }
 
@@ -471,7 +546,12 @@ pub async fn second(user: &str) -> TokioSession {
 }
 
 pub async fn second_as(user: &str, password: &str) -> TokioSession {
-    TokioSession::connect(&server_config(
+    second_at(Server::Dovecot, user, password).await
+}
+
+pub async fn second_at(server: Server, user: &str, password: &str) -> TokioSession {
+    TokioSession::connect(&server_config_at(
+        server,
         user,
         password,
         CapabilityOverride::default(),
@@ -488,7 +568,11 @@ pub struct Raw {
 
 impl Raw {
     pub async fn login(user: &str) -> Raw {
-        let (host, port) = addr();
+        Raw::login_at(Server::Dovecot, user).await
+    }
+
+    pub async fn login_at(server: Server, user: &str) -> Raw {
+        let (host, port) = addr_of(server);
         let stream = TcpStream::connect((host.as_str(), port)).await.unwrap();
         let mut raw = Raw {
             stream: BufReader::new(stream),
@@ -527,9 +611,14 @@ impl Raw {
 
 pub const KEEP: &[&str] = &["INBOX", "Sent", "Drafts", "Trash", "Junk", "Archive"];
 
-/// Deletes the user's own mailboxes and empties the special ones.
+/// Deletes the user's own mailboxes, empties the special ones and drops
+/// the label registry annotation.
 pub async fn reset_user(user: &str) {
-    let mut raw = Raw::login(user).await;
+    reset_user_at(Server::Dovecot, user).await;
+}
+
+pub async fn reset_user_at(server: Server, user: &str) {
+    let mut raw = Raw::login_at(server, user).await;
     let list = raw.cmd("LIST \"\" \"*\"").await;
     for line in list {
         let name = line
@@ -538,7 +627,7 @@ pub async fn reset_user(user: &str) {
             .unwrap_or_default()
             .trim_matches('"')
             .to_owned();
-        if !KEEP.contains(&name.as_str()) && !name.is_empty() {
+        if !KEEP.contains(&name.as_str()) && !name.is_empty() && !name.starts_with("[Gmail]") {
             raw.cmd(&format!("DELETE \"{name}\"")).await;
         }
     }
@@ -547,6 +636,8 @@ pub async fn reset_user(user: &str) {
         raw.cmd("UID STORE 1:* +FLAGS.SILENT (\\Deleted)").await;
         raw.cmd("EXPUNGE").await;
     }
+    raw.cmd("SETMETADATA \"\" (/private/vendor/tagmail/labels NIL)")
+        .await;
     raw.cmd("LOGOUT").await;
 }
 

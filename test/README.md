@@ -76,6 +76,11 @@ docker logs $c; docker rm $c
 
 `crates/engine/tests/dovecot.rs` runs the sync engine against the
 `dovecot` service; each test empties and uses its own `engineN` user.
+`labels.rs` and `rebuild.rs` (ops, labels, AC 5 and AC 6) use the `opsN`
+users and the Gmail-mode `dovecot-gmail` service (`cargo xtask dovecot up
+--gmail`), whose virtual `[Gmail]/All` saves into `Archive` so a MOVE to
+`\All` leaves INBOX as on Gmail; `TAGMAIL_IMAP_GMAIL_ADDR` (default
+`127.0.0.1:10144`) points them elsewhere.
 `dovecot_seed.rs` checks that the newest INBOX message of the seed loaded
 into `user1` is cached within 30 s:
 

@@ -86,21 +86,21 @@ jobs:
       - name: Seed Maildir
         if: steps.seed-cache.outputs.cache-hit != 'true'
         run: cargo xtask seed --seed "$SEED" --count "$SEED_COUNT" --avg-kb "$SEED_AVG_KB" --out "$SEED_DIR"
-      - name: Start Dovecot
-        run: cargo xtask dovecot up
+      - name: Start Dovecot (plain and Gmail mode)
+        run: cargo xtask dovecot up --gmail
       - name: Load seed into Dovecot
         run: cargo xtask dovecot load --from "$SEED_DIR"
       - name: Build engine integration tests
-        run: cargo test -p tagmail-engine --features dovecot-tests --test dovecot --test dovecot_seed --no-run
+        run: cargo test -p tagmail-engine --features dovecot-tests --test dovecot --test dovecot_seed --test labels --test rebuild --no-run
       - name: Engine integration tests
         env:
           TAGMAIL_SEED_MANIFEST: ${{ env.SEED_DIR }}/tagmail-seed.json
-        run: cargo test -p tagmail-engine --features dovecot-tests --test dovecot --test dovecot_seed -- --nocapture
+        run: cargo test -p tagmail-engine --features dovecot-tests --test dovecot --test dovecot_seed --test labels --test rebuild -- --nocapture
       - name: Send integration tests (Dovecot and Mailpit)
         run: cargo test -p tagmail-engine --features mailpit-tests --test send
       - name: Server logs
         if: failure()
-        run: docker compose -f test/compose.yml logs dovecot mailpit
+        run: docker compose -f test/compose.yml logs dovecot dovecot-gmail mailpit
 
   web-playwright:
     runs-on: ubuntu-latest
