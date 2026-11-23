@@ -397,6 +397,55 @@ async fn failed_op_reverts_the_overlay_until_retried() {
 }
 
 #[tokio::test]
+async fn label_the_server_did_not_keep_fails_visibly() {
+    let srv = server(CAPS);
+    let uid = lock(&srv).append("INBOX", msg("k1@x", "Plan", 1_790_000_000));
+    let f = fixture(&srv).await;
+    f.engine.start_all().await.unwrap();
+    eventually("initial sync", || f.all_live()).await;
+    f.engine
+        .create_label(NewLabelDto {
+            name: "Work".into(),
+            color: None,
+        })
+        .await
+        .unwrap();
+    let thread = f.thread_of("k1@x").await;
+    lock(&srv).drop_keywords = true;
+
+    let mut add = op("kw-1", OpKind::LabelAdd, thread);
+    add.label = Some("work".into());
+    created(f.engine.queue_op(add).await.unwrap());
+    eventually("visible failure", || async {
+        f.status("kw-1").await == OpStatusDto::Failed
+    })
+    .await;
+    let failed = f.engine.op_dto("kw-1".into()).await.unwrap();
+    assert!(
+        failed
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("did not keep the label \u{201c}Work\u{201d}"),
+        "{failed:?}"
+    );
+    assert!(lock(&srv).flags_of("INBOX", uid).is_empty());
+    eventually("label rolled back", || async {
+        f.labels_of("k1@x").await.is_empty()
+    })
+    .await;
+
+    lock(&srv).drop_keywords = false;
+    f.engine.retry_failed_op("kw-1".into()).await.unwrap();
+    eventually("done after retry", || async {
+        f.status("kw-1").await == OpStatusDto::Done
+    })
+    .await;
+    assert_eq!(lock(&srv).flags_of("INBOX", uid), ["$label_Work"]);
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn archive_leaves_inbox_at_once_and_moves_on_the_server() {
     let srv = server(CAPS);
     lock(&srv).append("INBOX", msg("ar@x", "Old news", 1_790_000_000));

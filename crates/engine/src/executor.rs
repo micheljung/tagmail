@@ -1017,6 +1017,9 @@ fn execute_job<'a, F: ConnectorFactory>(
 enum OpError {
     /// Visible to the user; the op fails.
     Failed(String),
+    /// The server answered OK to adding the label but did not keep its
+    /// keyword, as Stalwart does past its per-account keyword limit.
+    KeywordNotPersisted(String),
     /// The session is unusable; the batch stops.
     Fatal(Error),
 }
@@ -1140,17 +1143,23 @@ pub(crate) async fn execute_batch<S: ImapSession>(
     let mut destinations = BTreeSet::new();
     for op in ops {
         let outcome = execute_op(s, ctx, &op, &mut mbs, &mut sources, &mut destinations).await;
-        match outcome {
-            Ok(()) => batch.outcomes.push((op.id, Outcome::Done)),
-            Err(OpError::Failed(why)) => {
-                tracing::info!(op = op.id, error = why, "op failed");
-                batch.outcomes.push((op.id, Outcome::Failed(why)));
+        let why = match outcome {
+            Ok(()) => {
+                batch.outcomes.push((op.id, Outcome::Done));
+                continue;
             }
             Err(OpError::Fatal(e)) => {
                 batch.aborted = Some(e.to_string());
                 return Ok(batch);
             }
-        }
+            Err(OpError::Failed(why)) => why,
+            Err(OpError::KeywordNotPersisted(label)) => format!(
+                "the server did not keep the label \u{201c}{label}\u{201d}; \
+                 it may have reached its limit of labels"
+            ),
+        };
+        tracing::info!(op = op.id, error = why, "op failed");
+        batch.outcomes.push((op.id, Outcome::Failed(why)));
     }
     let rows = sync::ordered(ctx).await?;
     for name in destinations.iter().chain(sources.difference(&destinations)) {
@@ -1329,9 +1338,8 @@ fn store_args(op: &Op, locs: &[Loc]) -> Option<(StoreOp, Vec<Flag>, Vec<Loc>)> {
     }
 }
 
-/// STOREs the op's flags on `locs` of the selected mailbox, guarded by
-/// `UNCHANGEDSINCE` under CONDSTORE: messages changed concurrently are
-/// re-read and stored once more against their new modseq.
+/// STOREs the op's flags on `locs` of the selected mailbox, then reads
+/// back an added label, which some servers acknowledge without keeping.
 async fn store<S: ImapSession>(
     s: &mut S,
     op: &Op,
@@ -1343,9 +1351,45 @@ async fn store<S: ImapSession>(
     if targets.is_empty() || flags.is_empty() {
         return Ok(());
     }
-    let since = max_modseq(&targets).filter(|_| s.capabilities().condstore());
+    store_guarded(s, op, store_op, &flags, &targets).await?;
+    match &op.label {
+        Some(l) if op.kind == OpKind::LabelAdd => verify_kept(s, l, &targets).await,
+        _ => Ok(()),
+    }
+}
+
+async fn verify_kept<S: ImapSession>(
+    s: &mut S,
+    label: &LabelArg,
+    targets: &[Loc],
+) -> std::result::Result<(), OpError> {
+    let metas = s.fetch(&uid_set(targets), &FetchSpec::flags()).await?;
+    let dropped = metas
+        .iter()
+        .filter_map(message::fetched)
+        .any(|f| ops::label_spellings(&f.location.keywords, &label.key).is_empty());
+    if !dropped {
+        return Ok(());
+    }
+    let name = match tagmail_core::classify_keyword(&label.keyword) {
+        tagmail_core::KeywordClass::Label { name, .. } => name,
+        tagmail_core::KeywordClass::Hidden => label.keyword.as_str().to_owned(),
+    };
+    Err(OpError::KeywordNotPersisted(name))
+}
+
+/// Guarded by `UNCHANGEDSINCE` under CONDSTORE: messages changed
+/// concurrently are re-read and stored once more against their new modseq.
+async fn store_guarded<S: ImapSession>(
+    s: &mut S,
+    op: &Op,
+    store_op: StoreOp,
+    flags: &[Flag],
+    targets: &[Loc],
+) -> std::result::Result<(), OpError> {
+    let since = max_modseq(targets).filter(|_| s.capabilities().condstore());
     let result = s
-        .store_flags(&uid_set(&targets), store_op, &flags, since)
+        .store_flags(&uid_set(targets), store_op, flags, since)
         .await?;
     if result.modified.is_empty() {
         return Ok(());

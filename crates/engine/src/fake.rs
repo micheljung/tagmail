@@ -162,6 +162,9 @@ pub struct FakeServer {
     pub fail_appends: bool,
     /// STOREs fail with NO.
     pub fail_stores: bool,
+    /// STOREs answer OK but keep no keywords, like Stalwart past its
+    /// per-account keyword limit.
+    pub drop_keywords: bool,
     /// Server annotations; `Some` when METADATA is advertised.
     pub metadata: BTreeMap<String, Vec<u8>>,
     pub logins: usize,
@@ -198,6 +201,7 @@ pub fn server(caps: &[&str]) -> Shared {
         reject_login: false,
         fail_appends: false,
         fail_stores: false,
+        drop_keywords: false,
         metadata: BTreeMap::new(),
         logins: 0,
         changed: Arc::new(Notify::new()),
@@ -629,7 +633,8 @@ impl ImapSession for FakeSession {
             match op {
                 StoreOp::Add => {
                     for f in flags {
-                        if !new.contains(f) {
+                        let dropped = server.drop_keywords && matches!(f, Flag::Keyword(_));
+                        if !dropped && !new.contains(f) {
                             new.push(f.clone());
                         }
                     }
