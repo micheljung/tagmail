@@ -1,4 +1,7 @@
 import type { Config, DOMPurify } from 'dompurify';
+import { SIGNATURE_CLASS } from './signature';
+
+const SIGNATURE_IDENTITY = 'data-identity';
 
 /**
  * What may enter the editor from paste, quotes and saved drafts. Style
@@ -26,7 +29,9 @@ export const COMPOSE_PURIFY: Config = {
 		'meta',
 		'base'
 	],
-	FORBID_ATTR: ['style', 'class', 'id', 'srcset', 'background'],
+	FORBID_ATTR: ['style', 'id', 'srcset', 'background'],
+	ADD_ATTR: [SIGNATURE_IDENTITY],
+	ADD_URI_SAFE_ATTR: [SIGNATURE_IDENTITY],
 	ALLOW_DATA_ATTR: false,
 	ALLOWED_URI_REGEXP: /^(?:https?|mailto|tel):/i
 };
@@ -43,6 +48,20 @@ export function stripStyles(html: string): string {
 	return html.replace(STYLE_ELEMENT, '').replace(STYLE_ATTRIBUTE, '');
 }
 
+const hooked = new WeakSet<DOMPurify>();
+
+/** Classes stay out (they would pull in app styles), except the signature block's marker. */
+function keepSignatureMarker(purify: DOMPurify): void {
+	if (hooked.has(purify)) return;
+	hooked.add(purify);
+	purify.addHook('uponSanitizeAttribute', (node, data) => {
+		if (data.attrName !== 'class' && data.attrName !== SIGNATURE_IDENTITY) return;
+		const marked = node.nodeName === 'DIV' && node.getAttribute('class') === SIGNATURE_CLASS;
+		data.keepAttr = marked && (data.attrName === 'class' || /^\d+$/.test(data.attrValue));
+	});
+}
+
 export function sanitizeFragment(purify: DOMPurify, html: string): DocumentFragment {
+	keepSignatureMarker(purify);
 	return purify.sanitize(stripStyles(html), { ...COMPOSE_PURIFY, RETURN_DOM_FRAGMENT: true });
 }

@@ -1,5 +1,6 @@
 import type { ThreadRowDto } from '@tagmail/api-types';
 import type { NewOpDto, OpKindDto, ViewId } from '../transport';
+import { viewScope } from '../views';
 
 /** An op before it gets its id. */
 export type OpIntent = Omit<NewOpDto, 'opId'> & { threadIds: number[] };
@@ -50,7 +51,8 @@ function isInboxView(view: ViewId, ctx: ViewContext): boolean {
 }
 
 /** Whether the threads of `intent` drop out of `view` right away. */
-export function leavesView(intent: OpIntent, view: ViewId, ctx: ViewContext): boolean {
+export function leavesView(intent: OpIntent, scoped: ViewId, ctx: ViewContext): boolean {
+	const view = viewScope(scoped).inner;
 	const box = mailboxOf(view);
 	if (REMOVING.has(intent.kind)) return box === null || box !== intent.mailboxId;
 	if (isInboxView(view, ctx)) {
@@ -68,7 +70,8 @@ export function leavesView(intent: OpIntent, view: ViewId, ctx: ViewContext): bo
 }
 
 /** Whether the threads of `intent` show up in `view` (which then reloads). */
-export function joinsView(intent: OpIntent, view: ViewId, ctx: ViewContext): boolean {
+export function joinsView(intent: OpIntent, scoped: ViewId, ctx: ViewContext): boolean {
+	const view = viewScope(scoped).inner;
 	if (intent.kind === 'unarchive') return isInboxView(view, ctx);
 	if (intent.kind === 'move') {
 		const box = mailboxOf(view);
@@ -88,10 +91,11 @@ export function joinsView(intent: OpIntent, view: ViewId, ctx: ViewContext): boo
  */
 export function inverseOf(
 	intent: OpIntent,
-	view: ViewId,
+	scoped: ViewId,
 	ctx: ViewContext,
 	origins?: Origins
 ): OpIntent[] | null {
+	const view = viewScope(scoped).inner;
 	const base = { threadIds: intent.threadIds };
 	switch (intent.kind) {
 		case 'label.add':

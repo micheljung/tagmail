@@ -3,9 +3,10 @@ import type {
 	AttachmentDto,
 	DraftDto,
 	DraftInputDto,
-	IdentityDto,
 	LabelChangeDto,
 	LabelDto,
+	LabelExportDto,
+	LabelImportResultDto,
 	LabelJobDto,
 	NewLabelDto,
 	NewOpDto,
@@ -16,7 +17,8 @@ import type {
 	SendDto,
 	SendStatusDto
 } from '../../../packages/api-types/src/index.ts';
-import { LABELS, ME, messageById, type Address, type Row } from './fixture.ts';
+import { accountState, currentIdentities, isMulti, replyIdentity } from './accounts.ts';
+import { ACCOUNT_B, LABELS, bPositionOf, messageById, type Address, type Row } from './fixture.ts';
 import { quotedBody } from './render.ts';
 
 /** Mock of the M3 write API, shaped by the generated DTOs. */
@@ -25,6 +27,10 @@ export const INBOX = 1;
 export const TRASH = 4;
 const ARCHIVE = 3;
 const SPAM = 5;
+/** Account 2 numbers its special mailboxes like account 1, ten higher. */
+const B_OFFSET = 10;
+const LABEL_EXPORT_FORMAT = 'tagmail-labels';
+const LABEL_EXPORT_VERSION = 1;
 const OP_KINDS: ReadonlySet<string> = new Set<OpKindDto>([
 	'label.add',
 	'label.remove',
@@ -59,6 +65,8 @@ interface MockOp {
 }
 
 interface Draft extends DraftDto {
+	/** The From address the MIME message would carry. */
+	from?: string;
 	saves: number;
 	/** Saves that asked for the IMAP Drafts mailbox right away (`saveNow`). */
 	imapSaves: number;
@@ -95,22 +103,39 @@ let sendMode: 'ok' | 'fail' = 'ok';
 let nextId = 1;
 let opSeq = 1;
 
-const IDENTITIES: IdentityDto[] = [
-	{ id: 1, accountId: 1, address: ME.email, name: ME.name, signature: null, isDefault: true },
-	{
-		id: 2,
-		accountId: 1,
-		address: 'michel@work.example',
-		name: ME.name,
-		signature: null,
-		isDefault: false
+export function accountOf(id: number): number {
+	return bPositionOf(id) === undefined ? 1 : ACCOUNT_B;
+}
+
+/** `box` of account 1 as numbered in `accountId`. */
+function boxIn(accountId: number, box: number): number {
+	return accountId === ACCOUNT_B ? box + B_OFFSET : box;
+}
+
+export function isInboxBox(box: number): boolean {
+	return box === INBOX || box === boxIn(ACCOUNT_B, INBOX);
+}
+
+export function isTrashBox(box: number): boolean {
+	return box === TRASH || box === boxIn(ACCOUNT_B, TRASH);
+}
+
+function initialLabels(): LabelDto[] {
+	const out: LabelDto[] = LABELS.map((l) => ({ ...l, color: null, accountIds: [1] }));
+	if (isMulti()) {
+		out.find((l) => l.key === 'clients')!.accountIds = [1, ACCOUNT_B];
+		out.push(
+			{ key: 'shared', name: 'Shared', color: '#1f9c95', accountIds: [1] },
+			{ key: 'berg', name: 'Berg', color: '#8a4fd6', accountIds: [ACCOUNT_B] }
+		);
 	}
-];
+	return out;
+}
 
 export function resetWrites(): void {
 	overrides.clear();
 	ops.clear();
-	labels = LABELS.map((l) => ({ ...l, color: null, accountIds: [1] }));
+	labels = initialLabels();
 	renamed.clear();
 	deletedLabels.clear();
 	labelJobs.clear();
@@ -147,7 +172,7 @@ export function applyOverride(r: Row): Row {
 }
 
 export function mailboxOf(id: number): number {
-	return overrides.get(id)?.mailbox ?? INBOX;
+	return overrides.get(id)?.mailbox ?? boxIn(accountOf(id), INBOX);
 }
 
 export function isDeleted(id: number): boolean {
@@ -162,6 +187,7 @@ export function anyMoved(): boolean {
 
 function effect(op: OpDto, current: Row): Override {
 	const o: Override = { ...overrides.get(current.id) };
+	const box = (b: number) => boxIn(current.accountId, b);
 	switch (op.kind) {
 		case 'label.add':
 			if (op.label && !current.labels.includes(op.label)) {
@@ -184,19 +210,19 @@ function effect(op: OpDto, current: Row): Override {
 			o.starred = false;
 			break;
 		case 'archive':
-			if (mailboxOf(current.id) === INBOX) o.mailbox = ARCHIVE;
+			if (isInboxBox(mailboxOf(current.id))) o.mailbox = box(ARCHIVE);
 			break;
 		case 'unarchive':
-			o.mailbox = INBOX;
+			o.mailbox = box(INBOX);
 			break;
 		case 'move':
-			o.mailbox = op.mailboxId ?? INBOX;
+			o.mailbox = op.mailboxId ?? box(INBOX);
 			break;
 		case 'trash':
-			o.mailbox = TRASH;
+			o.mailbox = box(TRASH);
 			break;
 		case 'spam':
-			o.mailbox = SPAM;
+			o.mailbox = box(SPAM);
 			break;
 		case 'delete':
 			o.deleted = true;
@@ -212,7 +238,13 @@ function threadChange(ctx: WriteContext, id: number): Change {
 		id,
 		op: { kind: isDeleted(id) ? 'delete' : 'upsert' },
 		payload: r
-			? { lastDate: r.lastDate, mailboxes: r.mailboxIds, removedFrom: [], labels: r.labels }
+			? {
+					accountId: r.accountId,
+					lastDate: r.lastDate,
+					mailboxes: r.mailboxIds,
+					removedFrom: [],
+					labels: r.labels
+				}
 			: null
 	};
 }
@@ -254,6 +286,14 @@ function revert(op: MockOp): void {
 		else overrides.set(id, before);
 	}
 	op.before.clear();
+}
+
+/** A label op in an account without the label registers it there, like the engine. */
+function registerLabel(ctx: WriteContext, key: string, accountId: number): void {
+	const label = labels.find((l) => l.key === key);
+	if (!label || label.accountIds.includes(accountId)) return;
+	label.accountIds = [...label.accountIds, accountId].sort((a, b) => a - b);
+	labelEvent(ctx, label);
 }
 
 function labelEvent(ctx: WriteContext, label: LabelDto | { key: string }, kind = 'upsert') {
@@ -308,13 +348,15 @@ function plain(list: Address[]) {
 }
 
 function notMe(list: Address[]): Address[] {
-	return list.filter((a) => a.email.toLowerCase() !== ME.email);
+	const own = new Set(currentIdentities().map((i) => i.address.toLowerCase()));
+	return list.filter((a) => !own.has(a.email.toLowerCase()));
 }
 
 function draftOf(id: number, input: DraftInputDto, previous?: Draft): Draft {
+	const identity = currentIdentities().find((i) => i.id === input.identityId);
 	return {
 		id,
-		accountId: 1,
+		accountId: identity?.accountId ?? 1,
 		identityId: input.identityId,
 		to: input.to,
 		cc: input.cc,
@@ -362,7 +404,8 @@ function deliver(ctx: WriteContext, item: OutboxItemDto): void {
 			} else {
 				item.status = 'sent';
 				item.sentAt = Math.floor(Date.now() / 1000);
-				sent.push(draft);
+				const from = currentIdentities().find((i) => i.id === draft.identityId)?.address;
+				sent.push({ ...draft, from });
 				drafts.delete(draft.id);
 				item.draftId = null;
 			}
@@ -401,11 +444,15 @@ export async function writeApi(
 		const seen = ops.get(b.opId);
 		if (seen) return ok(200, seen.dto);
 		if (opsMode === 'reject') return fail(503, 'unavailable', 'the account is offline');
+		const accountIds = new Set(b.threadIds.map(accountOf));
+		if (accountIds.size > 1) return fail(409, 'conflict', 'send one op per account');
+		const accountId = accountIds.values().next().value ?? 1;
+		if (b.kind === 'label.add' && b.label) registerLabel(ctx, b.label, accountId);
 		const op: MockOp = {
 			dto: {
 				opId: b.opId,
 				seq: opSeq++,
-				accountId: 1,
+				accountId,
 				kind: b.kind,
 				status: 'pending',
 				error: null,
@@ -455,7 +502,12 @@ export async function writeApi(
 		if (!trimmed) return fail(422, 'invalid', 'a label needs a name');
 		const key = trimmed.toLowerCase();
 		if (labels.some((l) => l.key === key)) return fail(409, 'label_exists', 'that label exists');
-		const label: LabelDto = { key, name: trimmed, color: color ?? null, accountIds: [1] };
+		const label: LabelDto = {
+			key,
+			name: trimmed,
+			color: color ?? null,
+			accountIds: accountState().accounts.map((a) => a.id)
+		};
 		labels.push(label);
 		deletedLabels.delete(key);
 		labelEvent(ctx, label);
@@ -500,8 +552,42 @@ export async function writeApi(
 		}
 	}
 	if (path === '/api/label-jobs') return ok(200, { jobs: [...labelJobs.values()] });
-
-	if (path === '/api/identities') return ok(200, { identities: IDENTITIES });
+	if (path === '/api/labels/export' && method === 'GET') {
+		const body: LabelExportDto = {
+			format: LABEL_EXPORT_FORMAT,
+			version: LABEL_EXPORT_VERSION,
+			labels: labels.map((l, sort) => ({ name: l.name, color: l.color, sort }))
+		};
+		ctx.send(res, 200, body);
+		return true;
+	}
+	if (path === '/api/labels/import' && method === 'POST') {
+		const b = await json<Partial<LabelExportDto>>();
+		if (b.format !== LABEL_EXPORT_FORMAT || b.version !== LABEL_EXPORT_VERSION) {
+			return fail(400, 'invalid', 'not a Tagmail label export');
+		}
+		const result: LabelImportResultDto = { created: 0, updated: 0, unchanged: 0, errors: [] };
+		for (const entry of b.labels ?? []) {
+			const name = entry.name.trim();
+			const existing = labels.find((l) => l.key === name.toLowerCase());
+			if (!existing) {
+				const label: LabelDto = {
+					key: name.toLowerCase(),
+					name,
+					color: entry.color,
+					accountIds: accountState().accounts.map((a) => a.id)
+				};
+				labels.push(label);
+				labelEvent(ctx, label);
+				result.created++;
+			} else if (entry.color !== null && existing.color !== entry.color) {
+				existing.color = entry.color;
+				labelEvent(ctx, existing);
+				result.updated++;
+			} else result.unchanged++;
+		}
+		return ok(200, result);
+	}
 	if (path === '/api/attachments' && method === 'POST') {
 		const declared = Number(req.headers['content-length'] ?? 0);
 		const body = await ctx.readBody(req);
@@ -603,8 +689,9 @@ export async function writeApi(
 		const from = msg.from ? [msg.from] : [];
 		const who = msg.from?.name ?? msg.from?.email ?? '';
 		const quote = `<div><br></div><div>On ${new Date(msg.date * 1000).toUTCString()}, ${who} wrote:</div><blockquote>${quotedBody(found.row, msg)}</blockquote>`;
+		const identity = replyIdentity(found.row.accountId, [...msg.to, ...msg.cc]);
 		const body: ReplyDraftDto = {
-			identityId: 1,
+			identityId: identity.id,
 			to: mode === 'forward' ? [] : plain(mode === 'all' ? [...from, ...notMe(msg.to)] : from),
 			cc: mode === 'all' ? plain(notMe(msg.cc)) : [],
 			bcc: [],
@@ -644,7 +731,8 @@ export async function writeMock(
 			drafts: [...drafts.values()],
 			sent,
 			outbox,
-			labels
+			labels,
+			...accountState()
 		});
 		return true;
 	}

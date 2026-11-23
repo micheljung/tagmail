@@ -4,6 +4,7 @@ import { ThreadIndex, insertionPoint } from '../list/threadIndex';
 import { PAGE_SIZE, RowCache } from '../list/rowCache.svelte';
 import type { Range } from '../list/math';
 import type { Api, ViewId } from '../transport';
+import { viewScope } from '../views';
 import { parseCursor, type Cursor } from './cursor';
 import type { ChangeListener, EventHub } from './events.svelte';
 import type { NavStore } from './nav.svelte';
@@ -12,6 +13,7 @@ import type { OpList, Removed } from '../ops/ops.svelte';
 export const REFETCH_DEBOUNCE_MS = 300;
 
 interface ThreadPayload {
+	accountId?: number;
 	lastDate?: number;
 	mailboxes?: number[];
 	removedFrom?: number[];
@@ -249,18 +251,23 @@ export class ThreadList implements ChangeListener, OpList {
 	}
 
 	#member(payload: ThreadPayload): boolean | undefined {
-		if (this.view.startsWith('label:')) {
-			return payload.labels?.includes(this.view.slice('label:'.length));
+		const { account, inner } = viewScope(this.view);
+		if (account !== null) {
+			if (payload.accountId === undefined) return undefined;
+			if (payload.accountId !== account) return false;
+		}
+		if (inner.startsWith('label:')) {
+			return payload.labels?.includes(inner.slice('label:'.length));
 		}
 		const boxes = payload.mailboxes;
 		if (!boxes) return undefined;
-		if (this.view === 'inbox') {
+		if (inner === 'inbox') {
 			if (!this.#nav.loaded) return undefined;
 			const inbox = this.#nav.inboxIds;
 			return boxes.some((b) => inbox.has(b));
 		}
-		if (this.view.startsWith('mailbox:')) {
-			return boxes.includes(Number(this.view.slice('mailbox:'.length)));
+		if (inner.startsWith('mailbox:')) {
+			return boxes.includes(Number(inner.slice('mailbox:'.length)));
 		}
 		return undefined;
 	}

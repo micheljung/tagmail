@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { originsOf, pickers } from '../ops/actions.svelte';
-	import { isInbox, mailboxLabel, nav, ops } from '../stores';
+	import { pickers, runOp } from '../ops/actions.svelte';
+	import { isInbox, mailboxLabel, nav } from '../stores';
 	import type { MailboxDto } from '../transport';
 	import Icon, { type IconName } from './Icon.svelte';
 
@@ -13,10 +13,15 @@
 	const current = $derived(
 		target?.view?.startsWith('mailbox:') ? Number(target.view.slice('mailbox:'.length)) : null
 	);
+	/** Accounts of the threads being moved; folders of other accounts can't take them. */
+	const targetAccounts = $derived(new Set(target?.rows.map((r) => r.accountId)));
 	const matches = $derived.by(() => {
 		const f = filter.trim().toLowerCase();
 		return nav.mailboxes.filter(
-			(m) => m.id !== current && (!f || displayName(m).toLowerCase().includes(f))
+			(m) =>
+				m.id !== current &&
+				(targetAccounts.size === 0 || targetAccounts.has(m.accountId)) &&
+				(!f || displayName(m).toLowerCase().includes(f))
 		);
 	});
 
@@ -56,12 +61,12 @@
 		const t = target;
 		if (!t) return;
 		const kind = isInbox(m) ? 'unarchive' : m.specialUse === 'trash' ? 'trash' : 'move';
-		ops.run(
-			kind === 'move'
-				? { kind, mailboxId: m.id, threadIds: t.threadIds }
-				: { kind, threadIds: t.threadIds },
-			{ view: t.view, origins: originsOf(t.rows) }
-		);
+		if (kind !== 'move') runOp({ kind }, t);
+		else {
+			const own = new Set(t.rows.filter((r) => r.accountId === m.accountId).map((r) => r.id));
+			const threadIds = own.size > 0 ? t.threadIds.filter((id) => own.has(id)) : t.threadIds;
+			runOp({ kind, mailboxId: m.id }, { ...t, threadIds });
+		}
 		close();
 	}
 

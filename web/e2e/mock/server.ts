@@ -1,11 +1,15 @@
 import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { extname, join, normalize, resolve } from 'node:path';
+import { accountsApi, accountsMock, isMulti, mailboxes, setScenario } from './accounts.ts';
 import {
-	MAILBOXES,
+	B_THREAD_COUNT,
 	PASSWORD,
 	SETUP_TOKEN,
 	THREAD_COUNT,
+	bIdAt,
+	bPositionOf,
+	bRowAt,
 	idAt,
 	isSent,
 	messageById,
@@ -20,11 +24,13 @@ import { encodeIdIndex } from './idIndex.ts';
 import { RENDER_CSP, WEB_APP_CSP, renderMessage } from './render.ts';
 import {
 	INBOX,
-	TRASH,
+	accountOf,
 	anyMoved,
 	applyOverride,
 	currentLabels,
 	isDeleted,
+	isInboxBox,
+	isTrashBox,
 	mailboxOf,
 	resetWrites,
 	writeApi,
@@ -90,6 +96,22 @@ const currentAuth = () => ({ via: 'session', session: sessions[0], deviceId: nul
 
 const baseIds = Array.from({ length: THREAD_COUNT }, (_, i) => idAt(i));
 const inboxIndex = encodeIdIndex(baseIds);
+let mergedIds: number[] | null = null;
+
+/** Both accounts' threads, newest first. */
+function multiIds(): number[] {
+	if (mergedIds) return mergedIds;
+	const out: number[] = [];
+	let j = 0;
+	for (let i = 0; i < THREAD_COUNT; i++) {
+		const date = rowAt(i).lastDate;
+		while (j < B_THREAD_COUNT && bRowAt(j).lastDate >= date) out.push(bIdAt(j++));
+		out.push(baseIds[i]);
+	}
+	while (j < B_THREAD_COUNT) out.push(bIdAt(j++));
+	mergedIds = out;
+	return out;
+}
 
 function cursor(): string {
 	return `${EPOCH}:${seq}`;
@@ -100,12 +122,16 @@ function row(id: number): Row | undefined {
 	const extra = extraRows.get(id);
 	if (extra) return applyOverride(extra);
 	const at = positionOf(id);
-	return at === undefined ? undefined : applyOverride(rowAt(at));
+	if (at !== undefined) return applyOverride(rowAt(at));
+	const bAt = isMulti() ? bPositionOf(id) : undefined;
+	return bAt === undefined ? undefined : applyOverride(bRowAt(bAt));
 }
 
 function allIds(): number[] {
-	return [...extraOrder, ...baseIds];
+	return [...extraOrder, ...(isMulti() ? multiIds() : baseIds)];
 }
+
+class BadView extends Error {}
 
 function matches(r: Row, i: number, query: string): boolean {
 	for (const term of query.toLowerCase().split(/\s+/).filter(Boolean)) {
@@ -127,9 +153,15 @@ function matches(r: Row, i: number, query: string): boolean {
 }
 
 function viewIds(view: string): number[] | null {
+	const scoped = /^account:(\d+)\/(.+)$/.exec(view);
+	if (scoped) {
+		if (scoped[2].startsWith('mailbox:')) throw new BadView();
+		const account = Number(scoped[1]);
+		return (viewIds(scoped[2]) ?? allIds()).filter((id) => accountOf(id) === account);
+	}
 	const moved = anyMoved();
-	if (view === 'inbox' || view === `mailbox:${INBOX}`) {
-		return moved ? allIds().filter((id) => mailboxOf(id) === INBOX && !isDeleted(id)) : null;
+	if (view === 'inbox' || (view === `mailbox:${INBOX}` && !isMulti())) {
+		return moved ? allIds().filter((id) => isInboxBox(mailboxOf(id)) && !isDeleted(id)) : null;
 	}
 	if (view.startsWith('mailbox:')) {
 		const box = Number(view.slice('mailbox:'.length));
@@ -139,14 +171,12 @@ function viewIds(view: string): number[] | null {
 	if (view.startsWith('label:')) query = `label:${view.slice(6)}`;
 	else if (view.startsWith('search:')) query = view.slice(7);
 	else return [];
-	const visible = (id: number) => !moved || (!isDeleted(id) && mailboxOf(id) !== TRASH);
+	const visible = (id: number) => !moved || (!isDeleted(id) && !isTrashBox(mailboxOf(id)));
 	const out: number[] = [];
-	for (const id of extraOrder) {
-		if (visible(id) && matches(row(id)!, -1, query)) out.push(id);
-	}
-	for (let i = 0; i < THREAD_COUNT; i++) {
-		const id = baseIds[i];
-		if (visible(id) && matches(row(id) ?? rowAt(i), i, query)) out.push(id);
+	for (const id of allIds()) {
+		if (!visible(id)) continue;
+		const r = row(id);
+		if (r && matches(r, positionOf(id) ?? -1, query)) out.push(id);
 	}
 	return out;
 }
@@ -245,8 +275,9 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
 		res.setHeader('set-cookie', `${COOKIE}=; Max-Age=0; Path=/`);
 		return send(res, 204, '');
 	}
+	if (await accountsApi(req, res, url, writeContext)) return;
 	if (await writeApi(req, res, url, writeContext)) return;
-	if (path === '/api/mailboxes') return send(res, 200, MAILBOXES);
+	if (path === '/api/mailboxes') return send(res, 200, mailboxes());
 	if (path === '/api/labels') return send(res, 200, currentLabels());
 	if (path === '/api/sessions') return send(res, 200, { sessions });
 	if (path === '/api/devices') return send(res, 200, { devices });
@@ -272,10 +303,17 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
 	if (m) {
 		await sleep(LATENCY_MS);
 		const view = decodeURIComponent(m[1]);
-		const ids = viewIds(view);
+		let ids: number[] | null;
+		try {
+			ids = viewIds(view);
+		} catch (e) {
+			if (e instanceof BadView)
+				return error(res, 400, 'bad_request', 'mailbox views are per account');
+			throw e;
+		}
 		const bytes =
 			ids === null
-				? extraOrder.length
+				? extraOrder.length || isMulti()
 					? encodeIdIndex(allIds())
 					: inboxIndex
 				: encodeIdIndex(ids);
@@ -386,12 +424,19 @@ async function mock(req: IncomingMessage, res: ServerResponse, url: URL) {
 				entity: 'thread',
 				id,
 				op: { kind: 'upsert' },
-				payload: { lastDate: r.lastDate, mailboxes: [1], removedFrom: [] }
+				payload: { accountId: r.accountId, lastDate: r.lastDate, mailboxes: [1], removedFrom: [] }
 			}
 		]);
 		return send(res, 200, { id });
 	}
+	if (url.pathname === '/__mock/scenario' && req.method === 'POST') {
+		const { name } = await body(req);
+		setScenario(name === 'multi' ? 'multi' : 'single');
+		resetWrites();
+		return send(res, 204, '');
+	}
 	if (url.pathname === '/__mock/reset' && req.method === 'POST') {
+		setScenario('single');
 		ownerExists = true;
 		sessions = initialSessions();
 		devices = initialDevices();
@@ -406,6 +451,7 @@ async function mock(req: IncomingMessage, res: ServerResponse, url: URL) {
 		return send(res, 204, '');
 	}
 	if (await writeMock(req, res, url, writeContext)) return;
+	if (await accountsMock(req, res, url, writeContext)) return;
 	return error(res, 404, 'not_found', 'no such mock hook');
 }
 

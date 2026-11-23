@@ -70,6 +70,10 @@ export class Draft {
 	draftId = $state<number | null>(null);
 	saveState = $state<SaveState>('idle');
 	saveError = $state<string | null>(null);
+	/** The signature block's inner HTML as inserted, to tell an untouched one from an edited one. */
+	signature: string | null = null;
+	/** The body was given its initial signature (or found to keep its own). */
+	signatureChecked = false;
 	readonly mode: ReplyMode | 'new';
 	readonly inReplyTo: number | null;
 	readonly forwardOf: number | null;

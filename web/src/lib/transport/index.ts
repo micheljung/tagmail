@@ -4,11 +4,17 @@ import { HttpTransport } from './http';
 export * from './api';
 export * from './write';
 export type {
+	AccountDto,
+	AccountPatchDto,
+	AccountStatusDto,
+	AccountTestDto,
 	AddressDto,
 	DeviceDto,
 	LabelDto,
+	LabelExportDto,
 	MailboxDto,
 	MessageDto,
+	NewAccountDto,
 	PairingCodeDto,
 	PartDto,
 	PasskeyDto,

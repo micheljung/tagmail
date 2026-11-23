@@ -1,5 +1,9 @@
 import { decodeIdIndex } from '@tagmail/api-types';
 import type {
+	AccountDto,
+	AccountPatchDto,
+	AccountsDto,
+	AccountTestDto,
 	ApiErrorDto,
 	ApiTransport,
 	CurrentAuthDto,
@@ -26,10 +30,15 @@ import type {
 	DraftInputDto,
 	IdentitiesDto,
 	IdentityDto,
+	IdentityPatchDto,
 	LabelChangeDto,
+	LabelExportDto,
+	LabelImportResultDto,
 	LabelJobDto,
 	LabelJobsDto,
 	LabelPatchDto,
+	NewAccountDto,
+	NewIdentityDto,
 	NewLabelDto,
 	NewOpDto,
 	OpDto,
@@ -62,8 +71,11 @@ export interface ViewIndexResult {
 	cursor: string;
 }
 
+/** A view that spans every account unless scoped to one. */
+export type ScopableView = 'inbox' | `label:${string}` | `search:${string}`;
+
 /** A list view id as sent to `/api/views/{view}/index`. */
-export type ViewId = 'inbox' | `mailbox:${number}` | `label:${string}` | `search:${string}`;
+export type ViewId = ScopableView | `mailbox:${number}` | `account:${number}/${ScopableView}`;
 
 async function errorOf(resp: Response): Promise<ApiError> {
 	let body: ApiErrorDto;
@@ -250,6 +262,53 @@ export class Api {
 
 	async identities(): Promise<IdentityDto[]> {
 		return (await this.#json<IdentitiesDto>('/api/identities')).identities;
+	}
+
+	createIdentity(identity: NewIdentityDto): Promise<IdentityDto> {
+		return this.#post<IdentityDto>('/api/identities', identity);
+	}
+
+	/** `signature: ''` clears it. */
+	updateIdentity(id: number, change: IdentityPatchDto): Promise<IdentityDto> {
+		return this.#post<IdentityDto>(`/api/identities/${id}`, change, 'PATCH');
+	}
+
+	deleteIdentity(id: number): Promise<void> {
+		return this.#empty(`/api/identities/${id}`, 'DELETE');
+	}
+
+	async accounts(): Promise<AccountDto[]> {
+		return (await this.#json<AccountsDto>('/api/accounts')).accounts;
+	}
+
+	createAccount(account: NewAccountDto): Promise<AccountDto> {
+		return this.#post<AccountDto>('/api/accounts', account);
+	}
+
+	/** Connects with unsaved settings; nothing is stored. */
+	testNewAccount(account: NewAccountDto): Promise<AccountTestDto> {
+		return this.#post<AccountTestDto>('/api/accounts/test', account);
+	}
+
+	/** Connects with `change` applied over the stored settings; nothing is stored. */
+	testAccount(id: number, change: AccountPatchDto): Promise<AccountTestDto> {
+		return this.#post<AccountTestDto>(`/api/accounts/${id}/test`, change);
+	}
+
+	updateAccount(id: number, change: AccountPatchDto): Promise<AccountDto> {
+		return this.#post<AccountDto>(`/api/accounts/${id}`, change, 'PATCH');
+	}
+
+	deleteAccount(id: number): Promise<void> {
+		return this.#empty(`/api/accounts/${id}`, 'DELETE');
+	}
+
+	exportLabels(): Promise<LabelExportDto> {
+		return this.#json<LabelExportDto>('/api/labels/export');
+	}
+
+	importLabels(labels: LabelExportDto): Promise<LabelImportResultDto> {
+		return this.#post<LabelImportResultDto>('/api/labels/import', labels);
 	}
 
 	/** Multipart upload (field `file`) with progress; `fetch` cannot report upload progress. */

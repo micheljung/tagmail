@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { labelColor } from '../format';
-	import { pickers } from '../ops/actions.svelte';
+	import { pickers, runOp } from '../ops/actions.svelte';
 	import { findByName, labelChanges, labelState, nextState, type TriState } from '../ops/labels';
-	import { nav, ops, toasts } from '../stores';
+	import { nav, toasts } from '../stores';
 	import { api } from '../transport';
 	import { errorText } from './errors';
 	import Icon from './Icon.svelte';
@@ -61,11 +61,8 @@
 		const t = target;
 		if (!t) return;
 		const { add, remove } = labelChanges(initial, final);
-		for (const label of add)
-			ops.run({ kind: 'label.add', label, threadIds: t.threadIds }, { view: t.view });
-		for (const label of remove) {
-			ops.run({ kind: 'label.remove', label, threadIds: t.threadIds }, { view: t.view });
-		}
+		for (const label of add) runOp({ kind: 'label.add', label }, t);
+		for (const label of remove) runOp({ kind: 'label.remove', label }, t);
 		close();
 	}
 

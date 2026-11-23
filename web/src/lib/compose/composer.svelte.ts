@@ -28,6 +28,11 @@ class Composer {
 		return this.#identities;
 	}
 
+	reloadIdentities(): Promise<IdentityDto[]> {
+		this.#identities = null;
+		return this.loadIdentities();
+	}
+
 	defaultIdentity(): number | null {
 		const list = this.identities;
 		return (list.find((i) => i.isDefault) ?? list[0])?.id ?? null;
@@ -127,7 +132,12 @@ export const composer = new Composer();
 export const outbox = new Outbox(api, toasts, (id) => void composer.reopen(id));
 
 hub.subscribe({
-	changes: (page) => outbox.changes(page),
+	changes(page) {
+		outbox.changes(page);
+		if (page.changes.some((c) => c.entity === 'identity' || c.entity === 'account')) {
+			void composer.reloadIdentities().catch(() => undefined);
+		}
+	},
 	async reset() {
 		await outbox.load().catch(() => undefined);
 		return undefined;

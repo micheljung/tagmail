@@ -4,8 +4,9 @@
 	import VirtualList from '../list/VirtualList.svelte';
 	import { act, type ActionTarget } from '../ops/actions.svelte';
 	import { shortcuts, type ShortcutAction } from '../shortcuts';
-	import { nav, ops, type ThreadList } from '../stores';
+	import { accounts, nav, ops, type ThreadList } from '../stores';
 	import type { ThreadRowDto } from '../transport';
+	import { viewScope } from '../views';
 	import Icon, { type IconName } from './Icon.svelte';
 	import ThreadRow from './ThreadRow.svelte';
 
@@ -39,6 +40,10 @@
 		{ action: 'move', icon: 'folder', label: 'Move to', key: 'v' }
 	];
 
+	/** Rows of a list that mixes accounts say which account they belong to. */
+	const markers = $derived(
+		accounts.multi && viewScope(list.view).account === null && !list.view.startsWith('mailbox:')
+	);
 	const checkedCount = $derived(list.checked.size);
 	const allState = $derived(
 		checkedCount === 0 ? 'false' : checkedCount >= visibleCount() ? 'true' : 'mixed'
@@ -187,6 +192,7 @@
 							labelName={(key) => nav.labelName(key)}
 							labelColor={(key) => nav.labelColor(key)}
 							{hiddenLabel}
+							accountName={markers && row ? accounts.name(row.accountId) : undefined}
 							oncheck={(range) => list.toggleChecked(index, range)}
 							onstar={() => {
 								if (id === undefined || !row) return;

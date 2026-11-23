@@ -1,7 +1,7 @@
 import type { ApiEvent, ApiTransport, ChangeDto, ThreadRowDto } from '@tagmail/api-types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { encodeIdIndex } from '../../../e2e/mock/idIndex';
-import { Api, CURSOR_HEADER } from '../transport/api';
+import { Api, CURSOR_HEADER, type ViewId } from '../transport/api';
 import { EventHub } from './events.svelte';
 import { NavStore } from './nav.svelte';
 import { REFETCH_DEBOUNCE_MS, ThreadList } from './threadList.svelte';
@@ -27,7 +27,7 @@ function row(id: number, lastDate: number): ThreadRowDto {
 	};
 }
 
-function fixture() {
+function fixture(view: ViewId = 'inbox') {
 	const dates = new Map<number, number>([
 		[50, 500],
 		[40, 400],
@@ -71,7 +71,7 @@ function fixture() {
 	const api = new Api(transport);
 	const hub = new EventHub(transport);
 	const nav = new NavStore(api);
-	const list = new ThreadList('inbox', api, hub, nav);
+	const list = new ThreadList(view, api, hub, nav);
 	const send = (changes: Omit<ChangeDto, 'seq'>[]) => {
 		const page = changes.map((c) => ({ ...c, seq: ++seq }));
 		push({
@@ -96,8 +96,8 @@ const flush = async () => {
 	for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve));
 };
 
-async function ready() {
-	const f = fixture();
+async function ready(view?: ViewId) {
+	const f = fixture(view);
 	await f.nav.load();
 	f.list.attached = true;
 	await f.list.load();
@@ -106,11 +106,11 @@ async function ready() {
 	return f;
 }
 
-const upsert = (id: number, lastDate: number, mailboxes: number[]) => ({
+const upsert = (id: number, lastDate: number, mailboxes: number[], accountId?: number) => ({
 	entity: 'thread' as const,
 	id,
 	op: { kind: 'upsert' as const },
-	payload: { lastDate, mailboxes, removedFrom: [] }
+	payload: { accountId, lastDate, mailboxes, removedFrom: [] }
 });
 
 describe('ThreadList', () => {
@@ -206,6 +206,20 @@ describe('ThreadList', () => {
 			}
 		});
 		expect(f.ids()).toEqual([50, 40, 30, 20, 10]);
+	});
+
+	it('lets only its own account into a scoped list', async () => {
+		const f = await ready('account:2/inbox');
+		f.send([upsert(60, 600, [INBOX], 1)]);
+		expect(f.ids()).toEqual([50, 40, 30, 20, 10]);
+		f.send([upsert(40, 400, [INBOX], 1)]);
+		expect(f.ids()).toEqual([50, 30, 20, 10]);
+		f.send([upsert(70, 700, [INBOX], 2)]);
+		expect(f.ids()).toEqual([70, 50, 30, 20, 10]);
+		f.send([upsert(80, 800, [INBOX])]);
+		await vi.advanceTimersByTimeAsync(REFETCH_DEBOUNCE_MS);
+		expect(f.indexCalls).toHaveLength(2);
+		expect(f.indexCalls[0]).toBe(`/api/views/${encodeURIComponent('account:2/inbox')}/index`);
 	});
 
 	it('reloads everything on reset', async () => {

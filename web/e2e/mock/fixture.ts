@@ -183,16 +183,77 @@ export interface Part {
 
 export const ME: Address = { name: 'Michel Jung', email: 'michel@tagmail.test' };
 
+/** Account 2 of the `multi` scenario: a small second mailbox with an alias. */
+export const ACCOUNT_B = 2;
+export const B_THREAD_COUNT = 50;
+const B_ID_BASE = 200_000;
+/** Seconds between account 2's threads, so they interleave with account 1's newest rows. */
+const B_SPACING = 2520;
+export const B_ME: Address = { name: 'Michel Jung', email: 'michel@bergmail.example' };
+export const B_ALIAS: Address = { name: 'Berg Team', email: 'team@bergmail.example' };
+
+export const B_MAILBOXES = [
+	{ id: 11, accountId: ACCOUNT_B, name: 'INBOX', delimiter: '/', specialUse: null },
+	{ id: 12, accountId: ACCOUNT_B, name: 'Sent', delimiter: '/', specialUse: 'sent' },
+	{ id: 13, accountId: ACCOUNT_B, name: 'Archive', delimiter: '/', specialUse: 'archive' },
+	{ id: 14, accountId: ACCOUNT_B, name: 'Trash', delimiter: '/', specialUse: 'trash' },
+	{ id: 15, accountId: ACCOUNT_B, name: 'Junk', delimiter: '/', specialUse: 'junk' },
+	{ id: 16, accountId: ACCOUNT_B, name: 'Suppliers', delimiter: '/', specialUse: null }
+];
+
+const B_SUBJECTS = [
+	'Berg cabin booking for the long weekend',
+	'Supplier quote: timber for the workshop',
+	'Club newsletter — winter schedule',
+	'Re: Shared drive cleanup'
+];
+
+export function bIdAt(j: number): number {
+	return B_ID_BASE + 1 + j;
+}
+
+export function bPositionOf(id: number): number | undefined {
+	const j = id - B_ID_BASE - 1;
+	return j >= 0 && j < B_THREAD_COUNT ? j : undefined;
+}
+
+export function bRowAt(j: number): Row {
+	const r = rng(B_ID_BASE + j);
+	const topic = j % B_SUBJECTS.length;
+	return {
+		id: bIdAt(j),
+		accountId: ACCOUNT_B,
+		subject: B_SUBJECTS[topic],
+		snippet: SNIPPETS[(topic + 3) % SNIPPETS.length],
+		lastDate: Math.round(NOW - 300 - j * B_SPACING),
+		messageCount: 1,
+		unreadCount: r() < 0.4 ? 1 : 0,
+		starred: false,
+		hasAttachment: false,
+		senders: [PEOPLE[(j * 5) % PEOPLE.length]],
+		labels: [],
+		mailboxIds: [B_MAILBOXES[0].id]
+	};
+}
+
+/** Even account 2 threads are addressed to the alias. */
+function recipientOf(row: Row): Address {
+	if (row.accountId !== ACCOUNT_B) return ME;
+	return bPositionOf(row.id)! % 2 === 0 ? B_ALIAS : B_ME;
+}
+
 export function messagesOf(row: Row): Message[] {
 	const r = rng(row.id * 31);
 	const out: Message[] = [];
 	for (let k = 0; k < row.messageCount; k++) {
 		const from =
-			k === row.messageCount - 1 ? row.senders[0] : (row.senders[k % row.senders.length] ?? ME);
+			k === row.messageCount - 1
+				? row.senders[0]
+				: (row.senders[k % row.senders.length] ?? recipientOf(row));
 		out.push({
 			id: row.id * 10 + k,
 			from,
-			to: [ME],
+			to: [recipientOf(row)],
 			cc: k === 0 && r() < 0.3 ? [PEOPLE[(row.id + 3) % PEOPLE.length]] : [],
 			date: row.lastDate - (row.messageCount - 1 - k) * Math.round(3600 + r() * 40000),
 			subject: k === 0 ? row.subject : `Re: ${row.subject}`,
@@ -208,9 +269,11 @@ export function messagesOf(row: Row): Message[] {
 }
 
 export function messageById(id: number): { row: Row; message: Message } | undefined {
-	const at = positionOf(Math.floor(id / 10));
-	if (at === undefined) return undefined;
-	const row = rowAt(at);
+	const threadId = Math.floor(id / 10);
+	const at = positionOf(threadId);
+	const bAt = bPositionOf(threadId);
+	if (at === undefined && bAt === undefined) return undefined;
+	const row = at === undefined ? bRowAt(bAt!) : rowAt(at);
 	const message = messagesOf(row).find((m) => m.id === id);
 	return message && { row, message };
 }

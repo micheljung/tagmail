@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { ThreadRowDto } from '@tagmail/api-types';
 	import { listDate, senderLine } from '../format';
+	import AccountMarker from './AccountMarker.svelte';
 	import Icon from './Icon.svelte';
 	import LabelChip from './LabelChip.svelte';
 
@@ -11,6 +12,7 @@
 		labelName,
 		labelColor = () => null,
 		hiddenLabel,
+		accountName,
 		oncheck,
 		onstar
 	}: {
@@ -21,6 +23,8 @@
 		labelColor?: (key: string) => string | null;
 		/** The label the list is filtered by; Gmail omits its chip. */
 		hiddenLabel?: string;
+		/** Set in unified views of several accounts: the row shows whose it is. */
+		accountName?: string;
 		oncheck?: (range: boolean) => void;
 		onstar?: () => void;
 	} = $props();
@@ -60,6 +64,7 @@
 			<Icon name="star" size={17} filled={row.starred} />
 		</button>
 		<span class="from">
+			{#if accountName}<AccountMarker id={row.accountId} name={accountName} size={16} />{/if}
 			<span class="who">{senderLine(row.senders)}</span>
 			{#if row.messageCount > 1}<span class="count">{row.messageCount}</span>{/if}
 		</span>
@@ -179,7 +184,7 @@
 
 	.from {
 		display: flex;
-		align-items: baseline;
+		align-items: center;
 		gap: 6px;
 		min-width: 0;
 	}

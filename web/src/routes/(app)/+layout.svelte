@@ -4,7 +4,15 @@
 	import { shortcuts } from '#lib/shortcuts/index.ts';
 	import ComposeDock from '#lib/compose/ComposeDock.svelte';
 	import { composer, outbox } from '#lib/compose/composer.svelte.ts';
-	import { hub, lists, nav, ops, resetAppState } from '#lib/stores/index.ts';
+	import {
+		accounts,
+		currentAccount,
+		hub,
+		lists,
+		nav,
+		ops,
+		resetAppState
+	} from '#lib/stores/index.ts';
 	import { api } from '#lib/transport/index.ts';
 	import HelpOverlay from '#lib/ui/HelpOverlay.svelte';
 	import Icon from '#lib/ui/Icon.svelte';
@@ -15,6 +23,7 @@
 	import UnsyncedPanel from '#lib/ui/UnsyncedPanel.svelte';
 	import Logo from '#lib/ui/Logo.svelte';
 	import NavRail from '#lib/ui/NavRail.svelte';
+	import { withAccount } from '#lib/views.ts';
 	import SearchBar from '#lib/ui/SearchBar.svelte';
 	import { onMount } from 'svelte';
 	import type { LayoutProps } from './$types';
@@ -54,6 +63,7 @@
 			void goto(error.code === 'setup_required' ? '/setup' : `/login?next=${next}`);
 		};
 		void nav.load();
+		void accounts.load();
 		// Outbox and op events matter on every page, not only once a list loaded.
 		if (!hub.running) hub.start(undefined);
 		void ops.load().catch(() => undefined);
@@ -71,7 +81,7 @@
 					helpOpen = !helpOpen;
 					return true;
 				case 'goInbox':
-					void goto('/inbox');
+					void goto(withAccount('/inbox', currentAccount(page.url)));
 					return true;
 				case 'goLabel':
 					labelJumpOpen = true;
@@ -160,6 +170,24 @@
 	<button class="scrim" tabindex="-1" aria-label="Close menu" onclick={() => (drawerOpen = false)}
 	></button>
 	<main id="main">
+		{#if accounts.notices.length > 0}
+			<ul class="banners">
+				{#each accounts.notices as notice (`${notice.accountId}:${notice.code}`)}
+					<li role="status" data-notice={notice.code}>
+						<Icon name="alert" size={16} />
+						<span>
+							{#if notice.code === 'labels_degraded'}
+								<strong>{notice.name}</strong> drops labels it doesn't know, so some labels may not stick
+								there.
+							{:else}
+								<strong>{notice.name}</strong> has no address to send from yet.
+							{/if}
+						</span>
+						<a href="/settings/accounts/{notice.accountId}">Account settings</a>
+					</li>
+				{/each}
+			</ul>
+		{/if}
 		{@render children()}
 	</main>
 </div>
@@ -272,6 +300,8 @@
 	}
 
 	main {
+		display: flex;
+		flex-direction: column;
 		min-width: 0;
 		min-height: 0;
 		margin: 0 16px 16px 0;
@@ -284,8 +314,38 @@
 	/* A blurred shadow on main cost WebKit ~100 ms per startup frame and was
 	   repainted on every scroll frame; the border and this layer avoid both. */
 	main > :global(*) {
-		height: 100%;
+		flex: 1;
+		min-height: 0;
 		will-change: transform;
+	}
+
+	main > .banners {
+		flex: none;
+		margin: 0;
+		padding: 0;
+		list-style: none;
+		will-change: auto;
+	}
+
+	.banners li {
+		display: flex;
+		align-items: center;
+		gap: 10px;
+		padding: 9px 16px;
+		border-bottom: 1px solid color-mix(in oklab, var(--danger) 30%, transparent);
+		background: color-mix(in oklab, var(--danger) 12%, var(--surface));
+		color: var(--ink);
+		font-size: 13px;
+	}
+
+	.banners span {
+		flex: 1;
+	}
+
+	.banners a {
+		flex: none;
+		color: var(--accent);
+		font-weight: 600;
 	}
 
 	@media (max-width: 720px) {

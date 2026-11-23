@@ -3,11 +3,18 @@
 	import { labelColor } from '#lib/format.ts';
 	import { findByName } from '#lib/ops/labels.ts';
 	import { hub, nav, toasts } from '#lib/stores/index.ts';
-	import { api, type LabelDto, type LabelJobDto } from '#lib/transport/index.ts';
+	import {
+		api,
+		type LabelDto,
+		type LabelExportDto,
+		type LabelJobDto
+	} from '#lib/transport/index.ts';
 	import { errorText } from '#lib/ui/errors.ts';
 	import Icon from '#lib/ui/Icon.svelte';
 	import { onMount } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
+
+	const EXPORT_FILE = 'tagmail-labels.json';
 
 	/** Swatches picked to stay legible as chips in light and dark themes. */
 	const PALETTE = [
@@ -31,6 +38,8 @@
 	let draftName = $state('');
 	let colorFor = $state<string | null>(null);
 	let confirmDelete = $state<string | null>(null);
+	let importInput: HTMLInputElement;
+	let importErrors = $state<{ name: string; message: string }[]>([]);
 	/** Running label jobs by job id; `label_job` change events keep them current. */
 	const jobs = new SvelteMap<number, LabelJobDto>();
 
@@ -159,6 +168,49 @@
 		}
 	}
 
+	async function exportLabels() {
+		busy = 'export';
+		error = null;
+		try {
+			const body = JSON.stringify(await api.exportLabels(), null, 2);
+			const url = URL.createObjectURL(new Blob([body], { type: 'application/json' }));
+			const link = document.createElement('a');
+			link.href = url;
+			link.download = EXPORT_FILE;
+			link.click();
+			URL.revokeObjectURL(url);
+		} catch (e) {
+			error = errorText(e);
+		} finally {
+			busy = null;
+		}
+	}
+
+	async function importLabels(file: File) {
+		busy = 'import';
+		error = null;
+		importErrors = [];
+		try {
+			let parsed: LabelExportDto;
+			try {
+				parsed = JSON.parse(await file.text()) as LabelExportDto;
+			} catch {
+				error = `“${file.name}” isn't a label export.`;
+				return;
+			}
+			const r = await api.importLabels(parsed);
+			importErrors = r.errors;
+			await nav.load();
+			toasts.show(
+				`Imported labels: ${r.created} created, ${r.updated} updated, ${r.unchanged} unchanged`
+			);
+		} catch (e) {
+			error = errorText(e);
+		} finally {
+			busy = null;
+		}
+	}
+
 	function progress(list: LabelJobDto[]): { done: number; total: number; text: string } {
 		const done = list.reduce((n, j) => n + j.done, 0);
 		const total = list.reduce((n, j) => n + j.total, 0);
@@ -216,6 +268,38 @@
 				<Icon name="plus" size={16} />Create
 			</button>
 		</form>
+	</section>
+
+	<section aria-labelledby="transfer-title">
+		<h2 id="transfer-title">Export and import</h2>
+		<p class="muted">
+			Move label names and colors to another Tagmail server. Importing adds missing labels and
+			updates colors; it never renames or deletes.
+		</p>
+		<div class="transfer">
+			<button class="btn" onclick={exportLabels} disabled={busy !== null}>Export labels</button>
+			<button class="btn" onclick={() => importInput.click()} disabled={busy !== null}>
+				Import labels…
+			</button>
+			<input
+				bind:this={importInput}
+				class="sr-only"
+				type="file"
+				accept="application/json,.json"
+				tabindex="-1"
+				aria-label="Label export file"
+				onchange={() => {
+					const file = importInput.files?.[0];
+					importInput.value = '';
+					if (file) void importLabels(file);
+				}}
+			/>
+		</div>
+		{#if importErrors.length > 0}
+			<ul class="import-errors" role="alert">
+				{#each importErrors as e (e.name)}<li><strong>{e.name}</strong>: {e.message}</li>{/each}
+			</ul>
+		{/if}
 	</section>
 
 	<section aria-labelledby="labels-title">
@@ -465,6 +549,19 @@
 		width: 120px;
 		height: 4px;
 		accent-color: var(--accent);
+	}
+
+	.transfer {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 10px;
+		margin-top: 10px;
+	}
+
+	.import-errors {
+		margin: 10px 0 0;
+		color: var(--danger);
+		font-size: 13px;
 	}
 
 	.confirm {

@@ -1,11 +1,14 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, untrack } from 'svelte';
 	import { fileSize } from '../format';
+	import { accounts } from '../stores';
+	import type { IdentityDto } from '../transport';
 	import Icon from '../ui/Icon.svelte';
 	import { composer } from './composer.svelte';
 	import type { Draft } from './draft.svelte';
 	import Editor from './Editor.svelte';
 	import RecipientField from './RecipientField.svelte';
+	import { findSignature, insertSignature, signatureBlock, swapSignature } from './signature';
 
 	let {
 		draft,
@@ -25,6 +28,24 @@
 	let toField: RecipientField | undefined = $state();
 	let dragging = $state(0);
 	let tried = $state(false);
+	let editorReady = $state(false);
+	/** A reply or forward: the signature goes above the quoted original. */
+	const quoting = $derived(draft.mode !== 'new');
+
+	/** Identities per account, in the server's order, for the From `<optgroup>`s. */
+	const fromGroups = $derived.by(() => {
+		const groups = new Map<number, IdentityDto[]>();
+		for (const i of composer.identities)
+			groups.set(i.accountId, [...(groups.get(i.accountId) ?? []), i]);
+		return [...groups].map(([accountId, identities]) => ({ accountId, identities }));
+	});
+
+	$effect(() => {
+		if (!editorReady || draft.signatureChecked) return;
+		const identity = composer.identities.find((i) => i.id === draft.identityId);
+		if (!identity && draft.draftId === null) return;
+		untrack(() => addInitialSignature(identity));
+	});
 
 	const status = $derived(
 		draft.saveState === 'saving'
@@ -77,6 +98,36 @@
 		return event.dataTransfer?.types.includes('Files') ?? false;
 	}
 
+	/** A new message gets its identity's signature; a reopened draft keeps what it has. */
+	function addInitialSignature(identity: IdentityDto | undefined) {
+		draft.signatureChecked = true;
+		const body = editor?.getHTML() ?? '';
+		const block = identity && draft.draftId === null ? signatureBlock(identity) : null;
+		if (!block) {
+			draft.signature = findSignature(body)?.inner ?? null;
+			return;
+		}
+		replaceBody(insertSignature(body, block, quoting), false);
+	}
+
+	function replaceBody(html: string, edited: boolean) {
+		if (!editor) return;
+		const shown = editor.setHTML(html);
+		draft.html = shown.html;
+		draft.signature = findSignature(shown.html)?.inner ?? null;
+		if (edited) draft.text = shown.text;
+	}
+
+	function changeFrom(id: number) {
+		draft.identityId = id;
+		const identity = composer.identities.find((i) => i.id === id);
+		if (identity && editor && editorReady) {
+			const next = swapSignature(editor.getHTML(), draft.signature, identity, quoting);
+			if (next !== null) replaceBody(next, true);
+		}
+		draft.touch();
+	}
+
 	function identityLabel(id: number): string {
 		const i = composer.identities.find((x) => x.id === id);
 		if (!i) return '';
@@ -107,10 +158,24 @@
 	{#if composer.identities.length > 1}
 		<label class="from">
 			<span class="label">From</span>
-			<select bind:value={draft.identityId} onchange={() => draft.touch()} aria-label="From">
-				{#each composer.identities as identity (identity.id)}
-					<option value={identity.id}>{identityLabel(identity.id)}</option>
-				{/each}
+			<select
+				value={draft.identityId}
+				onchange={(e) => changeFrom(Number(e.currentTarget.value))}
+				aria-label="From"
+			>
+				{#if fromGroups.length > 1}
+					{#each fromGroups as group (group.accountId)}
+						<optgroup label={accounts.name(group.accountId)}>
+							{#each group.identities as identity (identity.id)}
+								<option value={identity.id}>{identityLabel(identity.id)}</option>
+							{/each}
+						</optgroup>
+					{/each}
+				{:else}
+					{#each composer.identities as identity (identity.id)}
+						<option value={identity.id}>{identityLabel(identity.id)}</option>
+					{/each}
+				{/if}
 			</select>
 		</label>
 	{:else if composer.identities.length === 1}
@@ -172,6 +237,7 @@
 			draft.text = text;
 			draft.touch();
 		}}
+		onready={() => (editorReady = true)}
 	/>
 
 	{#if draft.uploads.length > 0}

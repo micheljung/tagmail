@@ -2,6 +2,8 @@ import type { ThreadRowDto } from '@tagmail/api-types';
 import type { ShortcutAction } from '../shortcuts';
 import { nav, ops } from '../stores';
 import type { ViewId } from '../transport';
+import type { OpIntent } from './effects';
+import { byAccount } from './split';
 
 export interface ActionTarget {
 	threadIds: number[];
@@ -31,12 +33,18 @@ export function originsOf(rows: readonly ThreadRowDto[]): Map<number, number[]> 
 	return new Map(rows.map((r) => [r.id, r.mailboxIds]));
 }
 
+/** Runs `intent` on `target`'s threads as one op per account. */
+export function runOp(intent: Omit<OpIntent, 'threadIds'>, target: ActionTarget): void {
+	for (const threadIds of byAccount(target.threadIds, target.rows)) {
+		ops.run({ ...intent, threadIds }, { view: target.view, origins: originsOf(target.rows) });
+	}
+}
+
 /** Runs a write shortcut or toolbar action on `target`; returns whether it applied. */
 export function act(action: ShortcutAction, target: ActionTarget): boolean {
 	const { threadIds, rows, view } = target;
 	if (threadIds.length === 0) return false;
-	const run = (kind: Parameters<typeof ops.run>[0]['kind']) =>
-		ops.run({ kind, threadIds }, { view, origins: originsOf(rows) });
+	const run = (kind: OpIntent['kind']) => runOp({ kind }, target);
 	switch (action) {
 		case 'archive':
 			run('archive');

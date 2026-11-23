@@ -7,12 +7,15 @@
 	let {
 		html,
 		label,
-		onchange
+		onchange,
+		onready
 	}: {
 		/** Initial content; later edits flow out through `onchange`. */
 		html: string;
 		label: string;
 		onchange: (html: string, text: string) => void;
+		/** The editor loaded and shows `html`. */
+		onready?: () => void;
 	} = $props();
 
 	let root: HTMLDivElement;
@@ -111,6 +114,7 @@
 			});
 			editor = instance;
 			if (focusPending) focus();
+			onready?.();
 		})();
 		return () => {
 			cancelled = true;
@@ -128,6 +132,18 @@
 		}
 		editor.focus();
 		editor.moveCursorToStart();
+	}
+
+	/** The content as the editor serializes it; empty until it loaded. */
+	export function getHTML(): string {
+		return editor?.getHTML() ?? '';
+	}
+
+	/** Replaces the content; returns it as the editor serializes it. */
+	export function setHTML(next: string): { html: string; text: string } {
+		if (!editor) return { html: next, text: '' };
+		editor.setHTML(next);
+		return { html: editor.getHTML(), text: root.innerText };
 	}
 
 	function addLink(event: SubmitEvent) {

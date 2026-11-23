@@ -1,7 +1,9 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { labelHue } from '../format';
-	import { nav } from '../stores';
+	import { currentAccount, nav } from '../stores';
+	import { withAccount } from '../views';
 
 	let { open = $bindable(false) }: { open?: boolean } = $props();
 
@@ -10,9 +12,12 @@
 	let filter = $state('');
 	let active = $state(0);
 
+	const account = $derived(currentAccount(page.url));
 	const matches = $derived.by(() => {
 		const f = filter.trim().toLowerCase();
-		return f ? nav.labels.filter((l) => l.name.toLowerCase().includes(f)) : nav.labels;
+		const own =
+			account === null ? nav.labels : nav.labels.filter((l) => l.accountIds.includes(account));
+		return f ? own.filter((l) => l.name.toLowerCase().includes(f)) : own;
 	});
 
 	$effect(() => {
@@ -31,7 +36,7 @@
 
 	function go(key: string) {
 		open = false;
-		void goto(`/label/${encodeURIComponent(key)}`);
+		void goto(withAccount(`/label/${encodeURIComponent(key)}`, account));
 	}
 
 	function onkeydown(event: KeyboardEvent) {
