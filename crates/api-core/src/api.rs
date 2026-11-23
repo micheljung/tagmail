@@ -206,6 +206,20 @@ impl<S: Store> Api<S> {
         &self.store
     }
 
+    pub fn image_proxy(&self) -> Option<&Arc<dyn ImageProxy>> {
+        self.proxy.as_ref()
+    }
+
+    /// The raw message of row `id`, fetched from the IMAP server first if
+    /// it is not cached; `Err` is the error response.
+    pub async fn raw_message(&self, id: &str) -> Result<Result<Vec<u8>, Response>, StoreError> {
+        let record = match self.record(id).await? {
+            Ok(record) => record,
+            Err(resp) => return Ok(Err(resp)),
+        };
+        self.raw(&record).await
+    }
+
     pub async fn handle(&self, req: Request<'_>) -> Response {
         let Some(rest) = req.path.strip_prefix("/api/") else {
             return Response::error(404, "not_found", "no such route");

@@ -7,6 +7,7 @@ pub mod http;
 mod pairing;
 pub mod proxy;
 pub mod ratelimit;
+pub mod replica;
 pub mod session;
 pub use tagmail_api_core::sqlite_store;
 mod upload;
@@ -175,6 +176,7 @@ impl Server {
                 ratelimit::ACCOUNT_TESTS,
                 ratelimit::ACCOUNT_TESTS,
             )),
+            replica: Arc::new(replica::Replica::new(config.data_dir.join(CACHE_DB))),
         };
         let mut stopped = shutdown;
         let task = tokio::spawn(async move {

@@ -175,6 +175,10 @@ fn the_route_table_covers_every_api_area() {
         "GET /api/sessions",
         "DELETE /api/devices/{id}",
         "POST /api/pairing",
+        "GET /api/replica/snapshot",
+        "POST /api/replica/rows",
+        "GET /api/replica/messages/{id}/raw",
+        "POST /api/replica/image",
     ] {
         assert!(
             routes.iter().any(|r| r == expected),

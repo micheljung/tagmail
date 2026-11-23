@@ -213,6 +213,31 @@ impl BlobStore {
         Ok(Some(text))
     }
 
+    /// The stored text blob as is (zstd), for shipping to a replica.
+    pub fn read_text_zstd(&self, key: &BlobKey) -> Result<Option<Vec<u8>>> {
+        let Some(mut file) = self.open_file(Kind::Text, key)? else {
+            return Ok(None);
+        };
+        let mut compressed = Vec::new();
+        file.read_to_end(&mut compressed)?;
+        Ok(Some(compressed))
+    }
+
+    /// Stores a text blob from [`BlobStore::read_text_zstd`] of another
+    /// store; refused unless it decodes within [`TEXT_CAP`].
+    pub fn put_text_zstd(&self, key: &BlobKey, compressed: &[u8]) -> Result<()> {
+        let mut text = Vec::new();
+        zstd::Decoder::new(compressed)?
+            .take(TEXT_CAP as u64 + 1)
+            .read_to_end(&mut text)?;
+        if text.len() > TEXT_CAP || std::str::from_utf8(&text).is_err() {
+            return Err(Error::Corrupt(format!("text blob {} is not text", key.0)));
+        }
+        let mut file = self.temp()?;
+        file.write_all(compressed)?;
+        self.persist(file, Kind::Text, key)
+    }
+
     pub fn delete_text(&self, key: &BlobKey) -> Result<()> {
         self.delete(Kind::Text, key)
     }

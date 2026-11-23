@@ -91,6 +91,32 @@ fn text_is_capped_on_a_char_boundary() {
 }
 
 #[test]
+fn compressed_text_moves_between_stores_unchanged() {
+    let (a, b) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let (server, replica) = (
+        BlobStore::open(a.path()).unwrap(),
+        BlobStore::open(b.path()).unwrap(),
+    );
+    assert!(server.read_text_zstd(&key(1)).unwrap().is_none());
+    server.put_text(&key(1), "héllo").unwrap();
+    let shipped = server.read_text_zstd(&key(1)).unwrap().unwrap();
+    replica.put_text_zstd(&key(1), &shipped).unwrap();
+    assert_eq!(replica.read_text(&key(1)).unwrap().unwrap(), "héllo");
+    assert_eq!(replica.read_text_zstd(&key(1)).unwrap().unwrap(), shipped);
+
+    assert!(matches!(
+        replica.put_text_zstd(&key(2), b"not zstd"),
+        Err(Error::Io(_) | Error::Corrupt(_))
+    ));
+    let huge = zstd::encode_all("x".repeat(TEXT_CAP + 1).as_bytes(), 3).unwrap();
+    assert!(matches!(
+        replica.put_text_zstd(&key(3), &huge),
+        Err(Error::Corrupt(_))
+    ));
+    assert!(replica.read_text(&key(3)).unwrap().is_none());
+}
+
+#[test]
 fn eviction_removes_least_recently_used_raw_only() {
     let dir = TempDir::new().unwrap();
     let store = BlobStore::open(dir.path()).unwrap();

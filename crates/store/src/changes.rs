@@ -146,7 +146,7 @@ pub enum Changes {
     Gone,
 }
 
-pub(crate) fn read_epoch(conn: &Connection) -> Result<CacheEpoch> {
+pub fn read_epoch(conn: &Connection) -> Result<CacheEpoch> {
     let value: String = conn.query_row(
         "SELECT value FROM meta WHERE key = 'cache_epoch'",
         [],

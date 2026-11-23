@@ -25,8 +25,9 @@ use tokio::time::Sleep;
 
 use crate::auth::{self, Auth, Principal};
 use crate::ratelimit::RateLimiter;
+use crate::replica::Replica;
 use crate::web::WebDir;
-use crate::{pairing, upload, webauthn};
+use crate::{pairing, replica, upload, webauthn};
 use tagmail_api_core::sqlite_store::SqliteStore;
 
 /// Request bodies are small JSON documents, except drafts
@@ -48,6 +49,7 @@ pub struct AppState {
     pub web: Option<Arc<WebDir>>,
     /// Shared by every caller of the account test routes.
     pub account_tests: Arc<RateLimiter>,
+    pub replica: Arc<Replica>,
 }
 
 /// Declares the routes axum serves itself as [`SERVER_ROUTES`] and builds
@@ -83,6 +85,10 @@ server_routes! {
     post "/api/pairing" => pairing::create,
     post "/api/pairing/exchange" => pairing::exchange,
     post "/api/attachments" => upload::upload,
+    get "/api/replica/snapshot" => replica::snapshot,
+    post "/api/replica/rows" => replica::rows,
+    get "/api/replica/messages/{id}/raw" => replica::raw,
+    post "/api/replica/image" => replica::image,
 }
 
 /// Every `/api` route as (method, path template): the server's own and
