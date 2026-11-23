@@ -45,6 +45,10 @@ webauthn-rs.workspace = true
 webpki-roots.workspace = true
 zeroize.workspace = true
 
+# Not on musl: its own allocator idles lower (docs/dev/memory.md).
+[target.'cfg(not(target_env = "musl"))'.dependencies]
+tikv-jemallocator.workspace = true
+
 [dev-dependencies]
 async-trait.workspace = true
 passkey.workspace = true

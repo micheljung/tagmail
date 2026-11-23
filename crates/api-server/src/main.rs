@@ -10,6 +10,14 @@ use tagmail_api_server::{Config, DEFAULT_LISTEN, DEFAULT_MAX_SSE_CLIENTS, Server
 use tagmail_engine::EngineConfig;
 use tracing_subscriber::EnvFilter;
 
+/// glibc's allocator idles anywhere between 24 and 55 MiB after a sync;
+/// jemalloc returns freed pages and keeps two arenas, with settings compiled
+/// in (see `.cargo/config.toml`). Not used on musl, whose own allocator idles
+/// lower (docs/dev/memory.md).
+#[cfg(not(target_env = "musl"))]
+#[global_allocator]
+static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum LogFormat {
     Text,
@@ -62,9 +70,18 @@ struct Cli {
     /// Seconds between polls of mailboxes not covered by IDLE
     #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
     poll_interval: u64,
+    /// Async worker threads; the work is IO-bound, so few keep memory low
+    #[arg(long, default_value_t = DEFAULT_WORKER_THREADS, value_parser = clap::value_parser!(u64).range(1..=256))]
+    worker_threads: u64,
+    /// Upper bound of the blocking pool (SQLite reads, password hashing)
+    #[arg(long, default_value_t = DEFAULT_BLOCKING_THREADS, value_parser = clap::value_parser!(u64).range(1..=512))]
+    max_blocking_threads: u64,
     #[arg(long, value_enum, default_value_t = LogFormat::Text)]
     log_format: LogFormat,
 }
+
+const DEFAULT_WORKER_THREADS: u64 = 2;
+const DEFAULT_BLOCKING_THREADS: u64 = 8;
 
 fn default_web_dir() -> Option<PathBuf> {
     let dir = std::env::current_exe().ok()?.parent()?.join("web");
@@ -92,9 +109,17 @@ async fn terminated() {
     let _ = tokio::signal::ctrl_c().await;
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(usize::try_from(cli.worker_threads)?)
+        .max_blocking_threads(usize::try_from(cli.max_blocking_threads)?)
+        .enable_all()
+        .build()?;
+    runtime.block_on(run(cli))
+}
+
+async fn run(cli: Cli) -> anyhow::Result<()> {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let logs = tracing_subscriber::fmt().with_env_filter(filter);
     match cli.log_format {
