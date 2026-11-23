@@ -41,6 +41,12 @@ fn not_found(what: &str) -> Response {
     Response::error(404, "not_found", format!("no such {what}"))
 }
 
+fn evicted() -> Response {
+    let error = FetchRawError::Unavailable("evicted right after the fetch".to_owned());
+    tracing::warn!(error = %error, "fetching raw message on open");
+    Response::error(503, "body_unavailable", error.to_string())
+}
+
 fn forbidden() -> Response {
     Response::error(403, "forbidden", "invalid or expired link")
 }
@@ -162,6 +168,33 @@ impl<S: Store> Api<S> {
         if let Some(raw) = self.store.raw_message(record.id).await? {
             return Ok(Ok(raw));
         }
+        if let Err(resp) = self.fetch(record).await? {
+            return Ok(Err(resp));
+        }
+        Ok(self.store.raw_message(record.id).await?.ok_or_else(evicted))
+    }
+
+    /// [`Store::render_source`], fetched from the server first if the raw
+    /// message is not cached.
+    async fn render_source(
+        &self,
+        record: &MessageRecord,
+    ) -> Result<Result<Vec<u8>, Response>, StoreError> {
+        if let Some(source) = self.store.render_source(record.id).await? {
+            return Ok(Ok(source));
+        }
+        if let Err(resp) = self.fetch(record).await? {
+            return Ok(Err(resp));
+        }
+        Ok(self
+            .store
+            .render_source(record.id)
+            .await?
+            .ok_or_else(evicted))
+    }
+
+    /// Fetches the raw message into the store's cache.
+    async fn fetch(&self, record: &MessageRecord) -> Result<Result<(), Response>, StoreError> {
         let Some(registry) = &self.registry else {
             return Ok(Err(Response::error(
                 503,
@@ -175,12 +208,8 @@ impl<S: Store> Api<S> {
         )
         .await
         .unwrap_or_else(|_| Err(FetchRawError::Unavailable("timed out".to_owned())));
-        let error = match fetched {
-            Ok(()) => match self.store.raw_message(record.id).await? {
-                Some(raw) => return Ok(Ok(raw)),
-                None => FetchRawError::Unavailable("evicted right after the fetch".to_owned()),
-            },
-            Err(e) => e,
+        let Err(error) = fetched else {
+            return Ok(Ok(()));
         };
         tracing::warn!(message = record.id.0, error = %error, "fetching raw message on open");
         let (status, code) = match error {
@@ -204,12 +233,9 @@ impl<S: Store> Api<S> {
         record: &MessageRecord,
         images: bool,
     ) -> Result<Result<Rendered, Response>, StoreError> {
-        let source = match self.store.render_source(record.id).await? {
-            Some(source) => source,
-            None => match self.raw(record).await? {
-                Ok(raw) => blocking(move || mime::reduce::reduce(raw.as_slice())).await??,
-                Err(resp) => return Ok(Err(resp)),
-            },
+        let source = match self.render_source(record).await? {
+            Ok(source) => source,
+            Err(resp) => return Ok(Err(resp)),
         };
         let keys = self.url_keys().await?;
         let id = record.id;
