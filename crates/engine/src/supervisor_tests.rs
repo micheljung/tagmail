@@ -561,6 +561,24 @@ async fn removing_an_account_purges_its_rows_and_reports_them() {
 }
 
 #[tokio::test]
+async fn stopping_an_account_does_not_wait_for_another_accounts_blob_writes() {
+    let (a, b) = (seeded("a", 1), seeded("b", 1));
+    let f = fixture(&[account(1, 2, &a), account(2, 2, &b)], config(|_| {})).await;
+    f.engine.start_all().await.unwrap();
+    eventually("both live", || async {
+        f.all_live(1).await && f.all_live(2).await
+    })
+    .await;
+    let writing = f.engine.blob_writes(AccountId(2));
+    let in_flight = writing.acquire().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), f.engine.stop_account(AccountId(1)))
+        .await
+        .expect("stopped without waiting for account 2");
+    drop(in_flight);
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn start_all_resumes_an_interrupted_removal() {
     let (a, b) = (seeded("a", 1), seeded("b", 2));
     let f = fixture(&[account(1, 2, &a), account(2, 2, &b)], config(|_| {})).await;

@@ -374,10 +374,21 @@ pub(crate) struct Inner<F: ConnectorFactory> {
     lifecycle: Mutex<HashMap<AccountId, Arc<tokio::sync::Mutex<()>>>>,
     /// Accounts being removed; never started again.
     removing: Mutex<HashSet<AccountId>>,
-    /// Blob writes of every account; stops wait for them to finish.
-    pub(crate) blob_writes: Arc<Semaphore>,
+    /// Blob writes of each account; its stop waits for them to finish.
+    blob_writes: Mutex<HashMap<AccountId, Arc<Semaphore>>>,
     #[cfg(test)]
     pub(crate) loop_turns: std::sync::atomic::AtomicUsize,
+}
+
+impl<F: ConnectorFactory> Inner<F> {
+    fn blob_writes(&self, id: AccountId) -> Arc<Semaphore> {
+        self.blob_writes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(id)
+            .or_insert_with(crate::ctx::blob_writes)
+            .clone()
+    }
 }
 
 /// The sync engine: implements [`AccountRegistry`] and [`WriteService`]
@@ -436,7 +447,7 @@ impl<F: ConnectorFactory> Engine<F> {
                 labels_dropped: Mutex::new(HashSet::new()),
                 lifecycle: Mutex::new(HashMap::new()),
                 removing: Mutex::new(HashSet::new()),
-                blob_writes: crate::ctx::blob_writes(),
+                blob_writes: Mutex::new(HashMap::new()),
                 #[cfg(test)]
                 loop_turns: std::sync::atomic::AtomicUsize::new(0),
                 config,
@@ -665,7 +676,21 @@ impl<F: ConnectorFactory> Engine<F> {
         for h in handles {
             join(h).await;
         }
-        crate::ctx::drain_blob_writes(&self.inner.blob_writes).await;
+        let writes: Vec<Arc<Semaphore>> = self
+            .inner
+            .blob_writes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect();
+        for w in writes {
+            crate::ctx::drain_blob_writes(&w).await;
+        }
+    }
+
+    pub(crate) fn blob_writes(&self, id: AccountId) -> Arc<Semaphore> {
+        self.inner.blob_writes(id)
     }
 
     #[cfg(test)]
@@ -709,7 +734,7 @@ impl<F: ConnectorFactory> Engine<F> {
             h.stop.send_replace(true);
             join(h).await;
         }
-        crate::ctx::drain_blob_writes(&self.inner.blob_writes).await;
+        crate::ctx::drain_blob_writes(&self.blob_writes(id)).await;
         self.inner
             .wakes
             .lock()
@@ -803,6 +828,11 @@ impl<F: ConnectorFactory> Engine<F> {
         .await?;
         self.inner
             .removing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+        self.inner
+            .blob_writes
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&id);
@@ -1216,7 +1246,7 @@ async fn run_account<F: ConnectorFactory>(
         id,
     )
     .with_overlays(inner.overlays.clone())
-    .with_blob_writes(inner.blob_writes.clone());
+    .with_blob_writes(inner.blob_writes(id));
     let account = AccountRun {
         id,
         config: &inner.config,

@@ -15,7 +15,7 @@ use crate::cache::W;
 use crate::error::Result;
 use crate::overlay::Overlays;
 
-/// Blob writes in flight at once, over all accounts.
+/// Blob writes of one account in flight at once.
 pub const MAX_BLOB_WRITES: usize = 1024;
 
 /// A semaphore for [`Ctx::with_blob_writes`].
