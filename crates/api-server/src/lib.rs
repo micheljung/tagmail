@@ -117,6 +117,7 @@ impl Server {
         drop(master);
         let store = Arc::new(store);
         let feed = Arc::new(ChangeFeed::new(store.cache().head().await?));
+        store.set_feed(feed.clone());
         let (registry, engine) = match sync {
             Sync::Registry(registry) => (registry, None),
             Sync::Engine(engine_config) => {
@@ -170,6 +171,10 @@ impl Server {
             shutdown: shutdown.clone(),
             auth: auth.clone(),
             web: config.web_dir.clone().map(|dir| Arc::new(WebDir::new(dir))),
+            account_tests: Arc::new(ratelimit::RateLimiter::new(
+                ratelimit::ACCOUNT_TESTS,
+                ratelimit::ACCOUNT_TESTS,
+            )),
         };
         let mut stopped = shutdown;
         let task = tokio::spawn(async move {

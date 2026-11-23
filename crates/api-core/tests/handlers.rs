@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tagmail_api_core::dto::{
-    ChangeDto, ChangeOpDto, EntityDto, LabelDto, MailboxDto, SpecialUseDto, ThreadRowDto,
+    AccountDto, AccountStateDto, AccountTestDto, ChangeDto, ChangeOpDto, EntityDto, LabelDto,
+    MailboxDto, SpecialUseDto, TestStepDto, ThreadRowDto,
 };
 use tagmail_api_core::id_index;
 use tagmail_api_core::ops_dto::{
@@ -11,9 +12,9 @@ use tagmail_api_core::ops_dto::{
 };
 use tagmail_api_core::signing::UrlKeys;
 use tagmail_api_core::{
-    AccountRegistry, AccountSummary, Api, BoxFuture, ChangeFeed, ChangePage, Event, EventSession,
-    FetchRawError, MessageRecord, Method, NewAccount, OpenError, Request, Response, RuntimeStatus,
-    Store, StoreResult, ThreadDetail, ThreadRows, View, ViewIndex,
+    AccountPatch, AccountRegistry, AccountSummary, Api, BoxFuture, ChangeFeed, ChangePage, Event,
+    EventSession, FetchRawError, MessageRecord, Method, NewAccount, OpenError, Request, Response,
+    RuntimeStatus, Store, StoreResult, ThreadDetail, ThreadRows, View, ViewIndex,
 };
 use tagmail_api_core::{Submitted, WriteError, WriteResult, WriteService};
 use tagmail_core::query::parse;
@@ -32,6 +33,8 @@ struct MemStore {
     log: Mutex<Vec<ChangeDto>>,
     min_seq: i64,
     accounts: Mutex<Vec<(AccountSummary, NewAccount)>>,
+    /// Labels a [`LabelWrites`] keeps; empty: one fixed label.
+    labels: Arc<Mutex<Vec<LabelDto>>>,
     /// Label and search views answer with `inbox` and are recorded here.
     queried: Mutex<Vec<View>>,
 }
@@ -95,6 +98,10 @@ impl Store for MemStore {
     }
 
     async fn labels(&self) -> StoreResult<Vec<LabelDto>> {
+        let kept = self.labels.lock().unwrap().clone();
+        if !kept.is_empty() {
+            return Ok(kept);
+        }
         Ok(vec![LabelDto {
             key: "work".to_owned(),
             name: "Work".to_owned(),
@@ -163,6 +170,69 @@ impl Store for MemStore {
         Ok(id)
     }
 
+    async fn accounts_full(&self) -> StoreResult<Vec<AccountDto>> {
+        Ok(self
+            .accounts
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(s, a)| account_dto(s, a))
+            .collect())
+    }
+
+    async fn account_settings(&self, id: AccountId) -> StoreResult<Option<NewAccount>> {
+        Ok(self
+            .accounts
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(s, _)| s.id == id)
+            .map(|(_, a)| a.clone()))
+    }
+
+    async fn update_account(
+        &self,
+        id: AccountId,
+        patch: AccountPatch,
+    ) -> StoreResult<Option<AccountDto>> {
+        let mut accounts = self.accounts.lock().unwrap();
+        let Some((s, a)) = accounts
+            .iter_mut()
+            .find(|(s, _)| s.id == id && s.status != "deleting")
+        else {
+            return Ok(None);
+        };
+        if let Some(name) = patch.name {
+            s.name = name.clone();
+            a.name = name;
+        }
+        if let Some(password) = patch.password {
+            a.password = password;
+        }
+        if let Some(host) = patch.imap_host {
+            a.imap_host = host;
+        }
+        if let Some(email) = patch.email {
+            s.email = Some(email.clone());
+            a.email = email;
+        }
+        if let Some(status) = patch.status {
+            s.status = status.as_str().to_owned();
+        }
+        Ok(Some(account_dto(s, a)))
+    }
+
+    async fn mark_deleting(&self, id: AccountId) -> StoreResult<bool> {
+        let mut accounts = self.accounts.lock().unwrap();
+        Ok(match accounts.iter_mut().find(|(s, _)| s.id == id) {
+            Some((s, _)) => {
+                s.status = "deleting".to_owned();
+                true
+            }
+            None => false,
+        })
+    }
+
     async fn message(&self, _: MessageRowId) -> StoreResult<Option<MessageRecord>> {
         Ok(None)
     }
@@ -188,14 +258,61 @@ impl Store for MemStore {
     }
 }
 
+fn account_dto(s: &AccountSummary, a: &NewAccount) -> AccountDto {
+    AccountDto {
+        id: s.id.0,
+        name: a.name.clone(),
+        imap_host: a.imap_host.clone(),
+        imap_port: a.imap_port,
+        imap_tls: a.imap_tls,
+        smtp_host: a.smtp_host.clone(),
+        smtp_port: a.smtp_port,
+        smtp_tls: a.smtp_tls,
+        username: a.username.clone(),
+        max_connections: a.max_connections,
+        email: s.email.clone(),
+        status: AccountStateDto::parse(&s.status).unwrap(),
+    }
+}
+
 #[derive(Default)]
 struct Registry {
     added: Mutex<Vec<AccountId>>,
+    updated: Mutex<Vec<(AccountId, bool)>>,
+    removed: Mutex<Vec<AccountId>>,
+    tested: Mutex<Vec<NewAccount>>,
 }
 
 impl AccountRegistry for Registry {
     fn account_added(&self, id: AccountId) {
         self.added.lock().unwrap().push(id);
+    }
+
+    fn account_updated(&self, id: AccountId, restart: bool) {
+        self.updated.lock().unwrap().push((id, restart));
+    }
+
+    fn account_removed(&self, id: AccountId) -> BoxFuture<()> {
+        self.removed.lock().unwrap().push(id);
+        Box::pin(async {})
+    }
+
+    fn test_account(&self, settings: NewAccount) -> BoxFuture<AccountTestDto> {
+        let ok = settings.password.expose() == "hunter2";
+        self.tested.lock().unwrap().push(settings);
+        let step = TestStepDto {
+            ok,
+            error: (!ok).then(|| "authentication failed".to_owned()),
+            ms: 1,
+        };
+        Box::pin(async move {
+            AccountTestDto {
+                imap: step.clone(),
+                smtp: step,
+                capabilities: vec!["IMAP4rev1".to_owned()],
+                mailboxes: ok.then_some(3),
+            }
+        })
     }
 
     fn runtime_status(&self, id: AccountId) -> Option<RuntimeStatus> {
@@ -256,6 +373,24 @@ async fn post(api: &Api<MemStore>, path: &str, body: &Value) -> Response {
         body: &serde_json::to_vec(body).unwrap(),
     })
     .await
+}
+
+async fn send(api: &Api<MemStore>, method: Method, path: &str, body: &Value) -> Response {
+    api.handle(Request {
+        method,
+        path,
+        query: "",
+        body: &serde_json::to_vec(body).unwrap(),
+    })
+    .await
+}
+
+async fn patch(api: &Api<MemStore>, path: &str, body: &Value) -> Response {
+    send(api, Method::Patch, path, body).await
+}
+
+async fn delete(api: &Api<MemStore>, path: &str) -> Response {
+    send(api, Method::Delete, path, &Value::Null).await
 }
 
 fn json_body(resp: &Response) -> Value {
@@ -497,6 +632,124 @@ async fn create_account_validates_fields() {
     assert_eq!(post(&api, "/api/accounts", &body).await.status, 400);
     assert!(registry.added.lock().unwrap().is_empty());
     assert!(api.store().accounts.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn sender_address_comes_from_email_or_the_username() {
+    let (api, _) = api(MemStore::default());
+    let mut body = account_json();
+    body["email"] = json!(" Work@Example.com ");
+    body["displayName"] = json!("Ann");
+    let resp = post(&api, "/api/accounts", &body).await;
+    assert_eq!(json_body(&resp)["email"], "Work@Example.com");
+    let stored = api.store().accounts.lock().unwrap()[0].1.clone();
+    assert_eq!(
+        (stored.email.as_str(), stored.display_name.as_deref()),
+        ("Work@Example.com", Some("Ann"))
+    );
+
+    let resp = post(&api, "/api/accounts", &account_json()).await;
+    assert_eq!(json_body(&resp)["email"], "me@example.com");
+
+    let mut bare = account_json();
+    bare["username"] = json!("me");
+    let resp = post(&api, "/api/accounts", &bare).await;
+    assert_eq!(resp.status, 422);
+    assert_eq!(json_body(&resp)["field"], "email");
+    bare["email"] = json!("not-an-address");
+    assert_eq!(
+        json_body(&post(&api, "/api/accounts", &bare).await)["field"],
+        "email"
+    );
+    assert_eq!(api.store().accounts.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn accounts_are_listed_patched_tested_and_deleted() {
+    let (api, registry) = api(MemStore::default());
+    post(&api, "/api/accounts", &account_json()).await;
+    let list = json_body(&get(&api, "/api/accounts").await);
+    assert_eq!(list["accounts"][0]["status"], "active");
+    assert!(!list.to_string().contains("hunter2"));
+
+    let resp = patch(&api, "/api/accounts/1", &json!({ "name": "Home" })).await;
+    assert_eq!(resp.status, 200);
+    assert_eq!(json_body(&resp)["name"], "Home");
+    let resp = patch(
+        &api,
+        "/api/accounts/1",
+        &json!({ "password": "new", "status": "disabled" }),
+    )
+    .await;
+    assert_eq!(json_body(&resp)["status"], "disabled");
+    assert_eq!(
+        *registry.updated.lock().unwrap(),
+        [(AccountId(1), false), (AccountId(1), true)]
+    );
+    for (body, field) in [
+        (json!({ "status": "deleting" }), "status"),
+        (json!({ "email": "x" }), "email"),
+        (json!({ "imapPort": 0 }), "imapPort"),
+    ] {
+        let resp = patch(&api, "/api/accounts/1", &body).await;
+        assert_eq!(
+            (resp.status, json_body(&resp)["field"].clone()),
+            (422, json!(field))
+        );
+    }
+    assert_eq!(patch(&api, "/api/accounts/9", &json!({})).await.status, 404);
+    assert_eq!(
+        patch(&api, "/api/accounts/1", &json!({ "x": 1 }))
+            .await
+            .status,
+        400
+    );
+
+    let resp = post(
+        &api,
+        "/api/accounts/1/test",
+        &json!({ "password": "hunter2" }),
+    )
+    .await;
+    let body = json_body(&resp);
+    assert_eq!(
+        (body["imap"]["ok"].clone(), body["mailboxes"].clone()),
+        (json!(true), json!(3))
+    );
+    let resp = post(&api, "/api/accounts/1/test", &json!({})).await;
+    assert_eq!(
+        json_body(&resp)["smtp"]["ok"],
+        false,
+        "stored password is now 'new'"
+    );
+    let mut bare = account_json();
+    bare["username"] = json!("me");
+    let resp = post(&api, "/api/accounts/test", &bare).await;
+    assert_eq!(resp.status, 200, "a test needs no sender address");
+    assert_eq!(
+        registry.tested.lock().unwrap()[0].imap_host,
+        "imap.example.com"
+    );
+    assert_eq!(
+        api.store().accounts.lock().unwrap().len(),
+        1,
+        "tests save nothing"
+    );
+    assert_eq!(
+        post(&api, "/api/accounts/9/test", &json!({})).await.status,
+        404
+    );
+
+    let resp = delete(&api, "/api/accounts/1").await;
+    assert_eq!((resp.status, json_body(&resp)), (202, json!({ "id": 1 })));
+    assert_eq!(*registry.removed.lock().unwrap(), [AccountId(1)]);
+    assert_eq!(
+        patch(&api, "/api/accounts/1", &json!({ "name": "x" }))
+            .await
+            .status,
+        404
+    );
+    assert_eq!(delete(&api, "/api/accounts/7").await.status, 404);
 }
 
 #[tokio::test]
@@ -799,5 +1052,144 @@ async fn write_routes_reach_the_write_service() {
     assert_eq!(
         json_body(&get(&api, "/api/label-jobs").await)["jobs"],
         json!([])
+    );
+}
+
+/// Creates and recolours labels in the store's shared list.
+struct LabelWrites {
+    labels: Arc<Mutex<Vec<LabelDto>>>,
+    calls: Mutex<Vec<String>>,
+}
+
+impl WriteService for LabelWrites {
+    fn submit_op(&self, _: tagmail_api_core::OpRequest) -> BoxFuture<WriteResult<Submitted>> {
+        unreachable!()
+    }
+    fn ops(&self, _: Option<OpStatusDto>) -> BoxFuture<WriteResult<Vec<OpDto>>> {
+        unreachable!()
+    }
+    fn op(&self, _: String) -> BoxFuture<WriteResult<OpDto>> {
+        unreachable!()
+    }
+    fn retry_op(&self, _: String) -> BoxFuture<WriteResult<OpDto>> {
+        unreachable!()
+    }
+    fn discard_op(&self, _: String) -> BoxFuture<WriteResult<()>> {
+        unreachable!()
+    }
+    fn create_label(&self, label: NewLabelDto) -> BoxFuture<WriteResult<LabelDto>> {
+        self.calls
+            .lock()
+            .unwrap()
+            .push(format!("create {}", label.name));
+        let dto = LabelDto {
+            key: LabelKey::of(&label.name).to_string(),
+            name: label.name,
+            color: label.color,
+            account_ids: vec![1],
+        };
+        self.labels.lock().unwrap().push(dto.clone());
+        Box::pin(async move { Ok(dto) })
+    }
+    fn update_label(
+        &self,
+        key: String,
+        patch: LabelPatchDto,
+    ) -> BoxFuture<WriteResult<LabelChangeDto>> {
+        self.calls.lock().unwrap().push(format!("update {key}"));
+        let mut labels = self.labels.lock().unwrap();
+        let label = labels.iter_mut().find(|l| l.key == key).unwrap();
+        label.color = patch.color.filter(|c| !c.is_empty());
+        let label = label.clone();
+        Box::pin(async move {
+            Ok(LabelChangeDto {
+                label: Some(label),
+                job_id: None,
+                job_ids: vec![],
+            })
+        })
+    }
+    fn delete_label(&self, _: String) -> BoxFuture<WriteResult<LabelChangeDto>> {
+        unreachable!()
+    }
+    fn label_jobs(&self) -> BoxFuture<WriteResult<Vec<LabelJobDto>>> {
+        unreachable!()
+    }
+}
+
+#[tokio::test]
+async fn label_import_is_idempotent_and_export_round_trips() {
+    let labels = Arc::new(Mutex::new(vec![LabelDto {
+        key: "work".to_owned(),
+        name: "Work".to_owned(),
+        color: None,
+        account_ids: vec![1],
+    }]));
+    let writes = Arc::new(LabelWrites {
+        labels: labels.clone(),
+        calls: Mutex::new(Vec::new()),
+    });
+    let (api, _) = api(MemStore {
+        labels,
+        ..MemStore::default()
+    });
+    let api = api.with_writes(writes.clone() as Arc<dyn WriteService>);
+    let file = json!({
+        "format": "tagmail-labels",
+        "version": 1,
+        "labels": [
+            { "name": "Travel", "color": "#00AA00", "sort": 2 },
+            { "name": "work", "color": "#112233", "sort": 1 },
+            { "name": "Bad", "color": "red", "sort": 3 },
+        ],
+    });
+    let first = json_body(&post(&api, "/api/labels/import", &file).await);
+    assert_eq!(
+        (&first["created"], &first["updated"], &first["unchanged"]),
+        (&json!(1), &json!(1), &json!(0))
+    );
+    assert_eq!(first["errors"][0]["name"], "Bad");
+    assert_eq!(
+        *writes.calls.lock().unwrap(),
+        ["update work", "create Travel"],
+        "applied in sort order, never renamed"
+    );
+    let second = json_body(&post(&api, "/api/labels/import", &file).await);
+    assert_eq!(
+        (&second["created"], &second["updated"], &second["unchanged"]),
+        (&json!(0), &json!(0), &json!(2))
+    );
+    assert_eq!(writes.calls.lock().unwrap().len(), 2);
+
+    let resp = get(&api, "/api/labels/export").await;
+    assert_eq!(
+        resp.header("content-disposition"),
+        Some("attachment; filename=\"tagmail-labels.json\"")
+    );
+    let export = json_body(&resp);
+    assert_eq!(export["format"], "tagmail-labels");
+    assert_eq!(
+        export["labels"],
+        json!([
+            { "name": "Work", "color": "#112233", "sort": 0 },
+            { "name": "Travel", "color": "#00aa00", "sort": 1 },
+        ])
+    );
+    let third = json_body(&post(&api, "/api/labels/import", &export).await);
+    assert_eq!(third["unchanged"], 2);
+
+    for bad in [
+        json!({ "format": "other", "version": 1, "labels": [] }),
+        json!({ "format": "tagmail-labels", "version": 2, "labels": [] }),
+    ] {
+        assert_eq!(post(&api, "/api/labels/import", &bad).await.status, 400);
+    }
+    let many: Vec<Value> = (0..1001)
+        .map(|i| json!({ "name": format!("l{i}"), "color": null, "sort": i }))
+        .collect();
+    let too_many = json!({ "format": "tagmail-labels", "version": 1, "labels": many });
+    assert_eq!(
+        post(&api, "/api/labels/import", &too_many).await.status,
+        400
     );
 }

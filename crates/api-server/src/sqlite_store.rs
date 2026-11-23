@@ -2,17 +2,17 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tagmail_api_core::dto::{
-    AddressDto, ChangeDto, ChangeOpDto, EntityDto, LabelDto, MailboxDto, SpecialUseDto,
-    ThreadRowDto,
+    AccountDto, AccountStateDto, AddressDto, ChangeDto, ChangeOpDto, EntityDto, LabelDto,
+    MailboxDto, SpecialUseDto, ThreadRowDto, TlsMode,
 };
 use tagmail_api_core::signing::{KEY_LEN, UrlKeys};
 use tagmail_api_core::{
-    AccountSummary, ChangePage, MessageRecord, NewAccount, Store, StoreResult, ThreadDetail,
-    ThreadRows, View, ViewIndex,
+    AccountPatch, AccountSummary, ChangeFeed, ChangePage, MessageRecord, NewAccount, Secret, Store,
+    StoreResult, ThreadDetail, ThreadRows, View, ViewIndex,
 };
 use tagmail_core::query::{Query, Term};
 use tagmail_core::{
@@ -24,7 +24,7 @@ use tagmail_store::rusqlite::{
 };
 use tagmail_store::{
     BlobKey, BlobStore, CacheDb, Change, ChangeOp, Changes, ConfigDb, DEFAULT_RAW_CAP, Entity,
-    MasterKey, Sealed, Vault, changes, search,
+    MasterKey, NewChange, Sealed, Vault, changes, search,
 };
 use zeroize::Zeroizing;
 
@@ -44,6 +44,88 @@ pub struct SqliteStore {
     cache: Arc<CacheDb>,
     vault: Arc<Vault>,
     blobs: Arc<BlobStore>,
+    /// Woken after account changes are logged; set once the feed exists.
+    feed: OnceLock<Arc<ChangeFeed>>,
+}
+
+const ACCOUNT_COLUMNS: &str = "id, name, imap_host, imap_port, imap_tls, smtp_host, smtp_port, \
+     smtp_tls, username, max_connections, email, status";
+
+fn tls_mode(value: &str) -> rusqlite::Result<TlsMode> {
+    match value {
+        "tls" => Ok(TlsMode::Tls),
+        "starttls" => Ok(TlsMode::Starttls),
+        other => Err(rusqlite::Error::InvalidColumnType(
+            0,
+            format!("tls mode {other:?}"),
+            rusqlite::types::Type::Text,
+        )),
+    }
+}
+
+/// A row selected with [`ACCOUNT_COLUMNS`].
+fn account_dto(r: &rusqlite::Row<'_>) -> rusqlite::Result<AccountDto> {
+    let status: String = r.get(11)?;
+    Ok(AccountDto {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        imap_host: r.get(2)?,
+        imap_port: r.get(3)?,
+        imap_tls: tls_mode(&r.get::<_, String>(4)?)?,
+        smtp_host: r.get(5)?,
+        smtp_port: r.get(6)?,
+        smtp_tls: tls_mode(&r.get::<_, String>(7)?)?,
+        username: r.get(8)?,
+        max_connections: r.get(9)?,
+        email: r.get(10)?,
+        status: AccountStateDto::parse(&status).unwrap_or(AccountStateDto::Disabled),
+    })
+}
+
+fn read_account(conn: &Connection, id: AccountId) -> rusqlite::Result<Option<AccountDto>> {
+    conn.query_row(
+        &format!("SELECT {ACCOUNT_COLUMNS} FROM account WHERE id = ?1"),
+        [id.0],
+        account_dto,
+    )
+    .optional()
+}
+
+/// Points the account's default identity at `email`: an identity with that
+/// address becomes the default, else the default's address changes.
+fn move_default_identity(conn: &Connection, id: AccountId, email: &str) -> rusqlite::Result<()> {
+    let existing: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM identity WHERE account_id = ?1 AND address = ?2 COLLATE NOCASE",
+            params![id.0, email],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match existing {
+        Some(identity) => {
+            conn.execute(
+                "UPDATE identity SET is_default = 0 WHERE account_id = ?1 AND id != ?2",
+                params![id.0, identity],
+            )?;
+            conn.execute(
+                "UPDATE identity SET is_default = 1 WHERE id = ?1",
+                [identity],
+            )?;
+        }
+        None => {
+            let changed = conn.execute(
+                "UPDATE identity SET address = ?2 WHERE account_id = ?1 AND is_default = 1",
+                params![id.0, email],
+            )?;
+            if changed == 0 {
+                conn.execute(
+                    "INSERT INTO identity (account_id, address, is_default) VALUES (?1, ?2, 1)",
+                    params![id.0, email],
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 impl SqliteStore {
@@ -61,7 +143,35 @@ impl SqliteStore {
             cache: Arc::new(cache),
             vault: Arc::new(vault),
             blobs: Arc::new(blobs),
+            feed: OnceLock::new(),
         })
+    }
+
+    /// The feed to wake after account changes; the first call wins.
+    pub fn set_feed(&self, feed: Arc<ChangeFeed>) {
+        let _ = self.feed.set(feed);
+    }
+
+    /// Logs an account upsert and wakes the event streams.
+    async fn emit_account(&self, account: &AccountDto) -> StoreResult<()> {
+        let change = NewChange {
+            entity: Entity::Account,
+            entity_id: account.id,
+            op: ChangeOp::Upsert,
+            payload: Some(serde_json::to_string(account)?),
+        };
+        let epoch = self.cache.epoch();
+        let head = self
+            .cache
+            .write(move |tx| {
+                changes::append(tx, &change)?;
+                changes::head(tx, epoch)
+            })
+            .await?;
+        if let Some(feed) = self.feed.get() {
+            feed.publish(head);
+        }
+        Ok(())
     }
 
     /// Message blobs, shared with the engine.
@@ -128,6 +238,7 @@ fn entity_dto(e: Entity) -> EntityDto {
         Entity::Outbox => EntityDto::Outbox,
         Entity::Op => EntityDto::Op,
         Entity::LabelJob => EntityDto::LabelJob,
+        Entity::Identity => EntityDto::Identity,
     }
 }
 
@@ -824,7 +935,7 @@ impl Store for SqliteStore {
 
     async fn create_account(&self, account: NewAccount) -> StoreResult<AccountId> {
         let vault = self.vault.clone();
-        Ok(self
+        let account = self
             .config
             .write(move |tx| {
                 let id: i64 =
@@ -860,9 +971,150 @@ impl Store for SqliteStore {
                      VALUES (?1, ?2, ?3, 1)",
                     params![id, account.email, account.display_name],
                 )?;
-                Ok(AccountId(id))
+                Ok(read_account(tx, AccountId(id))?)
+            })
+            .await?;
+        let account = account.ok_or("the new account vanished")?;
+        self.emit_account(&account).await?;
+        Ok(AccountId(account.id))
+    }
+
+    async fn accounts_full(&self) -> StoreResult<Vec<AccountDto>> {
+        Ok(self
+            .config
+            .read(|conn| {
+                let mut stmt = conn.prepare_cached(&format!(
+                    "SELECT {ACCOUNT_COLUMNS} FROM account ORDER BY id"
+                ))?;
+                let rows = stmt.query_map([], account_dto)?;
+                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
             })
             .await?)
+    }
+
+    async fn account_settings(&self, id: AccountId) -> StoreResult<Option<NewAccount>> {
+        let row = self
+            .config
+            .read(move |conn| {
+                Ok(conn
+                    .query_row(
+                        &format!(
+                            "SELECT {ACCOUNT_COLUMNS}, secret_ct, secret_nonce FROM account \
+                             WHERE id = ?1"
+                        ),
+                        [id.0],
+                        |r| {
+                            Ok((
+                                account_dto(r)?,
+                                Sealed {
+                                    ciphertext: r.get(12)?,
+                                    nonce: r.get(13)?,
+                                },
+                            ))
+                        },
+                    )
+                    .optional()?)
+            })
+            .await?;
+        let Some((a, sealed)) = row else {
+            return Ok(None);
+        };
+        let password = self.vault.open(id, &sealed)?;
+        Ok(Some(NewAccount {
+            name: a.name,
+            imap_host: a.imap_host,
+            imap_port: a.imap_port,
+            imap_tls: a.imap_tls,
+            smtp_host: a.smtp_host,
+            smtp_port: a.smtp_port,
+            smtp_tls: a.smtp_tls,
+            username: a.username,
+            password: Secret::new(password.as_str().to_owned()),
+            max_connections: a.max_connections,
+            email: a.email.unwrap_or_default(),
+            display_name: None,
+        }))
+    }
+
+    async fn update_account(
+        &self,
+        id: AccountId,
+        patch: AccountPatch,
+    ) -> StoreResult<Option<AccountDto>> {
+        let sealed = patch
+            .password
+            .as_ref()
+            .map(|p| self.vault.seal(id, p.expose()))
+            .transpose()?;
+        let account = self
+            .config
+            .write(move |tx| {
+                let status: Option<String> = tx
+                    .query_row("SELECT status FROM account WHERE id = ?1", [id.0], |r| {
+                        r.get(0)
+                    })
+                    .optional()?;
+                if status.is_none_or(|s| s == AccountStateDto::Deleting.as_str()) {
+                    return Ok(None);
+                }
+                tx.execute(
+                    "UPDATE account SET name = coalesce(?2, name), \
+                     imap_host = coalesce(?3, imap_host), imap_port = coalesce(?4, imap_port), \
+                     imap_tls = coalesce(?5, imap_tls), smtp_host = coalesce(?6, smtp_host), \
+                     smtp_port = coalesce(?7, smtp_port), smtp_tls = coalesce(?8, smtp_tls), \
+                     username = coalesce(?9, username), \
+                     max_connections = coalesce(?10, max_connections), \
+                     status = coalesce(?11, status), email = coalesce(?12, email), \
+                     secret_ct = coalesce(?13, secret_ct), \
+                     secret_nonce = coalesce(?14, secret_nonce) \
+                     WHERE id = ?1",
+                    params![
+                        id.0,
+                        patch.name,
+                        patch.imap_host,
+                        patch.imap_port,
+                        patch.imap_tls.map(TlsMode::as_str),
+                        patch.smtp_host,
+                        patch.smtp_port,
+                        patch.smtp_tls.map(TlsMode::as_str),
+                        patch.username,
+                        patch.max_connections,
+                        patch.status.map(AccountStateDto::as_str),
+                        patch.email,
+                        sealed.as_ref().map(|s| &s.ciphertext),
+                        sealed.as_ref().map(|s| &s.nonce),
+                    ],
+                )?;
+                if let Some(email) = &patch.email {
+                    move_default_identity(tx, id, email)?;
+                }
+                Ok(read_account(tx, id)?)
+            })
+            .await?;
+        if let Some(account) = &account {
+            self.emit_account(account).await?;
+        }
+        Ok(account)
+    }
+
+    async fn mark_deleting(&self, id: AccountId) -> StoreResult<bool> {
+        let account = self
+            .config
+            .write(move |tx| {
+                tx.execute(
+                    "UPDATE account SET status = ?2 WHERE id = ?1",
+                    params![id.0, AccountStateDto::Deleting.as_str()],
+                )?;
+                Ok(read_account(tx, id)?)
+            })
+            .await?;
+        match account {
+            Some(account) => {
+                self.emit_account(&account).await?;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 }
 

@@ -18,8 +18,10 @@ use tagmail_api_core::compose_dto::{
     AttachmentDto, DraftDto, IdentityDto, OutboxItemDto, OutboxStateDto, SendStatusDto,
 };
 use tagmail_api_core::dto::AddressDto;
+use tagmail_api_core::identities::{IdentityPatch, NewIdentity};
 use tagmail_store::rusqlite::{self, Connection, OptionalExtension, Transaction, params};
 
+use crate::identities::{identities, identity};
 use crate::outgoing::{Outgoing, OutgoingFile, Purpose, new_message_id};
 use crate::supervisor::{ConnectorFactory, Engine, Stores};
 
@@ -105,47 +107,6 @@ where
 
 fn sql(e: rusqlite::Error) -> ComposeError {
     store_err(e)
-}
-
-/// Adds the default identity of every account that has none (M3: the
-/// account's address) and returns all identities.
-fn identities(tx: &Transaction<'_>) -> ComposeResult<Vec<IdentityDto>> {
-    tx.execute(
-        "INSERT INTO identity (account_id, address, is_default) \
-         SELECT a.id, CASE WHEN instr(a.username, '@') > 0 THEN a.username \
-                      ELSE a.username || '@' || a.imap_host END, 1 \
-         FROM account a WHERE NOT EXISTS (SELECT 1 FROM identity i WHERE i.account_id = a.id)",
-        [],
-    )
-    .map_err(sql)?;
-    let mut stmt = tx
-        .prepare(
-            "SELECT id, account_id, address, display_name, signature_html, is_default \
-             FROM identity ORDER BY account_id, is_default DESC, id",
-        )
-        .map_err(sql)?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok(IdentityDto {
-                id: r.get(0)?,
-                account_id: r.get(1)?,
-                address: r.get(2)?,
-                name: r.get(3)?,
-                signature: r.get(4)?,
-                is_default: r.get(5)?,
-            })
-        })
-        .map_err(sql)?
-        .collect::<rusqlite::Result<_>>()
-        .map_err(sql)?;
-    Ok(rows)
-}
-
-fn identity(tx: &Transaction<'_>, id: i64) -> ComposeResult<IdentityDto> {
-    identities(tx)?
-        .into_iter()
-        .find(|i| i.id == id)
-        .ok_or_else(|| invalid("identityId", "no such identity"))
 }
 
 fn attachments(c: &Connection, draft: i64) -> ComposeResult<Vec<AttachmentDto>> {
@@ -489,7 +450,7 @@ fn adopt(
 }
 
 impl<F: ConnectorFactory> Engine<F> {
-    fn stores(&self) -> &Stores {
+    pub(crate) fn stores(&self) -> &Stores {
         &self.inner.stores
     }
 
@@ -1004,7 +965,26 @@ pub(crate) fn delete_draft_row(tx: &Transaction<'_>, row: &DraftRow) -> ComposeR
 impl<F: ConnectorFactory> Compose for Engine<F> {
     fn identities(&self) -> BoxFuture<ComposeResult<Vec<IdentityDto>>> {
         let stores = self.stores().clone();
-        Box::pin(async move { write(&stores, identities).await })
+        Box::pin(async move { read(&stores, identities).await })
+    }
+
+    fn create_identity(&self, identity: NewIdentity) -> BoxFuture<ComposeResult<IdentityDto>> {
+        let engine = self.clone();
+        Box::pin(async move { engine.create_identity_impl(identity).await })
+    }
+
+    fn update_identity(
+        &self,
+        id: i64,
+        patch: IdentityPatch,
+    ) -> BoxFuture<ComposeResult<IdentityDto>> {
+        let engine = self.clone();
+        Box::pin(async move { engine.update_identity_impl(id, patch).await })
+    }
+
+    fn delete_identity(&self, id: i64) -> BoxFuture<ComposeResult<()>> {
+        let engine = self.clone();
+        Box::pin(async move { engine.delete_identity_impl(id).await })
     }
 
     fn create_draft(&self, input: DraftInput) -> BoxFuture<ComposeResult<DraftDto>> {

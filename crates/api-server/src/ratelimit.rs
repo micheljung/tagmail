@@ -33,6 +33,12 @@ pub const GLOBAL: Rate = Rate {
     burst: 600,
     refill: Duration::from_millis(100),
 };
+/// Account tests log in to arbitrary servers: 10 a minute in all (the
+/// API is owner-only, so one bucket).
+pub const ACCOUNT_TESTS: Rate = Rate {
+    burst: 10,
+    refill: Duration::from_secs(6),
+};
 /// Tracked clients; beyond this, full buckets are dropped first, and new
 /// clients that still do not fit only count against the global bucket.
 const MAX_CLIENTS: usize = 4096;

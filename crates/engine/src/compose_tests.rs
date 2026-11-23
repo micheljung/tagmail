@@ -12,10 +12,11 @@ use tagmail_api_core::compose::{
 };
 use tagmail_api_core::compose_dto::OutboxStateDto;
 use tagmail_api_core::dto::AddressDto;
+use tagmail_api_core::identities::NewIdentity;
 use tagmail_core::{AccountId, SpecialUse};
 use tagmail_imap::Flag;
 use tagmail_store::rusqlite::params;
-use tagmail_store::{ConfigDb, MasterKey, Vault};
+use tagmail_store::{ChangeOp, Changes, ConfigDb, Entity, MasterKey, Vault};
 use tempfile::TempDir;
 use tokio::time::Instant;
 
@@ -106,6 +107,10 @@ async fn fixture_with(saves_sent: Option<bool>, smtp: FakeSmtp, debounce: Durati
                  server_saves_sent) \
                  VALUES (1, 'a', 'imap', 993, 'tls', 'smtp', 465, 'tls', ?1, ?2, ?3, 2, ?4)",
                 params![ME, sealed.ciphertext, sealed.nonce, saves_sent],
+            )?;
+            tx.execute(
+                "INSERT INTO identity (account_id, address, is_default) VALUES (1, ?1, 1)",
+                [ME],
             )?;
             Ok(())
         })
@@ -269,13 +274,43 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn default_identity_comes_from_the_account_address() {
+async fn identity_changes_are_published() {
     let f = fixture(None, FakeSmtp::default()).await;
+    let first = f.identity().await;
+    let since = f.cache.ctx.cache.head().await.unwrap();
+    let alias = f
+        .engine
+        .create_identity(NewIdentity {
+            account_id: AccountId(1),
+            address: "alias@a.example".to_owned(),
+            name: None,
+            signature: Some("<p>sig</p>".to_owned()),
+            is_default: true,
+        })
+        .await
+        .unwrap();
+    f.engine.delete_identity(alias.id).await.unwrap();
     let ids = f.engine.identities().await.unwrap();
     assert_eq!(ids.len(), 1);
-    assert_eq!((ids[0].account_id, ids[0].address.as_str()), (1, ME));
-    assert!(ids[0].is_default);
-    assert_eq!(f.engine.identities().await.unwrap(), ids, "created once");
+    assert!(ids[0].id == first && ids[0].is_default);
+    let page = f.cache.ctx.cache.changes_since(since, 100).await.unwrap();
+    let Changes::Page { changes, .. } = page else {
+        panic!("gone")
+    };
+    let events: Vec<(i64, ChangeOp)> = changes
+        .iter()
+        .filter(|c| c.entity == Entity::Identity)
+        .map(|c| (c.entity_id, c.op))
+        .collect();
+    assert_eq!(
+        events,
+        [
+            (alias.id, ChangeOp::Upsert),
+            (first, ChangeOp::Upsert),
+            (alias.id, ChangeOp::Delete),
+            (first, ChangeOp::Upsert),
+        ]
+    );
     f.engine.shutdown().await;
 }
 

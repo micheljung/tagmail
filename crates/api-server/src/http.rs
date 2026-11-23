@@ -3,6 +3,7 @@
 //! the rest to the SPA.
 
 use std::convert::Infallible;
+use std::net::{IpAddr, Ipv4Addr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,6 +24,7 @@ use tokio::sync::{Semaphore, watch};
 use tokio::time::Sleep;
 
 use crate::auth::{self, Auth, Principal};
+use crate::ratelimit::RateLimiter;
 use crate::sqlite_store::SqliteStore;
 use crate::web::WebDir;
 use crate::{pairing, upload, webauthn};
@@ -32,6 +34,7 @@ use crate::{pairing, upload, webauthn};
 /// [`crate::upload`]).
 pub const MAX_BODY: usize = 64 * 1024;
 pub use tagmail_api_core::compose::MAX_DRAFT_BODY;
+pub use tagmail_api_core::writes::MAX_LABEL_IMPORT;
 /// SSE comment interval; keeps proxies from closing idle streams.
 pub const HEARTBEAT: Duration = Duration::from_secs(25);
 
@@ -43,6 +46,8 @@ pub struct AppState {
     pub shutdown: watch::Receiver<bool>,
     pub auth: Arc<Auth>,
     pub web: Option<Arc<WebDir>>,
+    /// Shared by every caller of the account test routes.
+    pub account_tests: Arc<RateLimiter>,
 }
 
 /// Declares the routes axum serves itself as [`SERVER_ROUTES`] and builds
@@ -144,7 +149,21 @@ fn body_limit(method: &HttpMethod, path: &str) -> usize {
             .is_some_and(|id| !id.contains('/')),
         _ => false,
     };
-    if draft { MAX_DRAFT_BODY } else { MAX_BODY }
+    if draft {
+        MAX_DRAFT_BODY
+    } else if *method == HttpMethod::POST && path == "/api/labels/import" {
+        MAX_LABEL_IMPORT
+    } else {
+        MAX_BODY
+    }
+}
+
+/// `POST /api/accounts/test` or `POST /api/accounts/{id}/test`.
+fn is_account_test(method: &HttpMethod, path: &str) -> bool {
+    *method == HttpMethod::POST
+        && path.strip_prefix("/api/accounts/").is_some_and(|rest| {
+            rest == "test" || rest.split_once('/').is_some_and(|(_, t)| t == "test")
+        })
 }
 
 async fn dispatch(
@@ -167,6 +186,19 @@ async fn dispatch(
                 ));
             }
         };
+        if is_account_test(&method, &path) {
+            let shared = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+            if let Err(wait) = state.account_tests.check(shared) {
+                let mut resp = Response::error(
+                    429,
+                    "rate_limited",
+                    "too many account tests; try again later",
+                );
+                resp.headers
+                    .push(("retry-after", wait.as_secs().max(1).to_string()));
+                return to_http(resp);
+            }
+        }
         return api(state, method, uri.path(), uri.query().unwrap_or(""), &body).await;
     }
     match &state.web {

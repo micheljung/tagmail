@@ -8,14 +8,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
-use tagmail_api_core::dto::{AddressDto, LabelDto, MailboxDto, ThreadRowDto};
+use tagmail_api_core::dto::{AccountDto, AddressDto, LabelDto, MailboxDto, ThreadRowDto};
 use tagmail_api_core::messages::{PART_CSP, RENDER_CSP};
 use tagmail_api_core::mime::BLOCKED_IMAGE;
 use tagmail_api_core::signing::{self, Capability, TOKEN_TTL_SECS, UrlKeys};
 use tagmail_api_core::{
-    AccountRegistry, AccountSummary, Api, BoxFuture, ChangePage, FetchRawError, ImageProxy,
-    MessageRecord, Method, NewAccount, ProxiedImage, ProxyError, Request, Response, RuntimeStatus,
-    Store, StoreResult, ThreadDetail, ThreadRows, View, ViewIndex,
+    AccountPatch, AccountRegistry, AccountSummary, Api, BoxFuture, ChangePage, FetchRawError,
+    ImageProxy, MessageRecord, Method, NewAccount, ProxiedImage, ProxyError, Request, Response,
+    RuntimeStatus, Store, StoreResult, ThreadDetail, ThreadRows, View, ViewIndex,
 };
 use tagmail_core::{AccountId, CacheEpoch, ChangeCursor, MessageRowId, ThreadId};
 use zeroize::Zeroizing;
@@ -163,6 +163,26 @@ impl Store for Mail {
     }
 
     async fn create_account(&self, _: NewAccount) -> StoreResult<AccountId> {
+        Err("read-only".into())
+    }
+
+    async fn accounts_full(&self) -> StoreResult<Vec<AccountDto>> {
+        Ok(vec![])
+    }
+
+    async fn account_settings(&self, _: AccountId) -> StoreResult<Option<NewAccount>> {
+        Ok(None)
+    }
+
+    async fn update_account(
+        &self,
+        _: AccountId,
+        _: AccountPatch,
+    ) -> StoreResult<Option<AccountDto>> {
+        Err("read-only".into())
+    }
+
+    async fn mark_deleting(&self, _: AccountId) -> StoreResult<bool> {
         Err("read-only".into())
     }
 

@@ -25,10 +25,12 @@ pub enum Entity {
     Op,
     /// Progress of a label rename or delete job (`label_job.id`).
     LabelJob,
+    /// A `config.db` identity.
+    Identity,
 }
 
 impl Entity {
-    const ALL: [Entity; 8] = [
+    const ALL: [Entity; 9] = [
         Entity::Account,
         Entity::Mailbox,
         Entity::Thread,
@@ -37,6 +39,7 @@ impl Entity {
         Entity::Outbox,
         Entity::Op,
         Entity::LabelJob,
+        Entity::Identity,
     ];
 
     fn as_str(self) -> &'static str {
@@ -49,6 +52,7 @@ impl Entity {
             Entity::Outbox => "outbox",
             Entity::Op => "op",
             Entity::LabelJob => "label_job",
+            Entity::Identity => "identity",
         }
     }
 }

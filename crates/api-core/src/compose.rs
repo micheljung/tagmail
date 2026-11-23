@@ -17,7 +17,9 @@ use crate::compose_dto::{
     ReplyDraftDto, ReplyMode, SendDto, SendStatusDto,
 };
 use crate::dto::{AddressDto, ApiErrorDto};
-use crate::identities::{IdentityPatch, NewIdentity};
+use crate::identities::{
+    IdentityPatch, NewIdentity, ReplyHeaders, choose_reply_identity, reply_headers,
+};
 use crate::mime;
 use crate::store::{BoxFuture, MessageRecord, Store, StoreError};
 
@@ -131,24 +133,15 @@ pub trait Compose: Send + Sync + 'static {
     /// Ordered by account, each account's default first.
     fn identities(&self) -> BoxFuture<ComposeResult<Vec<IdentityDto>>>;
     /// `Conflict` if the address exists in the account.
-    fn create_identity(&self, identity: NewIdentity) -> BoxFuture<ComposeResult<IdentityDto>> {
-        let _ = identity;
-        unavailable_identities()
-    }
+    fn create_identity(&self, identity: NewIdentity) -> BoxFuture<ComposeResult<IdentityDto>>;
     fn update_identity(
         &self,
         id: i64,
         patch: IdentityPatch,
-    ) -> BoxFuture<ComposeResult<IdentityDto>> {
-        let _ = (id, patch);
-        unavailable_identities()
-    }
+    ) -> BoxFuture<ComposeResult<IdentityDto>>;
     /// `Conflict` for the account's last identity; deleting the default
     /// promotes the lowest remaining id.
-    fn delete_identity(&self, id: i64) -> BoxFuture<ComposeResult<()>> {
-        let _ = id;
-        unavailable_identities()
-    }
+    fn delete_identity(&self, id: i64) -> BoxFuture<ComposeResult<()>>;
     fn create_draft(&self, input: DraftInput) -> BoxFuture<ComposeResult<DraftDto>>;
     fn update_draft(&self, id: i64, input: DraftInput) -> BoxFuture<ComposeResult<DraftDto>>;
     fn draft(&self, id: i64) -> BoxFuture<ComposeResult<DraftDto>>;
@@ -170,15 +163,7 @@ pub trait Compose: Send + Sync + 'static {
     fn add_parts(&self, parts: Vec<ForwardedPart>) -> BoxFuture<ComposeResult<Vec<AttachmentDto>>>;
 }
 
-fn unavailable_identities<T: Send + 'static>() -> BoxFuture<ComposeResult<T>> {
-    Box::pin(async {
-        Err(ComposeError::Unavailable(
-            "identities cannot be edited here".to_owned(),
-        ))
-    })
-}
-
-fn respond<T: serde::Serialize>(status: u16, result: ComposeResult<T>) -> Response {
+pub(crate) fn respond<T: serde::Serialize>(status: u16, result: ComposeResult<T>) -> Response {
     match result {
         Ok(value) => Response::json(status, &value),
         Err(e) => error_response(e),
@@ -332,28 +317,6 @@ pub fn clean_content_type(value: Option<&str>) -> String {
     }
 }
 
-/// The identity a reply is sent from: the one whose address the original
-/// was sent to (To or Cc), else the account's default.
-pub fn choose_identity<'a>(
-    identities: &'a [IdentityDto],
-    account_id: i64,
-    recipients: &[AddressDto],
-) -> Option<&'a IdentityDto> {
-    let own: Vec<&IdentityDto> = identities
-        .iter()
-        .filter(|i| i.account_id == account_id)
-        .collect();
-    own.iter()
-        .find(|i| {
-            recipients
-                .iter()
-                .any(|r| r.email.eq_ignore_ascii_case(&i.address))
-        })
-        .or_else(|| own.iter().find(|i| i.is_default))
-        .or_else(|| own.first())
-        .copied()
-}
-
 fn has_prefix(subject: &str, prefixes: &[&str]) -> bool {
     let lower = subject.trim_start().to_lowercase();
     prefixes.iter().any(|p| {
@@ -395,6 +358,7 @@ fn push_unique(out: &mut Vec<AddressDto>, a: &AddressDto, skip: &[&str]) {
 /// What the reply helper reads from the original besides its record.
 pub struct Original {
     pub record: MessageRecord,
+    pub headers: ReplyHeaders,
     pub reply_to: Vec<AddressDto>,
     pub text: String,
 }
@@ -406,13 +370,13 @@ pub fn reply_fields(
     identities: &[IdentityDto],
 ) -> ReplyDraftDto {
     let r = &original.record;
-    let recipients: Vec<AddressDto> = r.to.iter().chain(&r.cc).cloned().collect();
-    let identity = choose_identity(identities, r.account_id.0, &recipients);
+    let identity = choose_reply_identity(identities, r.account_id.0, r, &original.headers);
     let own: Vec<&str> = identities
         .iter()
         .filter(|i| i.account_id == r.account_id.0)
         .map(|i| i.address.as_str())
         .collect();
+    let every_own: Vec<&str> = identities.iter().map(|i| i.address.as_str()).collect();
     let from_me = r
         .from
         .iter()
@@ -463,7 +427,7 @@ pub fn reply_fields(
     if mode == ReplyMode::All {
         for a in r.to.iter().chain(&r.cc) {
             if !to.iter().any(|t| t.email.eq_ignore_ascii_case(&a.email)) {
-                push_unique(&mut cc, a, &own);
+                push_unique(&mut cc, a, &every_own);
             }
         }
     }
@@ -522,11 +486,11 @@ fn forwarded_parts(raw: &[u8]) -> Vec<ForwardedPart> {
         .collect()
 }
 
-fn json<T: DeserializeOwned>(body: &[u8]) -> Result<T, Response> {
+pub(crate) fn json<T: DeserializeOwned>(body: &[u8]) -> Result<T, Response> {
     serde_json::from_slice(body).map_err(|e| bad_request(format!("invalid JSON: {e}")))
 }
 
-fn parse_row_id(s: &str) -> Option<i64> {
+pub(crate) fn parse_row_id(s: &str) -> Option<i64> {
     s.bytes()
         .all(|b| b.is_ascii_digit())
         .then(|| s.parse().ok())
@@ -555,7 +519,7 @@ impl<S: Store> Api<S> {
         self.compose.as_ref()
     }
 
-    fn composer(&self) -> Result<&Arc<dyn Compose>, Response> {
+    pub(crate) fn composer(&self) -> Result<&Arc<dyn Compose>, Response> {
         self.compose.as_ref().ok_or_else(|| {
             Response::error(503, "compose_unavailable", "sending is not available here")
         })
@@ -768,6 +732,7 @@ impl<S: Store> Api<S> {
                 Vec::new()
             };
             let original = Original {
+                headers: message.as_ref().map(reply_headers).unwrap_or_default(),
                 reply_to: message
                     .as_ref()
                     .map(|m| mime::addresses(m.reply_to()))
@@ -833,41 +798,31 @@ mod tests {
                 starred: false,
                 has_attachment: false,
             },
+            headers: ReplyHeaders::default(),
             reply_to: Vec::new(),
             text: "line one\n\nline two".to_owned(),
         }
     }
 
     #[test]
-    fn identity_matches_the_address_the_mail_was_sent_to() {
+    fn reply_all_addresses_everyone_but_me_and_quotes() {
         let ids = [
             identity(1, 1, "me@a.example", true),
-            identity(2, 1, "alias@a.example", false),
-            identity(3, 2, "other@b.example", true),
+            identity(2, 2, "me@b.example", true),
         ];
-        let pick = |account, rcpt: &[&str]| {
-            let rcpt: Vec<AddressDto> = rcpt.iter().map(|a| addr(a)).collect();
-            choose_identity(&ids, account, &rcpt).map(|i| i.id)
-        };
-        assert_eq!(pick(1, &["x@y", "ALIAS@a.example"]), Some(2));
-        assert_eq!(pick(1, &["list@lists.example"]), Some(1));
-        assert_eq!(
-            pick(1, &["other@b.example"]),
-            Some(1),
-            "never another account's identity"
+        let o = original(
+            "ann@x",
+            &["me@a.example", "bob@x"],
+            &["cat@x", "ann@x", "me@b.example"],
         );
-        assert_eq!(pick(2, &[]), Some(3));
-        assert_eq!(pick(9, &["me@a.example"]), None);
-    }
-
-    #[test]
-    fn reply_all_addresses_everyone_but_me_and_quotes() {
-        let ids = [identity(1, 1, "me@a.example", true)];
-        let o = original("ann@x", &["me@a.example", "bob@x"], &["cat@x", "ann@x"]);
         let r = reply_fields(&o, ReplyMode::All, &ids);
         assert_eq!(r.identity_id, Some(1));
         assert_eq!(r.to, [addr("ann@x")]);
-        assert_eq!(r.cc, [addr("bob@x"), addr("cat@x")]);
+        assert_eq!(
+            r.cc,
+            [addr("bob@x"), addr("cat@x")],
+            "every account's identities are left out"
+        );
         assert_eq!(r.subject, "Re: Plans");
         assert!(r.html.contains("ann@x wrote:"), "{}", r.html);
         assert!(r.html.contains("<blockquote>"), "{}", r.html);

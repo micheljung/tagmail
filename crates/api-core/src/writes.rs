@@ -5,15 +5,25 @@ use std::fmt;
 
 use serde::de::DeserializeOwned;
 use tagmail_core::ops::OpKind;
-use tagmail_core::{MailboxRowId, ThreadId};
+use tagmail_core::{LabelKey, MailboxRowId, ThreadId};
 
 use crate::api::{Api, Response, bad_request, query_param};
-use crate::dto::{ApiErrorDto, LabelDto};
+use crate::dto::{
+    ApiErrorDto, LabelDto, LabelExportDto, LabelExportEntryDto, LabelImportErrorDto,
+    LabelImportResultDto,
+};
 use crate::ops_dto::{
     LabelChangeDto, LabelJobDto, LabelJobsDto, LabelPatchDto, NewLabelDto, NewOpDto, OpDto,
     OpStatusDto, OpsDto,
 };
 use crate::store::{BoxFuture, Store, StoreError};
+
+/// `format` of a label export.
+pub const LABEL_EXPORT_FORMAT: &str = "tagmail-labels";
+pub const LABEL_EXPORT_VERSION: u32 = 1;
+/// Largest `POST /api/labels/import` body.
+pub const MAX_LABEL_IMPORT: usize = 256 * 1024;
+pub const MAX_IMPORTED_LABELS: usize = 1000;
 
 /// Client op ids: UUIDs or similar opaque tokens.
 pub const MAX_OP_ID_LEN: usize = 64;
@@ -251,6 +261,126 @@ impl<S: Store> Api<S> {
             },
             Err(r) => r,
         })
+    }
+
+    pub(crate) async fn export_labels(&self) -> Result<Response, StoreError> {
+        let labels = self.store.labels().await?;
+        let export = LabelExportDto {
+            format: LABEL_EXPORT_FORMAT.to_owned(),
+            version: LABEL_EXPORT_VERSION,
+            labels: (0..)
+                .zip(labels)
+                .map(|(sort, l)| LabelExportEntryDto {
+                    name: l.name,
+                    color: l.color,
+                    sort,
+                })
+                .collect(),
+        };
+        let mut resp = Response::json(200, &export);
+        resp.headers.push((
+            "content-disposition",
+            "attachment; filename=\"tagmail-labels.json\"".to_owned(),
+        ));
+        Ok(resp)
+    }
+
+    /// Creates labels missing everywhere and updates the colour of the
+    /// others; never renames or deletes, so a second import changes
+    /// nothing.
+    pub(crate) async fn import_labels(&self, body: &[u8]) -> Result<Response, StoreError> {
+        let w = match self.writes() {
+            Ok(w) => w,
+            Err(r) => return Ok(r),
+        };
+        if body.len() > MAX_LABEL_IMPORT {
+            return Ok(Response::error(
+                413,
+                "too_large",
+                format!("at most {} KiB", MAX_LABEL_IMPORT / 1024),
+            ));
+        }
+        let export: LabelExportDto = match parse(body) {
+            Ok(export) => export,
+            Err(r) => return Ok(r),
+        };
+        if export.format != LABEL_EXPORT_FORMAT || export.version != LABEL_EXPORT_VERSION {
+            return Ok(bad_request(format!(
+                "not a {LABEL_EXPORT_FORMAT} version {LABEL_EXPORT_VERSION} file"
+            )));
+        }
+        if export.labels.len() > MAX_IMPORTED_LABELS {
+            return Ok(bad_request(format!("at most {MAX_IMPORTED_LABELS} labels")));
+        }
+        let mut colors: std::collections::HashMap<String, Option<String>> = self
+            .store
+            .labels()
+            .await?
+            .into_iter()
+            .map(|l| (l.key, l.color))
+            .collect();
+        let mut result = LabelImportResultDto {
+            created: 0,
+            updated: 0,
+            unchanged: 0,
+            errors: Vec::new(),
+        };
+        let mut entries = export.labels;
+        entries.sort_by_key(|e| e.sort);
+        for entry in entries {
+            let color = match entry.color.as_deref() {
+                None | Some("") => None,
+                Some(c) => match normalize_color(c) {
+                    Some(c) => Some(c),
+                    None => {
+                        result.errors.push(LabelImportErrorDto {
+                            name: entry.name,
+                            message: "color must be #rrggbb".to_owned(),
+                        });
+                        continue;
+                    }
+                },
+            };
+            let key = LabelKey::of(&entry.name).to_string();
+            let outcome = match colors.get(&key) {
+                None => w
+                    .create_label(NewLabelDto {
+                        name: entry.name.clone(),
+                        color: color.clone(),
+                    })
+                    .await
+                    .map(|_| &mut result.created),
+                Some(existing) if *existing == color => Ok(&mut result.unchanged),
+                Some(_) => w
+                    .update_label(
+                        key.clone(),
+                        LabelPatchDto {
+                            name: None,
+                            color: Some(color.clone().unwrap_or_default()),
+                        },
+                    )
+                    .await
+                    .map(|_| &mut result.updated),
+            };
+            match outcome {
+                Ok(count) => {
+                    *count += 1;
+                    colors.insert(key, color);
+                }
+                Err(WriteError::Internal(e)) => {
+                    tracing::error!(error = %e, "label import failed");
+                    result.errors.push(LabelImportErrorDto {
+                        name: entry.name,
+                        message: "internal error".to_owned(),
+                    });
+                }
+                Err(e) => result.errors.push(LabelImportErrorDto {
+                    name: entry.name,
+                    message: e.to_string(),
+                }),
+            }
+        }
+        Ok(Response::json(200, &result))
     }
 
     pub(crate) async fn create_label(&self, body: &[u8]) -> Result<Response, StoreError> {

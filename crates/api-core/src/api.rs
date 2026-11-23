@@ -6,19 +6,19 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use serde::Serialize;
-use tagmail_core::{ChangeCursor, ThreadId};
+use tagmail_core::{AccountId, ChangeCursor, ThreadId};
 
-use crate::compose::valid_address;
+use crate::compose::{parse_row_id, valid_address};
 use crate::dto::{
-    AccountDto, AccountStateDto, AccountStatusDto, ApiErrorDto, ApiVersion, ChangeDto, ChangesDto,
-    NewAccountDto, StatusDto, SyncPhase, ThreadsDto, VersionDto,
+    AccountDto, AccountPatchDto, AccountStateDto, AccountStatusDto, AccountsDto, ApiErrorDto,
+    ApiVersion, ChangeDto, ChangesDto, NewAccountDto, StatusDto, SyncPhase, ThreadsDto, VersionDto,
 };
 use crate::id_index;
 use crate::routes::{self, Miss, RouteId};
 use crate::signing::UrlKeys;
 use crate::store::{
-    AccountRegistry, AccountSummary, ChangePage, ImageProxy, NewAccount, Secret, Store, StoreError,
-    View, ViewError,
+    AccountPatch, AccountRegistry, AccountSummary, ChangePage, ImageProxy, NewAccount, Secret,
+    Store, StoreError, View, ViewError,
 };
 use crate::writes::WriteService;
 
@@ -218,21 +218,17 @@ impl<S: Store> Api<S> {
                 RouteId::Changes => self.changes(req.query).await,
                 RouteId::Mailboxes => self.mailboxes().await,
                 RouteId::Labels => self.labels().await,
-                RouteId::Accounts
-                | RouteId::TestNewAccount
-                | RouteId::TestAccount
-                | RouteId::UpdateAccount
-                | RouteId::DeleteAccount
-                | RouteId::CreateIdentity
-                | RouteId::UpdateIdentity
-                | RouteId::DeleteIdentity
-                | RouteId::ExportLabels
-                | RouteId::ImportLabels => Ok(Response::error(
-                    501,
-                    "not_implemented",
-                    "not implemented yet",
-                )),
+                RouteId::Accounts => self.accounts().await,
                 RouteId::CreateAccount => self.create_account(req.body).await,
+                RouteId::TestNewAccount => self.test_new_account(req.body).await,
+                RouteId::TestAccount => self.test_account(params[0], req.body).await,
+                RouteId::UpdateAccount => self.update_account(params[0], req.body).await,
+                RouteId::DeleteAccount => self.delete_account(params[0]).await,
+                RouteId::CreateIdentity => self.create_identity(req.body).await,
+                RouteId::UpdateIdentity => self.update_identity(params[0], req.body).await,
+                RouteId::DeleteIdentity => self.delete_identity(params[0]).await,
+                RouteId::ExportLabels => self.export_labels().await,
+                RouteId::ImportLabels => self.import_labels(req.body).await,
                 RouteId::Thread => self.thread(params[0]).await,
                 RouteId::Message => self.message(params[0]).await,
                 RouteId::RenderMessage => self.render_message(params[0], req.query).await,
@@ -393,19 +389,31 @@ impl<S: Store> Api<S> {
         })
     }
 
-    async fn create_account(&self, body: &[u8]) -> Result<Response, StoreError> {
-        let Some(registry) = &self.registry else {
-            return Ok(Response::error(
+    fn engine(&self) -> Result<&Arc<dyn AccountRegistry>, Response> {
+        self.registry.as_ref().ok_or_else(|| {
+            Response::error(
                 503,
                 "engine_unavailable",
-                "no sync engine is running; accounts cannot be added",
-            ));
+                "no sync engine is running; accounts cannot be changed",
+            )
+        })
+    }
+
+    async fn accounts(&self) -> Result<Response, StoreError> {
+        let accounts = self.store.accounts_full().await?;
+        Ok(Response::json(200, &AccountsDto { accounts }))
+    }
+
+    async fn create_account(&self, body: &[u8]) -> Result<Response, StoreError> {
+        let registry = match self.engine() {
+            Ok(r) => r,
+            Err(resp) => return Ok(resp),
         };
         let dto: NewAccountDto = match serde_json::from_slice(body) {
             Ok(dto) => dto,
             Err(e) => return Ok(bad_request(format!("invalid account JSON: {e}"))),
         };
-        let account = match validate(dto) {
+        let account = match validate(dto, true) {
             Ok(account) => account,
             Err(resp) => return Ok(resp),
         };
@@ -428,6 +436,89 @@ impl<S: Store> Api<S> {
         registry.account_added(id);
         Ok(Response::json(201, &AccountDto { id: id.0, ..out }))
     }
+
+    async fn test_new_account(&self, body: &[u8]) -> Result<Response, StoreError> {
+        let registry = match self.engine() {
+            Ok(r) => r,
+            Err(resp) => return Ok(resp),
+        };
+        let dto: NewAccountDto = match serde_json::from_slice(body) {
+            Ok(dto) => dto,
+            Err(e) => return Ok(bad_request(format!("invalid account JSON: {e}"))),
+        };
+        Ok(match validate(dto, false) {
+            Ok(account) => Response::json(200, &registry.test_account(account).await),
+            Err(resp) => resp,
+        })
+    }
+
+    async fn test_account(&self, id: &str, body: &[u8]) -> Result<Response, StoreError> {
+        let registry = match self.engine() {
+            Ok(r) => r,
+            Err(resp) => return Ok(resp),
+        };
+        let Some(id) = parse_row_id(id).map(AccountId) else {
+            return Ok(no_account());
+        };
+        let patch = match parse_patch(body) {
+            Ok(patch) => patch,
+            Err(resp) => return Ok(resp),
+        };
+        let Some(stored) = self.store.account_settings(id).await? else {
+            return Ok(no_account());
+        };
+        Ok(Response::json(
+            200,
+            &registry.test_account(patch.merged(stored)).await,
+        ))
+    }
+
+    async fn update_account(&self, id: &str, body: &[u8]) -> Result<Response, StoreError> {
+        let registry = match self.engine() {
+            Ok(r) => r,
+            Err(resp) => return Ok(resp),
+        };
+        let Some(id) = parse_row_id(id).map(AccountId) else {
+            return Ok(no_account());
+        };
+        let patch = match parse_patch(body) {
+            Ok(patch) => patch,
+            Err(resp) => return Ok(resp),
+        };
+        let restart = patch.needs_restart();
+        let Some(account) = self.store.update_account(id, patch).await? else {
+            return Ok(no_account());
+        };
+        tracing::info!(account = id.0, restart, "account updated");
+        registry.account_updated(id, restart);
+        Ok(Response::json(200, &account))
+    }
+
+    async fn delete_account(&self, id: &str) -> Result<Response, StoreError> {
+        let registry = match self.engine() {
+            Ok(r) => r,
+            Err(resp) => return Ok(resp),
+        };
+        let Some(id) = parse_row_id(id).map(AccountId) else {
+            return Ok(no_account());
+        };
+        if !self.store.mark_deleting(id).await? {
+            return Ok(no_account());
+        }
+        tracing::info!(account = id.0, "account deleting");
+        tokio::spawn(registry.account_removed(id));
+        Ok(Response::json(202, &serde_json::json!({ "id": id.0 })))
+    }
+}
+
+fn no_account() -> Response {
+    Response::error(404, "not_found", "no such account")
+}
+
+fn parse_patch(body: &[u8]) -> Checked<AccountPatch> {
+    let dto: AccountPatchDto = serde_json::from_slice(body)
+        .map_err(|e| bad_request(format!("invalid account JSON: {e}")))?;
+    validate_patch(dto)
 }
 
 fn phase(a: &AccountSummary) -> SyncPhase {
@@ -468,8 +559,10 @@ fn valid_host(host: &str) -> bool {
         })
 }
 
-fn validate(dto: NewAccountDto) -> Result<NewAccount, Response> {
-    let name = dto.name.trim();
+type Checked<T> = Result<T, Response>;
+
+fn check_name(name: &str) -> Checked<String> {
+    let name = name.trim();
     if name.is_empty() || name.chars().count() > MAX_NAME_LEN || name.chars().any(char::is_control)
     {
         return Err(invalid(
@@ -477,47 +570,96 @@ fn validate(dto: NewAccountDto) -> Result<NewAccount, Response> {
             format!("1 to {MAX_NAME_LEN} printable characters"),
         ));
     }
-    for (field, host) in [("imapHost", &dto.imap_host), ("smtpHost", &dto.smtp_host)] {
-        if !valid_host(host) {
-            return Err(invalid(field, "not a host name or IP address"));
-        }
+    Ok(name.to_owned())
+}
+
+fn check_host(field: &str, host: &str) -> Checked<String> {
+    if valid_host(host) {
+        Ok(host.to_ascii_lowercase())
+    } else {
+        Err(invalid(field, "not a host name or IP address"))
     }
-    for (field, port) in [("imapPort", dto.imap_port), ("smtpPort", dto.smtp_port)] {
-        if port == 0 {
-            return Err(invalid(field, "port must be 1 to 65535"));
-        }
+}
+
+fn check_port(field: &str, port: u16) -> Checked<u16> {
+    if port == 0 {
+        return Err(invalid(field, "port must be 1 to 65535"));
     }
-    if dto.username.is_empty()
-        || dto.username.len() > MAX_USERNAME_LEN
-        || dto.username.chars().any(char::is_control)
+    Ok(port)
+}
+
+fn check_username(username: String) -> Checked<String> {
+    if username.is_empty()
+        || username.len() > MAX_USERNAME_LEN
+        || username.chars().any(char::is_control)
     {
         return Err(invalid(
             "username",
             format!("1 to {MAX_USERNAME_LEN} bytes without control characters"),
         ));
     }
-    let password = Secret::new(dto.password);
+    Ok(username)
+}
+
+fn check_password(password: String) -> Checked<Secret> {
+    let password = Secret::new(password);
     if password.expose().is_empty() || password.expose().len() > MAX_PASSWORD_LEN {
         return Err(invalid(
             "password",
             format!("1 to {MAX_PASSWORD_LEN} bytes"),
         ));
     }
-    let email = match dto
-        .email
-        .as_deref()
-        .map(str::trim)
-        .filter(|e| !e.is_empty())
-    {
-        Some(email) if valid_address(email) => email.to_owned(),
-        Some(_) => return Err(invalid("email", "not an email address")),
-        None if valid_address(&dto.username) => dto.username.clone(),
-        None => {
-            return Err(invalid(
-                "email",
-                "the IMAP username is not an email address; enter the address to send from",
-            ));
-        }
+    Ok(password)
+}
+
+fn check_email(email: &str) -> Checked<String> {
+    let email = email.trim();
+    if valid_address(email) {
+        Ok(email.to_owned())
+    } else {
+        Err(invalid("email", "not an email address"))
+    }
+}
+
+fn check_max_connections(max: u8) -> Checked<u8> {
+    if !MAX_CONNECTIONS.contains(&max) {
+        return Err(invalid(
+            "maxConnections",
+            format!("{} to {}", MAX_CONNECTIONS.start(), MAX_CONNECTIONS.end()),
+        ));
+    }
+    Ok(max)
+}
+
+/// The address to send from: `email`, else the username if it is one.
+/// `None` if neither is.
+fn sender_address(email: Option<&str>, username: &str) -> Checked<Option<String>> {
+    match email.map(str::trim).filter(|e| !e.is_empty()) {
+        Some(email) => check_email(email).map(Some),
+        None => Ok(valid_address(username).then(|| username.to_owned())),
+    }
+}
+
+fn no_sender_address() -> Response {
+    invalid(
+        "email",
+        "the IMAP username is not an email address; enter the address to send from",
+    )
+}
+
+/// `require_email`: a test logs in without sending, so it does without.
+fn validate(dto: NewAccountDto, require_email: bool) -> Checked<NewAccount> {
+    let name = check_name(&dto.name)?;
+    let imap_host = check_host("imapHost", &dto.imap_host)?;
+    let smtp_host = check_host("smtpHost", &dto.smtp_host)?;
+    let imap_port = check_port("imapPort", dto.imap_port)?;
+    let smtp_port = check_port("smtpPort", dto.smtp_port)?;
+    let username = check_username(dto.username)?;
+    let password = check_password(dto.password)?;
+    let email = match sender_address(dto.email.as_deref(), &username)? {
+        Some(email) => email,
+        None if require_email => return Err(no_sender_address()),
+        None => String::new(),
     };
     let display_name = match dto.display_name.as_deref().map(str::trim) {
         None | Some("") => None,
@@ -531,27 +673,93 @@ fn validate(dto: NewAccountDto) -> Result<NewAccount, Response> {
             ));
         }
     };
-    let max_connections = dto.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS);
-    if !MAX_CONNECTIONS.contains(&max_connections) {
-        return Err(invalid(
-            "maxConnections",
-            format!("{} to {}", MAX_CONNECTIONS.start(), MAX_CONNECTIONS.end()),
-        ));
-    }
+    let max_connections =
+        check_max_connections(dto.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS))?;
     Ok(NewAccount {
-        name: name.to_owned(),
-        imap_host: dto.imap_host.to_ascii_lowercase(),
-        imap_port: dto.imap_port,
+        name,
+        imap_host,
+        imap_port,
         imap_tls: dto.imap_tls,
-        smtp_host: dto.smtp_host.to_ascii_lowercase(),
-        smtp_port: dto.smtp_port,
+        smtp_host,
+        smtp_port,
         smtp_tls: dto.smtp_tls,
-        username: dto.username,
+        username,
         password,
         max_connections,
         email,
         display_name,
     })
+}
+
+fn validate_patch(dto: AccountPatchDto) -> Checked<AccountPatch> {
+    let status = match dto.status {
+        Some(AccountStateDto::Deleting) => {
+            return Err(invalid("status", "active or disabled"));
+        }
+        status => status,
+    };
+    Ok(AccountPatch {
+        name: dto.name.as_deref().map(check_name).transpose()?,
+        email: dto.email.as_deref().map(check_email).transpose()?,
+        imap_host: dto
+            .imap_host
+            .as_deref()
+            .map(|h| check_host("imapHost", h))
+            .transpose()?,
+        imap_port: dto
+            .imap_port
+            .map(|p| check_port("imapPort", p))
+            .transpose()?,
+        imap_tls: dto.imap_tls,
+        smtp_host: dto
+            .smtp_host
+            .as_deref()
+            .map(|h| check_host("smtpHost", h))
+            .transpose()?,
+        smtp_port: dto
+            .smtp_port
+            .map(|p| check_port("smtpPort", p))
+            .transpose()?,
+        smtp_tls: dto.smtp_tls,
+        username: dto.username.map(check_username).transpose()?,
+        password: dto.password.map(check_password).transpose()?,
+        max_connections: dto.max_connections.map(check_max_connections).transpose()?,
+        status,
+    })
+}
+
+impl AccountPatch {
+    /// The engine must reconnect to apply it.
+    fn needs_restart(&self) -> bool {
+        self.imap_host.is_some()
+            || self.imap_port.is_some()
+            || self.imap_tls.is_some()
+            || self.smtp_host.is_some()
+            || self.smtp_port.is_some()
+            || self.smtp_tls.is_some()
+            || self.username.is_some()
+            || self.password.is_some()
+            || self.max_connections.is_some()
+            || self.status.is_some()
+    }
+
+    /// `base` with this patch applied.
+    fn merged(self, base: NewAccount) -> NewAccount {
+        NewAccount {
+            name: self.name.unwrap_or(base.name),
+            imap_host: self.imap_host.unwrap_or(base.imap_host),
+            imap_port: self.imap_port.unwrap_or(base.imap_port),
+            imap_tls: self.imap_tls.unwrap_or(base.imap_tls),
+            smtp_host: self.smtp_host.unwrap_or(base.smtp_host),
+            smtp_port: self.smtp_port.unwrap_or(base.smtp_port),
+            smtp_tls: self.smtp_tls.unwrap_or(base.smtp_tls),
+            username: self.username.unwrap_or(base.username),
+            password: self.password.unwrap_or(base.password),
+            max_connections: self.max_connections.unwrap_or(base.max_connections),
+            email: self.email.unwrap_or(base.email),
+            display_name: base.display_name,
+        }
+    }
 }
 
 #[cfg(test)]

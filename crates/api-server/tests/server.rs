@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use tagmail_api_core::dto::{AccountTestDto, TestStepDto};
 use tagmail_api_core::{AccountRegistry, BoxFuture, FetchRawError, RuntimeStatus, id_index};
 use tagmail_api_server::{CACHE_DB, CONFIG_DB, Config, Server};
 use tagmail_core::{AccountId, ChangeCursor, MessageRowId};
@@ -45,11 +46,38 @@ impl Dirs {
 #[derive(Default)]
 struct Registry {
     added: Mutex<Vec<AccountId>>,
+    updated: Mutex<Vec<(AccountId, bool)>>,
+    removed: Mutex<Vec<AccountId>>,
 }
 
 impl AccountRegistry for Registry {
     fn account_added(&self, id: AccountId) {
         self.added.lock().unwrap().push(id);
+    }
+
+    fn account_updated(&self, id: AccountId, restart: bool) {
+        self.updated.lock().unwrap().push((id, restart));
+    }
+
+    fn account_removed(&self, id: AccountId) -> BoxFuture<()> {
+        self.removed.lock().unwrap().push(id);
+        Box::pin(async {})
+    }
+
+    fn test_account(&self, _: tagmail_api_core::NewAccount) -> BoxFuture<AccountTestDto> {
+        let step = TestStepDto {
+            ok: true,
+            error: None,
+            ms: 1,
+        };
+        Box::pin(async move {
+            AccountTestDto {
+                imap: step.clone(),
+                smtp: step,
+                capabilities: vec![],
+                mailboxes: Some(1),
+            }
+        })
     }
 
     fn runtime_status(&self, _: AccountId) -> Option<RuntimeStatus> {
@@ -510,6 +538,79 @@ async fn search_label_views_mailboxes_and_labels() {
     server.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn account_scoped_views_return_only_that_accounts_threads() {
+    let dirs = Dirs::new();
+    let server = Server::start(&dirs.config(&dirs.key()), None)
+        .await
+        .unwrap();
+    let client = owner(&server).await;
+    server
+        .store()
+        .cache()
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO mailbox (id, account_id, name, uidvalidity) VALUES
+                     (1, 1, 'INBOX', 1), (2, 2, 'INBOX', 1);
+                 INSERT INTO thread (id, account_id, last_date) VALUES
+                     (10, 1, 100), (20, 2, 200), (21, 2, 50);
+                 INSERT INTO thread_mailbox (thread_id, mailbox_id, last_date) VALUES
+                     (10, 1, 100), (20, 2, 200), (21, 2, 50);
+                 INSERT INTO message (id, account_id, email_id, thread_id, date, subject) VALUES
+                     (1, 1, 'a', 10, 100, 'Invoice'), (2, 2, 'b', 20, 200, 'Invoice'),
+                     (3, 2, 'c', 21, 50, 'Other');
+                 INSERT INTO location (mailbox_id, uid, message_id, flags) VALUES
+                     (1, 1, 1, 0), (2, 1, 2, 0), (2, 2, 3, 0);
+                 INSERT INTO label (id, account_id, keyword, label_key, kind) VALUES
+                     (1, 1, 'Shared', 'shared', 'keyword'), (2, 2, 'Shared', 'shared', 'keyword');
+                 INSERT INTO message_label (message_id, label_id) VALUES (1, 1), (3, 2);",
+            )?;
+            for (id, subject) in [(1, "Invoice"), (2, "Invoice"), (3, "Other")] {
+                tagmail_store::fts::index(
+                    tx,
+                    tagmail_core::MessageRowId(id),
+                    &tagmail_store::FtsDocument {
+                        subject,
+                        ..Default::default()
+                    },
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let index = |view: &'static str| {
+        let req = client.get(url(&server, &format!("/api/views/{view}/index")));
+        async move {
+            let resp = req.send().await.unwrap();
+            let status = resp.status().as_u16();
+            let body = resp.bytes().await.unwrap();
+            (status, id_index::decode(&body).unwrap_or_default())
+        }
+    };
+    assert_eq!(index("inbox").await, (200, vec![20, 10, 21]));
+    assert_eq!(index("account%3A1%2Finbox").await, (200, vec![10]));
+    assert_eq!(index("account%3A2%2Finbox").await, (200, vec![20, 21]));
+    assert_eq!(index("label%3Ashared").await, (200, vec![10, 21]));
+    assert_eq!(index("account%3A2%2Flabel%3Ashared").await, (200, vec![21]));
+    assert_eq!(index("search%3Ainvoice").await, (200, vec![20, 10]));
+    assert_eq!(
+        index("account%3A1%2Fsearch%3Ainvoice").await,
+        (200, vec![10])
+    );
+    assert_eq!(index("account%3A1%2Fmailbox%3A1").await.0, 400);
+    let labels: Value = client
+        .get(url(&server, "/api/labels"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(labels[0]["accountIds"], json!([1, 2]));
+    server.shutdown().await.unwrap();
+}
+
 fn new_account() -> Value {
     json!({
         "name": "Work",
@@ -613,6 +714,146 @@ async fn accounts_store_encrypted_credentials() {
         .err()
         .unwrap();
     assert!(err.to_string().contains("does not match"), "{err}");
+}
+
+#[tokio::test]
+async fn accounts_are_listed_patched_and_deleted() {
+    let dirs = Dirs::new();
+    let registry = Arc::new(Registry::default());
+    let server = Server::start(
+        &dirs.config(&dirs.key()),
+        Some(registry.clone() as Arc<dyn AccountRegistry>),
+    )
+    .await
+    .unwrap();
+    let client = owner(&server).await;
+    let mut bare = new_account();
+    bare["username"] = json!("me");
+    let resp = client
+        .post(url(&server, "/api/accounts"))
+        .json(&bare)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 422);
+    assert_eq!(resp.json::<Value>().await.unwrap()["field"], "email");
+    bare["email"] = json!("me@example.com");
+    bare["displayName"] = json!("Me");
+    let resp = client
+        .post(url(&server, "/api/accounts"))
+        .json(&bare)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+
+    let identities: Vec<(i64, String, Option<String>, bool)> = server
+        .store()
+        .config()
+        .read(|c| {
+            let mut stmt = c.prepare(
+                "SELECT account_id, address, display_name, is_default FROM identity ORDER BY id",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+            Ok(rows.collect::<Result<Vec<_>, _>>()?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        identities,
+        [(1, "me@example.com".to_owned(), Some("Me".to_owned()), true)]
+    );
+
+    let list: Value = client
+        .get(url(&server, "/api/accounts"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list["accounts"][0]["email"], "me@example.com");
+    assert_eq!(list["accounts"][0]["status"], "active");
+    assert_eq!(list["accounts"][0]["imapTls"], "tls");
+
+    let patched: Value = client
+        .patch(url(&server, "/api/accounts/1"))
+        .json(&json!({ "name": "Home", "email": "home@example.com", "password": "n3w" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        (&patched["name"], &patched["email"]),
+        (&json!("Home"), &json!("home@example.com"))
+    );
+    let secret = server.store().account_secret(AccountId(1)).await.unwrap();
+    assert_eq!(secret.expose(), "n3w");
+    let address: String = server
+        .store()
+        .config()
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT address FROM identity WHERE is_default = 1",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(address, "home@example.com", "the default identity follows");
+    assert_eq!(*registry.updated.lock().unwrap(), [(AccountId(1), true)]);
+
+    let resp = client
+        .delete(url(&server, "/api/accounts/1"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 202);
+    assert_eq!(*registry.removed.lock().unwrap(), [AccountId(1)]);
+    let list: Value = client
+        .get(url(&server, "/api/accounts"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(list["accounts"][0]["status"], "deleting");
+    let resp = client
+        .patch(url(&server, "/api/accounts/1"))
+        .json(&json!({ "status": "active" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404, "a deleting account stays deleting");
+
+    let start = ChangeCursor {
+        epoch: server.store().cache().epoch(),
+        seq: 0,
+    };
+    let changes: Value = client
+        .get(url(&server, &format!("/api/changes?since={start}")))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let account_events: Vec<&Value> = changes["changes"]
+        .as_array()
+        .map(|c| c.iter().filter(|c| c["entity"] == "account").collect())
+        .unwrap_or_default();
+    assert_eq!(
+        account_events
+            .iter()
+            .map(|c| c["payload"]["status"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["active", "active", "deleting"]
+    );
+    server.shutdown().await.unwrap();
 }
 
 #[tokio::test]

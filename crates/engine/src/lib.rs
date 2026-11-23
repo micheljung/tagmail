@@ -13,6 +13,7 @@ mod executor;
 mod executor_tests;
 #[cfg(test)]
 mod fake;
+mod identities;
 mod jobs;
 mod labels;
 mod message;

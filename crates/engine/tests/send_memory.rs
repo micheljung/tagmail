@@ -292,6 +292,11 @@ async fn a_30_mb_message_streams_through_draft_send_and_sent() {
                  ?1, ?2, 0)",
                 params![sealed.ciphertext, sealed.nonce],
             )?;
+            tx.execute(
+                "INSERT INTO identity (account_id, address, is_default) \
+                 VALUES (1, 'me@a.example', 1)",
+                [],
+            )?;
             Ok(())
         })
         .await

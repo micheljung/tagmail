@@ -274,19 +274,14 @@ pub trait Store: Send + Sync + 'static {
     fn accounts(&self) -> impl Future<Output = StoreResult<Vec<AccountSummary>>> + Send;
 
     /// Every account, by id, without secrets.
-    fn accounts_full(&self) -> impl Future<Output = StoreResult<Vec<AccountDto>>> + Send {
-        async { Err(unsupported("accounts_full")) }
-    }
+    fn accounts_full(&self) -> impl Future<Output = StoreResult<Vec<AccountDto>>> + Send;
 
     /// The stored account with its decrypted password, e.g. to test a
     /// patch merged over it; `None` if it does not exist.
     fn account_settings(
         &self,
         id: AccountId,
-    ) -> impl Future<Output = StoreResult<Option<NewAccount>>> + Send {
-        let _ = id;
-        async { Err(unsupported("account_settings")) }
-    }
+    ) -> impl Future<Output = StoreResult<Option<NewAccount>>> + Send;
 
     /// Applies `patch`, re-encrypting a new password and moving the default
     /// identity's address along with `email`; `None` if the account does
@@ -295,16 +290,10 @@ pub trait Store: Send + Sync + 'static {
         &self,
         id: AccountId,
         patch: AccountPatch,
-    ) -> impl Future<Output = StoreResult<Option<AccountDto>>> + Send {
-        let _ = (id, patch);
-        async { Err(unsupported("update_account")) }
-    }
+    ) -> impl Future<Output = StoreResult<Option<AccountDto>>> + Send;
 
     /// Sets `status = 'deleting'`; `false` if the account does not exist.
-    fn mark_deleting(&self, id: AccountId) -> impl Future<Output = StoreResult<bool>> + Send {
-        let _ = id;
-        async { Err(unsupported("mark_deleting")) }
-    }
+    fn mark_deleting(&self, id: AccountId) -> impl Future<Output = StoreResult<bool>> + Send;
 
     /// Persists the account with its password encrypted; returns its id.
     fn create_account(
@@ -345,10 +334,6 @@ pub trait Store: Send + Sync + 'static {
         address: String,
         allow: bool,
     ) -> impl Future<Output = StoreResult<()>> + Send;
-}
-
-fn unsupported(what: &str) -> StoreError {
-    format!("{what} is not supported by this store").into()
 }
 
 /// Engine state that only lives in memory.
