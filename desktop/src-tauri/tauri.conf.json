@@ -11,7 +11,23 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["appimage", "deb", "rpm", "msi", "nsis", "dmg"],
-    "icon": ["icons/icon.png", "icons/icon.ico"]
+    "targets": [
+      "appimage",
+      "deb",
+      "rpm",
+      "msi",
+      "nsis",
+      "dmg"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Productivity",
+    "shortDescription": "Gmail-like client for your own IMAP mail",
+    "license": "AGPL-3.0-only"
   }
 }
