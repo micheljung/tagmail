@@ -147,6 +147,10 @@ impl Replica {
         &self.feed
     }
 
+    pub fn layout(&self) -> &Layout {
+        &self.layout
+    }
+
     pub fn client(&self) -> &ServerClient {
         &self.client
     }

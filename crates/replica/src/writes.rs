@@ -403,6 +403,13 @@ impl Replica {
         if !changed.is_empty() {
             self.refresh_overlay(Some(changed.clone()), changed).await?;
         }
+        let stop = match stop {
+            None => match self.flush_compose().await {
+                Err(Error::Client(e)) => Some(e),
+                other => return other,
+            },
+            stop => stop,
+        };
         match stop {
             Some(ClientError::Offline(_)) | None => Ok(()),
             Some(e) => Err(e.into()),
