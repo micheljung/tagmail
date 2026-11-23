@@ -458,7 +458,7 @@ async fn an_epoch_change_bootstraps_again_and_keeps_durable_intents() {
         .conn()
         .execute(
             "INSERT INTO intent (op_id, seq, kind, account_id, email_ids, created_at, state) \
-             VALUES ('op-1', 1, 'archive', 1, '[\"g:10\"]', 0, 'pending')",
+             VALUES ('op-1', 1, 'archive', 1, '[\"g:999\"]', 0, 'pending')",
             [],
         )
         .unwrap();

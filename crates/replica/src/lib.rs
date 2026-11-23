@@ -10,10 +10,13 @@ pub mod durable;
 pub mod error;
 pub mod events;
 pub mod import;
+pub mod intents;
+pub mod overlay;
 pub mod pull;
 pub mod sync;
 pub mod version;
 pub mod window;
+pub mod writes;
 
 pub use client::{ClientError, Link, ServerClient};
 pub use db::{Discard, Expected, Layout, LocalDbs, Opened, ReplicaMeta};

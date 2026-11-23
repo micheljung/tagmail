@@ -38,6 +38,10 @@ impl Layout {
         Layout { root: root.into() }
     }
 
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn replica(&self) -> PathBuf {
         self.root.join(REPLICA_DIR)
     }

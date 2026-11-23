@@ -10,11 +10,12 @@ use tagmail_api_core::dto::{ApiVersion, ChangeDto};
 use tagmail_api_core::replica_dto::DEFAULT_WINDOW_DAYS;
 use tagmail_api_core::sqlite_store::SqliteStore;
 use tagmail_core::{CacheEpoch, ChangeCursor};
-use tokio::sync::{Mutex as AsyncMutex, broadcast, watch};
+use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, watch};
 
 use crate::bootstrap;
 use crate::client::{ClientError, ServerClient};
 use crate::db::{self, Expected, Layout, Opened};
+use crate::durable::Durable;
 use crate::error::{Error, Result};
 use crate::events::{self, Doorbell};
 use crate::import::Arrival;
@@ -73,6 +74,9 @@ pub enum ReplicaEvent {
 pub struct Replica {
     layout: Layout,
     client: ServerClient,
+    durable: Durable,
+    flush_lock: AsyncMutex<()>,
+    flush_wanted: Notify,
     settings: Mutex<Settings>,
     store: RwLock<Option<Arc<SqliteStore>>>,
     cursor: Mutex<Option<ChangeCursor>>,
@@ -91,6 +95,8 @@ impl Replica {
         client: ServerClient,
         settings: Settings,
     ) -> Result<Arc<Replica>> {
+        std::fs::create_dir_all(layout.root())?;
+        let durable = Durable::open(&layout.durable())?;
         let (store, cursor) = match db::open(&layout, Expected::current(), None)? {
             Opened::Ready(dbs) => {
                 let (store, meta) = dbs.into_store().await?;
@@ -115,6 +121,9 @@ impl Replica {
         Ok(Arc::new(Replica {
             layout,
             client,
+            durable,
+            flush_lock: AsyncMutex::new(()),
+            flush_wanted: Notify::new(),
             settings: Mutex::new(settings),
             store: RwLock::new(store),
             cursor: Mutex::new(cursor),
@@ -140,6 +149,20 @@ impl Replica {
 
     pub fn client(&self) -> &ServerClient {
         &self.client
+    }
+
+    /// Intents, drafts and the outbox; never discarded.
+    pub fn durable(&self) -> &Durable {
+        &self.durable
+    }
+
+    pub(crate) fn flush_lock(&self) -> &AsyncMutex<()> {
+        &self.flush_lock
+    }
+
+    /// Asks the running sync loop to flush queued writes now.
+    pub(crate) fn kick_flush(&self) {
+        self.flush_wanted.notify_one();
     }
 
     pub fn phase(&self) -> watch::Receiver<Phase> {
@@ -174,6 +197,24 @@ impl Replica {
 
     /// Syncs until `stop` turns true or the device is unpaired.
     pub async fn run(self: Arc<Self>, mut stop: watch::Receiver<bool>) {
+        let flusher = tokio::spawn(Arc::clone(&self).flush_on_demand(stop.clone()));
+        self.sync_loop(&mut stop).await;
+        let _ = flusher.await;
+    }
+
+    async fn flush_on_demand(self: Arc<Self>, mut stop: watch::Receiver<bool>) {
+        loop {
+            tokio::select! {
+                _ = self.flush_wanted.notified() => {}
+                _ = stop.wait_for(|s| *s) => return,
+            }
+            if let Err(e) = self.flush().await {
+                tracing::debug!(error = %e, "flush stopped");
+            }
+        }
+    }
+
+    async fn sync_loop(&self, stop: &mut watch::Receiver<bool>) {
         loop {
             let outcome = tokio::select! {
                 r = self.session() => r,
@@ -254,15 +295,18 @@ impl Replica {
         if !pulled.arrivals.is_empty() {
             let _ = self.events.send(ReplicaEvent::NewMail(pulled.arrivals));
         }
+        self.apply_server_ops(&pulled.writes).await?;
         if !pulled.writes.is_empty() {
             let _ = self.events.send(ReplicaEvent::Writes(pulled.writes));
         }
+        self.refresh_overlay(None, Vec::new()).await?;
         let start = window::window_start(now(), settings.window_days);
         if self.sweep_due() {
             window::sweep(&store, start).await?;
         }
         self.spawn_prefetch(store, start, settings.raw_cap_bytes);
-        Ok(())
+        drop(_guard);
+        self.flush().await
     }
 
     fn sweep_due(&self) -> bool {
@@ -321,7 +365,7 @@ impl Replica {
         *self.store.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(store));
         *self.last_sweep.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
         let _ = self.events.send(ReplicaEvent::Replaced);
-        Ok(())
+        self.refresh_overlay(None, Vec::new()).await
     }
 }
 

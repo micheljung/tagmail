@@ -32,5 +32,6 @@ zstd.workspace = true
 [dev-dependencies]
 reqwest = { workspace = true, features = ["rustls-no-provider", "json"] }
 tagmail-api-server = { path = "../api-server" }
+tagmail-engine.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }

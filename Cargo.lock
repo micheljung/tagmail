@@ -5409,6 +5409,7 @@ dependencies = [
  "tagmail-api-core",
  "tagmail-api-server",
  "tagmail-core",
+ "tagmail-engine",
  "tagmail-store",
  "tempfile",
  "thiserror 2.0.21",
