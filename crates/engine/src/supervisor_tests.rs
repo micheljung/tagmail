@@ -3,6 +3,7 @@
 
 use std::future::Future;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use tagmail_api_core::dto::TlsMode;
@@ -278,6 +279,47 @@ async fn inbox_stays_live_while_another_account_syncs_its_backlog() {
     );
     eventually("new mail of account 1", || f.has("new@x")).await;
     assert!(!f.all_live(2).await, "delivered before account 2 finished");
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn polls_run_while_waiting_for_the_bulk_permit() {
+    const POLL: Duration = Duration::from_millis(200);
+    const MAX_TURNS: usize = 50;
+    let srv = server(&["IMAP4rev1", "ENABLE", "CONDSTORE", "QRESYNC"]);
+    lock(&srv).append("INBOX", FakeMsg::new("i@x", "Hi", "ann@x", "me@x", 1));
+    for i in 0..10 {
+        lock(&srv).add_mailbox(&format!("Folder{i}"), None, 1000 + i);
+        lock(&srv).append(
+            &format!("Folder{i}"),
+            FakeMsg::new(&format!("f{i}@x"), "Old", "ann@x", "me@x", 1),
+        );
+    }
+    lock(&srv).full_fetch_gauge = Some((Arc::new(Gauge::default()), Duration::from_millis(100)));
+    let f = fixture(&[account(1, 2, &srv)], config(|c| c.poll_interval = POLL)).await;
+    f.engine.start_all().await.unwrap();
+    eventually("INBOX live", || async {
+        f.cache
+            .query("SELECT name, sync_state FROM mailbox", |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })
+            .await
+            .iter()
+            .any(|(n, s)| n == "INBOX" && s == "live")
+    })
+    .await;
+    let held = f.engine.inner.bulk.acquire().await.unwrap();
+    assert!(!f.all_live(1).await, "folders wait for the permit");
+    let turns = f.engine.inner.loop_turns.load(Ordering::SeqCst);
+
+    lock(&srv).append("INBOX", FakeMsg::new("new@x", "New", "bob@x", "me@x", 2));
+    eventually("new INBOX mail polled", || f.has("new@x")).await;
+    tokio::time::sleep(POLL * 3).await;
+    let spent = f.engine.inner.loop_turns.load(Ordering::SeqCst) - turns;
+    assert!(spent < MAX_TURNS, "{spent} loop turns while waiting");
+    assert!(!f.all_live(1).await);
+    drop(held);
+    eventually("live", || f.all_live(1)).await;
     f.engine.shutdown().await;
 }
 

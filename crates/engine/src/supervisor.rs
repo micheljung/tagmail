@@ -366,12 +366,14 @@ pub(crate) struct Inner<F: ConnectorFactory> {
     /// The last failure of each label job.
     pub(crate) job_errors: Mutex<HashMap<i64, String>>,
     budget: Arc<Budget>,
-    bulk: Semaphore,
+    pub(crate) bulk: Semaphore,
     /// Accounts whose server answered OK to a label but did not keep its
     /// keyword; cleared by the next label it keeps.
     labels_dropped: Mutex<HashSet<AccountId>>,
     /// Blob writes of every account; stops wait for them to finish.
     pub(crate) blob_writes: Arc<Semaphore>,
+    #[cfg(test)]
+    pub(crate) loop_turns: std::sync::atomic::AtomicUsize,
 }
 
 /// The sync engine: implements [`AccountRegistry`] and [`WriteService`]
@@ -429,6 +431,8 @@ impl<F: ConnectorFactory> Engine<F> {
                 bulk: Semaphore::new(config.bulk_permits.max(1)),
                 labels_dropped: Mutex::new(HashSet::new()),
                 blob_writes: crate::ctx::blob_writes(),
+                #[cfg(test)]
+                loop_turns: std::sync::atomic::AtomicUsize::new(0),
                 config,
             }),
         };
@@ -1140,6 +1144,8 @@ async fn run_account<F: ConnectorFactory>(
         status: &status,
         jobs,
         bulk: &inner.bulk,
+        #[cfg(test)]
+        turns: &inner.loop_turns,
     };
     let mut retry = inner.config.retry_min;
     loop {
@@ -1304,6 +1310,8 @@ struct AccountRun<'a, C: Connector> {
     status: &'a Status,
     jobs: &'a Jobs<C::Session>,
     bulk: &'a Semaphore,
+    #[cfg(test)]
+    turns: &'a std::sync::atomic::AtomicUsize,
 }
 
 fn probe_state(facts: &Facts) -> Option<ProbeState> {
@@ -1401,6 +1409,8 @@ async fn account_loop<C: Connector>(
     let mut text_skip = BTreeSet::new();
     let mut settled = false;
     loop {
+        #[cfg(test)]
+        run.turns.fetch_add(1, Ordering::SeqCst);
         serve_jobs(&mut worker, ctx, jobs).await?;
         if jobs.poll_now.swap(false, Ordering::SeqCst) {
             next_poll = Instant::now();
@@ -1416,6 +1426,24 @@ async fn account_loop<C: Connector>(
             rows = sync::ordered(ctx).await?;
             continue;
         }
+        if Instant::now() >= next_poll {
+            rows = sync::list(&mut *worker, ctx).await?;
+            let live: Vec<MailboxRow> = rows
+                .iter()
+                .filter(|r| r.state == SyncState::Live)
+                .cloned()
+                .collect();
+            for row in &live {
+                sync_one(&mut worker, ctx, row, &dirty, &jobs.pending).await?;
+            }
+            if live.len() == rows.len() {
+                sync::purge(ctx).await?;
+            }
+            rows = sync::ordered(ctx).await?;
+            next_poll = Instant::now() + config.poll_interval;
+            text_skip.clear();
+            continue;
+        }
         if let Some(row) = rows.iter().find(|r| r.state != SyncState::Live).cloned() {
             settled = false;
             let Some(_permit) = bulk_permit(bulk, &wake, jobs, next_poll).await else {
@@ -1423,17 +1451,6 @@ async fn account_loop<C: Connector>(
             };
             sync_one(&mut worker, ctx, &row, &dirty, &jobs.pending).await?;
             rows = sync::ordered(ctx).await?;
-            continue;
-        }
-        if Instant::now() >= next_poll {
-            rows = sync::list(&mut *worker, ctx).await?;
-            for row in rows.clone() {
-                sync_one(&mut worker, ctx, &row, &dirty, &jobs.pending).await?;
-            }
-            sync::purge(ctx).await?;
-            rows = sync::ordered(ctx).await?;
-            next_poll = Instant::now() + config.poll_interval;
-            text_skip.clear();
             continue;
         }
         if sync::text_pending(ctx, &text_skip).await? {
