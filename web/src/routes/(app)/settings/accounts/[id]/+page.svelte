@@ -13,7 +13,7 @@
 	} from '#lib/transport/index.ts';
 	import AccountFields from '#lib/ui/AccountFields.svelte';
 	import AccountMarker from '#lib/ui/AccountMarker.svelte';
-	import { formOf, patchOf, type AccountForm } from '#lib/ui/accountForm.ts';
+	import { formOf, needsPassword, patchOf, type AccountForm } from '#lib/ui/accountForm.ts';
 	import { degradedText, phaseText } from '#lib/ui/accountStatus.ts';
 	import { errorText } from '#lib/ui/errors.ts';
 	import Icon from '#lib/ui/Icon.svelte';
@@ -26,6 +26,9 @@
 	const identities = $derived(composer.identities.filter((i) => i.accountId === id));
 
 	let form = $state<AccountForm | null>(null);
+	const passwordRequired = $derived(
+		!!account && !!form && needsPassword(form, account) && !form.password
+	);
 	/** The account `form` was filled from; edits survive status reloads. */
 	let formFor = $state<number | null>(null);
 	let errors = $state<Record<string, string>>({});
@@ -247,17 +250,24 @@
 			<section aria-labelledby="connection-title">
 				<h2 id="connection-title">Connection</h2>
 				<form class="connection" onsubmit={(e) => save(e, account, form!)}>
-					<AccountFields bind:form {errors} {test} />
+					<AccountFields
+						bind:form
+						{errors}
+						{test}
+						passwordRequired={needsPassword(form, account)}
+					/>
 					<div class="actions">
 						<button
 							class="btn"
 							type="button"
 							onclick={() => runTest(account, form!)}
-							disabled={busy !== null}
+							disabled={busy !== null || passwordRequired}
 						>
 							<Icon name="sync" size={16} />{busy === 'test' ? 'Testing…' : 'Test connection'}
 						</button>
-						<button class="btn primary" type="submit" disabled={busy !== null}>Save</button>
+						<button class="btn primary" type="submit" disabled={busy !== null || passwordRequired}>
+							Save
+						</button>
 					</div>
 				</form>
 			</section>

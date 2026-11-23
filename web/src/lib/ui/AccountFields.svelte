@@ -7,7 +7,8 @@
 		form = $bindable(),
 		errors = {},
 		test = null,
-		creating = false
+		creating = false,
+		passwordRequired = false
 	}: {
 		form: AccountForm;
 		/** Messages by field name, from a 422 answer. */
@@ -15,6 +16,8 @@
 		test?: AccountTestDto | null;
 		/** A new account: the password is required and the email follows the username. */
 		creating?: boolean;
+		/** An existing account whose server or username changed. */
+		passwordRequired?: boolean;
 	} = $props();
 
 	let emailEdited = $state(false);
@@ -60,10 +63,13 @@
 		<input
 			type="password"
 			bind:value={form.password}
-			required={creating}
+			required={creating || passwordRequired}
 			placeholder={creating ? '' : 'Unchanged'}
 			autocomplete="new-password"
 		/>
+		{#if passwordRequired}
+			<small>Re-enter the password when the server or username changes</small>
+		{/if}
 		{#if errors.password}<em role="alert">{errors.password}</em>{/if}
 	</label>
 	<label>
@@ -191,6 +197,11 @@
 		background: var(--surface-2);
 		color: var(--ink);
 		font-size: 14px;
+	}
+
+	small {
+		color: var(--muted);
+		font-size: 12.5px;
 	}
 
 	em {

@@ -11,9 +11,14 @@ const MESSAGES: Record<string, string> = {
 	csrf: 'The request was refused as cross-site. Reload the page and try again.'
 };
 
+const HTTP_TOO_MANY_REQUESTS = 429;
+
 /** Player-facing text for an API or WebAuthn failure. */
 export function errorText(e: unknown): string {
-	if (e instanceof ApiError) return MESSAGES[e.code] ?? e.message;
+	if (e instanceof ApiError) {
+		if (e.status === HTTP_TOO_MANY_REQUESTS) return MESSAGES.rate_limited;
+		return MESSAGES[e.code] ?? e.message;
+	}
 	if (e instanceof DOMException && e.name === 'NotAllowedError') {
 		return 'The passkey prompt was closed before it finished.';
 	}

@@ -155,6 +155,20 @@ function testResult(host: string): AccountTestDto {
 	};
 }
 
+const CONNECTION_FIELDS = [
+	'imapHost',
+	'imapPort',
+	'imapTls',
+	'smtpHost',
+	'smtpPort',
+	'smtpTls',
+	'username'
+] as const;
+
+function changesConnection(patch: AccountPatchDto, a: AccountDto): boolean {
+	return CONNECTION_FIELDS.some((k) => patch[k] !== undefined && patch[k] !== a[k]);
+}
+
 const ADDRESS = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 function accountChange(id: number, payload: AccountDto | null): Change {
@@ -191,6 +205,9 @@ export async function accountsApi(
 		ctx.send(res, status, field ? { error: code, message, field } : { error: code, message });
 		return true;
 	};
+
+	const passwordRequired = () =>
+		fail(422, 'invalid', 'enter the password again to change the server or username', 'password');
 
 	if (path === '/api/status') return ok(200, { accounts: accounts.map(status) });
 	if (path === '/api/accounts' && method === 'GET') return ok(200, { accounts });
@@ -240,11 +257,13 @@ export async function accountsApi(
 		if (!a) return fail(404, 'not_found', 'no such account');
 		if (m[2] && method === 'POST') {
 			const b = await json<AccountPatchDto>();
+			if (changesConnection(b, a) && !b.password) return passwordRequired();
 			tests.push({ imapHost: b.imapHost ?? a.imapHost, username: b.username ?? a.username });
 			return ok(200, testResult(b.imapHost ?? a.imapHost));
 		}
 		if (method === 'PATCH') {
 			const patch = await json<AccountPatchDto>();
+			if (changesConnection(patch, a) && !patch.password) return passwordRequired();
 			delete patch.password;
 			Object.assign(a, patch);
 			ctx.push([accountChange(a.id, a)]);

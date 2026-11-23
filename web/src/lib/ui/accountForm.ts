@@ -80,6 +80,19 @@ export function newAccountOf(f: AccountForm): NewAccountDto {
 	return dto;
 }
 
+/** Server or username edits need the password again, so a stolen session can't redirect the stored one. */
+export function needsPassword(f: AccountForm, a: AccountDto): boolean {
+	return (
+		f.imapHost.trim() !== a.imapHost ||
+		f.imapPort !== a.imapPort ||
+		f.imapTls !== a.imapTls ||
+		f.smtpHost.trim() !== a.smtpHost ||
+		f.smtpPort !== a.smtpPort ||
+		f.smtpTls !== a.smtpTls ||
+		f.username.trim() !== a.username
+	);
+}
+
 /** Only the fields that differ from `a`; an empty password keeps the stored one. */
 export function patchOf(f: AccountForm, a: AccountDto): AccountPatchDto {
 	const next = newAccountOf(f);

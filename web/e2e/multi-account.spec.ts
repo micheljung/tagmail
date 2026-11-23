@@ -197,3 +197,30 @@ test('an account that drops labels gets a banner linking to its settings', async
 		'The server drops labels it does not know'
 	);
 });
+
+test('changing the server needs the password again; with it, test and save work', async ({
+	page
+}) => {
+	await signIn(page);
+	await page.goto('/settings/accounts/1');
+	const imap = page.getByRole('group', { name: 'Incoming (IMAP)' }).getByLabel('Server');
+	const testButton = page.getByRole('button', { name: 'Test connection' });
+	const save = page.getByRole('button', { name: 'Save', exact: true });
+	await expect(testButton).toBeEnabled();
+
+	await imap.fill('imap.moved.example');
+	await expect(
+		page.getByText('Re-enter the password when the server or username changes')
+	).toBeVisible();
+	await expect(testButton).toBeDisabled();
+	await expect(save).toBeDisabled();
+
+	await page.getByLabel('Password').fill('hunter2hunter2');
+	await expect(testButton).toBeEnabled();
+	await testButton.click();
+	await expect(page.getByRole('list', { name: 'Connection test' })).toContainText('Connected in');
+	await save.click();
+	await expect
+		.poll(async () => (await state(page)).accounts.find((a) => a.id === 1))
+		.toMatchObject({ imapHost: 'imap.moved.example' });
+});
