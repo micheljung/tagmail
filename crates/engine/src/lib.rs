@@ -36,7 +36,6 @@ mod threading;
 
 pub use error::{Error, Result};
 pub use jobs::{JobFuture, MAX_QUEUED, Priority};
-pub use outgoing::data_uri_filter;
 pub use smtp::{LettreSender, SMTP_TIMEOUT, SmtpError, SmtpSender, SmtpServer};
 pub use supervisor::{
     AccountSettings, ConnectorFactory, Engine, EngineConfig, ImapConnectorFactory, Stores,

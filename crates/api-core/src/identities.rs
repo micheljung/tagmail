@@ -11,14 +11,12 @@ use crate::compose::{
     ComposeError, ComposeResult, error_response, json, parse_row_id, respond, valid_address,
 };
 use crate::compose_dto::{IdentityDto, IdentityPatchDto, NewIdentityDto};
+use crate::mime::sanitize::{data_uri_filter, filter_style, is_inline_image};
 use crate::store::{MessageRecord, Store, StoreError};
 
 /// Largest sanitized signature.
 pub const MAX_SIGNATURE: usize = 16 * 1024;
 const MAX_NAME_LEN: usize = 200;
-/// Signature images must be inline: remote ones are blocked by the
-/// compose and render CSPs anyway.
-const INLINE_IMAGE: &str = "data:image/";
 
 /// A validated `POST /api/identities`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -77,12 +75,10 @@ pub fn sanitize_signature(html: &str) -> ComposeResult<Option<String>> {
         .add_generic_attributes(["style"])
         .add_url_schemes(["data"])
         .attribute_filter(|element, attribute, value| match (element, attribute) {
-            ("img", "src") => value
-                .trim()
-                .get(..INLINE_IMAGE.len())
-                .is_some_and(|p| p.eq_ignore_ascii_case(INLINE_IMAGE))
-                .then(|| Cow::Owned(value.trim().to_owned())),
-            _ => Some(Cow::Borrowed(value)),
+            (_, "style") => filter_style(value).map(Cow::Owned),
+            // Remote images are blocked by the compose and render CSPs anyway.
+            ("img", "src") => is_inline_image(value).then(|| Cow::Owned(value.trim().to_owned())),
+            _ => data_uri_filter(element, attribute, value),
         })
         .clean(html)
         .to_string();
@@ -387,6 +383,38 @@ mod tests {
                 x_original_to: vec!["list-me@a.example".into()],
             }
         );
+    }
+
+    #[test]
+    fn signatures_keep_data_uris_only_as_inline_images() {
+        for href in [
+            "data:text/html,x",
+            "&#1;data:text/html,x",
+            "da&#9;ta:text/html,x",
+            " DATA:text/html,x",
+        ] {
+            let clean = sanitize_signature(&format!("<a href=\"{href}\">x</a>"))
+                .unwrap()
+                .unwrap();
+            assert!(!clean.contains("text/html"), "{href}: {clean}");
+        }
+        for src in ["&#1;data:text/html,x", "da&#9;ta:text/html,x"] {
+            let clean = sanitize_signature(&format!("<img src=\"{src}\">x")).unwrap();
+            assert_eq!(clean.as_deref(), Some("<img>x"), "{src}");
+        }
+        let img = sanitize_signature("<img src=\"&#1;da&#10;ta:image/png;base64,AA==\">")
+            .unwrap()
+            .unwrap();
+        assert!(img.contains("image/png"), "{img}");
+        let styled = sanitize_signature(
+            "<p style=\"color:red; background:url(https://t.example/x)\">a</p>\
+             <p style=\"background-image:u\\72l(x)\">b</p>",
+        )
+        .unwrap()
+        .unwrap();
+        assert!(styled.contains("style=\"color:red\""), "{styled}");
+        assert!(!styled.contains("t.example"), "{styled}");
+        assert!(!styled.contains("\\72"), "{styled}");
     }
 
     #[test]

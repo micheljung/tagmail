@@ -217,6 +217,38 @@ const CSS_FORBIDDEN: &[&str] = &[
     "\\",
 ];
 
+const DATA_URI: &str = "data:";
+const DATA_IMAGE: &str = "data:image/";
+
+/// The URL as a browser's parser sees its scheme: leading C0 controls and
+/// spaces stripped, tabs and newlines removed anywhere, ASCII lowercase.
+fn scheme_view(value: &str) -> String {
+    value
+        .trim_start_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .take(DATA_IMAGE.len())
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+/// A URL a browser reads as a `data:image/` URI.
+pub fn is_inline_image(value: &str) -> bool {
+    scheme_view(value).starts_with(DATA_IMAGE)
+}
+
+/// Ammonia attribute filter for HTML we send or store: inline images
+/// travel as `data:image/` URIs in `img src`; every other `data:` URI is
+/// dropped.
+pub fn data_uri_filter<'u>(element: &str, attribute: &str, value: &'u str) -> Option<Cow<'u, str>> {
+    let scheme = scheme_view(value);
+    if !scheme.starts_with(DATA_URI) {
+        return Some(Cow::Borrowed(value));
+    }
+    (element == "img" && attribute == "src" && scheme.starts_with(DATA_IMAGE))
+        .then_some(Cow::Borrowed(value))
+}
+
 const DATA_IMAGE_PREFIXES: &[&str] = &[
     "data:image/png;base64,",
     "data:image/gif;base64,",
@@ -284,7 +316,7 @@ fn has_scheme(url: &str, scheme: &str) -> bool {
 
 /// Keeps the declarations of a `style` value that are free of resource
 /// loads and script; ammonia then keeps only [`STYLE_PROPERTIES`].
-fn filter_style(value: &str) -> Option<String> {
+pub fn filter_style(value: &str) -> Option<String> {
     let kept: Vec<&str> = value
         .split(';')
         .filter(|decl| {

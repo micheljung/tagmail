@@ -7,7 +7,6 @@
 //! a placeholder per attachment, and [`Outgoing::write_to`] replaces each
 //! with the file's base64, encoded chunk by chunk while it is written.
 
-use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs::File;
@@ -22,6 +21,7 @@ use mail_builder::MessageBuilder;
 use mail_builder::headers::address::Address;
 use mail_builder::headers::message_id::MessageId;
 use tagmail_api_core::dto::AddressDto;
+use tagmail_api_core::mime::sanitize::data_uri_filter;
 
 /// Bytes of randomness in a generated Message-ID.
 const MESSAGE_ID_RANDOM: usize = 16;
@@ -83,34 +83,10 @@ pub fn new_message_id(from: &str) -> String {
 }
 
 const DATA_URI: &str = "data:";
-const DATA_IMAGE: &str = "data:image/";
 /// The block compose inserts a signature in, kept so a reloaded draft
 /// can still swap it.
 const SIGNATURE_CLASS: &str = "tagmail-signature";
 const SIGNATURE_IDENTITY: &str = "data-identity";
-
-/// The URL as a browser's parser sees its scheme: leading C0 controls and
-/// spaces stripped, tabs and newlines removed anywhere, ASCII lowercase.
-fn scheme_view(value: &str) -> String {
-    value
-        .trim_start_matches(|c: char| c <= ' ')
-        .chars()
-        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
-        .take(DATA_IMAGE.len())
-        .collect::<String>()
-        .to_ascii_lowercase()
-}
-
-/// Ammonia attribute filter: inline images (e.g. in a signature) travel as
-/// `data:image/` URIs in `img src`; every other `data:` URI is dropped.
-pub fn data_uri_filter<'u>(element: &str, attribute: &str, value: &'u str) -> Option<Cow<'u, str>> {
-    let scheme = scheme_view(value);
-    if !scheme.starts_with(DATA_URI) {
-        return Some(Cow::Borrowed(value));
-    }
-    (element == "img" && attribute == "src" && scheme.starts_with(DATA_IMAGE))
-        .then_some(Cow::Borrowed(value))
-}
 
 /// Sanitized HTML for an outgoing body.
 pub fn sanitize_html(html: &str) -> String {
