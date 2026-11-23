@@ -48,8 +48,8 @@ pub const OCTET_STREAM: &str = "application/octet-stream";
 pub const API_CSP: &str = "default-src 'none'; frame-ancestors 'none'";
 macro_rules! app_csp {
     () => {
-        "default-src 'self'; script-src 'self'; frame-src 'self'; object-src 'none'; \
-         base-uri 'none'"
+        "default-src 'self'; script-src 'self'; img-src 'self' data:; frame-src 'self'; \
+         object-src 'none'; base-uri 'none'"
     };
 }
 /// CSP for the SPA document, identical on the web and in the desktop

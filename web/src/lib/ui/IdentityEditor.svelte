@@ -11,7 +11,7 @@
 	import type { DOMPurify } from 'dompurify';
 	import { onMount } from 'svelte';
 	import Editor from '../compose/Editor.svelte';
-	import { COMPOSE_PURIFY, stripStyles } from '../compose/sanitize';
+	import { sanitizeHtml } from '../compose/sanitize';
 	import type { IdentityDto } from '../transport';
 
 	let {
@@ -38,9 +38,7 @@
 	let signature = $state(identity?.signature ?? '');
 	let purify = $state.raw<DOMPurify | null>(null);
 
-	const preview = $derived(
-		purify && signature ? String(purify.sanitize(stripStyles(signature), COMPOSE_PURIFY)) : ''
-	);
+	const preview = $derived(purify && signature ? sanitizeHtml(purify, signature) : '');
 
 	onMount(() => {
 		void import('dompurify').then((m) => (purify = m.default));

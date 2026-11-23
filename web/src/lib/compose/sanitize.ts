@@ -3,15 +3,18 @@ import { SIGNATURE_CLASS } from './signature';
 
 const SIGNATURE_IDENTITY = 'data-identity';
 
+/** Images that may stay: inline raster data, as in pasted signatures. */
+const DATA_IMAGE = /^data:image\/(?:png|gif|jpeg|webp)[;,]/i;
+
 /**
  * What may enter the editor from paste, quotes and saved drafts. Style
  * attributes would trip the app CSP (no inline styles), and remote images
- * would load straight from the sender's server while composing.
+ * would load straight from the sender's server while composing, so an
+ * image keeps only a {@link DATA_IMAGE} source (see {@link installHooks}).
  */
 export const COMPOSE_PURIFY: Config = {
 	FORBID_TAGS: [
 		'style',
-		'img',
 		'picture',
 		'video',
 		'audio',
@@ -50,18 +53,34 @@ export function stripStyles(html: string): string {
 
 const hooked = new WeakSet<DOMPurify>();
 
-/** Classes stay out (they would pull in app styles), except the signature block's marker. */
-function keepSignatureMarker(purify: DOMPurify): void {
+/**
+ * Classes stay out (they would pull in app styles), except the signature
+ * block's marker. DOMPurify lets any `data:` URI through `img src`, so
+ * images are narrowed to {@link DATA_IMAGE} here and dropped without one.
+ */
+function installHooks(purify: DOMPurify): void {
 	if (hooked.has(purify)) return;
 	hooked.add(purify);
 	purify.addHook('uponSanitizeAttribute', (node, data) => {
+		if (node.nodeName === 'IMG' && data.attrName === 'src') {
+			data.keepAttr = DATA_IMAGE.test(data.attrValue.trim());
+			return;
+		}
 		if (data.attrName !== 'class' && data.attrName !== SIGNATURE_IDENTITY) return;
 		const marked = node.nodeName === 'DIV' && node.getAttribute('class') === SIGNATURE_CLASS;
 		data.keepAttr = marked && (data.attrName === 'class' || /^\d+$/.test(data.attrValue));
 	});
+	purify.addHook('afterSanitizeAttributes', (node) => {
+		if (node.nodeName === 'IMG' && !node.hasAttribute('src')) node.remove();
+	});
 }
 
 export function sanitizeFragment(purify: DOMPurify, html: string): DocumentFragment {
-	keepSignatureMarker(purify);
+	installHooks(purify);
 	return purify.sanitize(stripStyles(html), { ...COMPOSE_PURIFY, RETURN_DOM_FRAGMENT: true });
+}
+
+export function sanitizeHtml(purify: DOMPurify, html: string): string {
+	installHooks(purify);
+	return String(purify.sanitize(stripStyles(html), COMPOSE_PURIFY));
 }

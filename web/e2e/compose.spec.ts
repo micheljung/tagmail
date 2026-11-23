@@ -189,7 +189,9 @@ test('attachments upload with progress and the size cap is enforced', async ({ p
 	expect((await state(page)).sent[0].attachmentIds).toHaveLength(2);
 });
 
-test('hostile HTML in a quote or a paste never runs in the composer', async ({ page }) => {
+test('hostile HTML in a quote or a paste never runs in the composer, data images stay', async ({
+	page
+}) => {
 	await signIn(page);
 	await page.goto(`/thread/${idAt(XSS_INDEX)}`);
 	await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
@@ -202,7 +204,8 @@ test('hostile HTML in a quote or a paste never runs in the composer', async ({ p
 		const dt = new DataTransfer();
 		dt.setData(
 			'text/html',
-			'<p>pasted</p><img src=x onerror="window.__pwned=\'paste-img\'"><script>window.__pwned=\'paste-script\'</script><a href="javascript:window.__pwned=\'paste-link\'">x</a><p style="color:red" onclick="window.__pwned=\'click\'">styled</p>'
+			'<p>pasted</p><img src=x onerror="window.__pwned=\'paste-img\'"><script>window.__pwned=\'paste-script\'</script><a href="javascript:window.__pwned=\'paste-link\'">x</a><p style="color:red" onclick="window.__pwned=\'click\'">styled</p>' +
+				'<img alt="sig" src="data:image/png;base64,iVBORw0KGgo="><img alt="page" src="data:text/html,<script>window.__pwned=1</script>"><img alt="remote" src="https://tracker.example/p.gif">'
 		);
 		dt.setData('text/plain', 'pasted');
 		el.focus();
@@ -215,6 +218,9 @@ test('hostile HTML in a quote or a paste never runs in the composer', async ({ p
 	await page.waitForTimeout(200);
 	expect(await page.evaluate(() => window.__pwned)).toBeUndefined();
 	const html = await body.innerHTML();
-	expect(html).not.toMatch(/<(script|img|svg|iframe|object|form|style)\b/i);
-	expect(html).not.toMatch(/\son\w+=|javascript:|style=/i);
+	expect(html).not.toMatch(/<(script|svg|iframe|object|form|style)\b/i);
+	expect(html).not.toMatch(/\son\w+=|javascript:|style=|data:text|tracker\.example/i);
+	expect(html.match(/<img\b[^>]*>/gi)).toEqual([
+		expect.stringContaining('src="data:image/png;base64,iVBORw0KGgo="')
+	]);
 });
