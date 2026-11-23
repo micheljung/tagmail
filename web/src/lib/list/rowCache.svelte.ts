@@ -21,6 +21,8 @@ export class RowCache {
 
 	readonly #rows = new Map<number, ThreadRowDto>();
 	readonly #pending = new Map<number, Inflight>();
+	/** Rows still shown while their refetch runs, so a change never flashes a skeleton. */
+	readonly #stale = new Set<number>();
 	readonly #fetch: FetchRows;
 	readonly #capacity: number;
 	readonly #onMissing: (ids: number[]) => void;
@@ -71,24 +73,39 @@ export class RowCache {
 			if (row) {
 				this.#rows.delete(id);
 				this.#rows.set(id, row);
-			} else if (!this.#pending.has(id)) {
-				missing.push(id);
 			}
+			if ((!row || this.#stale.has(id)) && !this.#pending.has(id)) missing.push(id);
 		}
 		for (let i = 0; i < missing.length; i += PAGE_SIZE) {
 			this.#load(missing.slice(i, i + PAGE_SIZE));
 		}
 	}
 
+	/** Rewrites a cached row in place (a confirmed change the server will echo later). */
+	update(id: number, patch: (row: ThreadRowDto) => ThreadRowDto): void {
+		const row = this.#rows.get(id);
+		if (!row) return;
+		const next = patch(row);
+		if (next === row) return;
+		this.#rows.set(id, next);
+		this.version++;
+	}
+
+	/** Marks a row out of date: it stays visible and the next `ensure` refetches it. */
 	invalidate(id: number): void {
 		const pending = this.#pending.get(id);
 		if (pending) this.#abort(pending);
-		if (this.#rows.delete(id)) this.version++;
+		if (this.#rows.has(id)) this.#stale.add(id);
+	}
+
+	isStale(id: number): boolean {
+		return this.#stale.has(id);
 	}
 
 	clear(): void {
 		for (const inflight of new Set(this.#pending.values())) this.#abort(inflight);
 		this.#rows.clear();
+		this.#stale.clear();
 		this.version++;
 	}
 
@@ -107,9 +124,13 @@ export class RowCache {
 				if (inflight.controller.signal.aborted) return;
 				this.#settle(inflight);
 				for (const row of rows) this.#rows.set(row.id, row);
+				const got = new Set(rows.map((r) => r.id));
+				for (const id of ids) {
+					this.#stale.delete(id);
+					if (!got.has(id)) this.#rows.delete(id);
+				}
 				this.#evict();
 				this.version++;
-				const got = new Set(rows.map((r) => r.id));
 				const absent = ids.filter((id) => !got.has(id));
 				if (absent.length > 0) this.#onMissing(absent);
 			},
@@ -131,6 +152,10 @@ export class RowCache {
 		const excess = this.#rows.size - this.#capacity;
 		if (excess <= 0) return;
 		const it = this.#rows.keys();
-		for (let i = 0; i < excess; i++) this.#rows.delete(it.next().value as number);
+		for (let i = 0; i < excess; i++) {
+			const id = it.next().value as number;
+			this.#rows.delete(id);
+			this.#stale.delete(id);
+		}
 	}
 }

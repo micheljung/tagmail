@@ -83,13 +83,18 @@ describe('RowCache', () => {
 		expect(onMissing).toHaveBeenCalledWith([2]);
 	});
 
-	it('refetches an invalidated row', async () => {
+	it('keeps showing an invalidated row while it refetches', async () => {
 		const { cache, calls, settle } = harness();
 		cache.ensure([1]);
 		await settle(calls[0]);
 		cache.invalidate(1);
-		expect(cache.peek(1)).toBeUndefined();
+		expect(cache.peek(1)).toBeDefined();
+		expect(cache.isStale(1)).toBe(true);
 		cache.ensure([1]);
 		expect(calls).toHaveLength(2);
+		cache.ensure([1]);
+		expect(calls).toHaveLength(2);
+		await settle(calls[1]);
+		expect(cache.isStale(1)).toBe(false);
 	});
 });
