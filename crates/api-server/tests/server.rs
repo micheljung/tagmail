@@ -806,13 +806,43 @@ async fn accounts_are_listed_patched_and_deleted() {
     assert_eq!(address, "home@example.com", "the default identity follows");
     assert_eq!(*registry.updated.lock().unwrap(), [(AccountId(1), true)]);
 
+    for _ in 0..2 {
+        let resp = client
+            .delete(url(&server, "/api/accounts/1"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 202);
+    }
+    assert_eq!(
+        *registry.removed.lock().unwrap(),
+        [AccountId(1)],
+        "a repeated delete starts no second removal"
+    );
+    let secret: (Vec<u8>, Vec<u8>) = server
+        .store()
+        .config()
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT secret_ct, secret_nonce FROM account WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        secret,
+        (Vec::new(), Vec::new()),
+        "the password is discarded"
+    );
     let resp = client
-        .delete(url(&server, "/api/accounts/1"))
+        .post(url(&server, "/api/accounts/1/test"))
+        .json(&json!({}))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 202);
-    assert_eq!(*registry.removed.lock().unwrap(), [AccountId(1)]);
+    assert_eq!(resp.status(), 404);
     let list: Value = client
         .get(url(&server, "/api/accounts"))
         .send()

@@ -13,8 +13,9 @@ use tagmail_api_core::ops_dto::{
 use tagmail_api_core::signing::UrlKeys;
 use tagmail_api_core::{
     AccountPatch, AccountRegistry, AccountSummary, Api, BoxFuture, ChangeFeed, ChangePage, Event,
-    EventSession, FetchRawError, MessageRecord, Method, NewAccount, OpenError, Request, Response,
-    RuntimeStatus, Store, StoreResult, ThreadDetail, ThreadRows, View, ViewIndex,
+    EventSession, FetchRawError, MarkDeleting, MessageRecord, Method, NewAccount, OpenError,
+    Request, Response, RuntimeStatus, Store, StoreResult, ThreadDetail, ThreadRows, View,
+    ViewIndex,
 };
 use tagmail_api_core::{Submitted, WriteError, WriteResult, WriteService};
 use tagmail_core::query::parse;
@@ -222,14 +223,15 @@ impl Store for MemStore {
         Ok(Some(account_dto(s, a)))
     }
 
-    async fn mark_deleting(&self, id: AccountId) -> StoreResult<bool> {
+    async fn mark_deleting(&self, id: AccountId) -> StoreResult<MarkDeleting> {
         let mut accounts = self.accounts.lock().unwrap();
         Ok(match accounts.iter_mut().find(|(s, _)| s.id == id) {
+            Some((s, _)) if s.status == "deleting" => MarkDeleting::AlreadyDeleting,
             Some((s, _)) => {
                 s.status = "deleting".to_owned();
-                true
+                MarkDeleting::Marked
             }
-            None => false,
+            None => MarkDeleting::Missing,
         })
     }
 
@@ -740,9 +742,15 @@ async fn accounts_are_listed_patched_tested_and_deleted() {
         404
     );
 
-    let resp = delete(&api, "/api/accounts/1").await;
-    assert_eq!((resp.status, json_body(&resp)), (202, json!({ "id": 1 })));
-    assert_eq!(*registry.removed.lock().unwrap(), [AccountId(1)]);
+    for _ in 0..2 {
+        let resp = delete(&api, "/api/accounts/1").await;
+        assert_eq!((resp.status, json_body(&resp)), (202, json!({ "id": 1 })));
+    }
+    assert_eq!(
+        *registry.removed.lock().unwrap(),
+        [AccountId(1)],
+        "a repeated delete starts no second removal"
+    );
     assert_eq!(
         patch(&api, "/api/accounts/1", &json!({ "name": "x" }))
             .await

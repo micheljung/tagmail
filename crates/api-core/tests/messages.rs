@@ -14,8 +14,8 @@ use tagmail_api_core::mime::BLOCKED_IMAGE;
 use tagmail_api_core::signing::{self, Capability, TOKEN_TTL_SECS, UrlKeys};
 use tagmail_api_core::{
     AccountPatch, AccountRegistry, AccountSummary, Api, BoxFuture, ChangePage, FetchRawError,
-    ImageProxy, MessageRecord, Method, NewAccount, ProxiedImage, ProxyError, Request, Response,
-    RuntimeStatus, Store, StoreResult, ThreadDetail, ThreadRows, View, ViewIndex,
+    ImageProxy, MarkDeleting, MessageRecord, Method, NewAccount, ProxiedImage, ProxyError, Request,
+    Response, RuntimeStatus, Store, StoreResult, ThreadDetail, ThreadRows, View, ViewIndex,
 };
 use tagmail_core::{AccountId, CacheEpoch, ChangeCursor, MessageRowId, ThreadId};
 use zeroize::Zeroizing;
@@ -182,7 +182,7 @@ impl Store for Mail {
         Err("read-only".into())
     }
 
-    async fn mark_deleting(&self, _: AccountId) -> StoreResult<bool> {
+    async fn mark_deleting(&self, _: AccountId) -> StoreResult<MarkDeleting> {
         Err("read-only".into())
     }
 

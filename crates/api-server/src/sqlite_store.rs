@@ -11,8 +11,8 @@ use tagmail_api_core::dto::{
 };
 use tagmail_api_core::signing::{KEY_LEN, UrlKeys};
 use tagmail_api_core::{
-    AccountPatch, AccountSummary, ChangeFeed, ChangePage, MessageRecord, NewAccount, Secret, Store,
-    StoreResult, ThreadDetail, ThreadRows, View, ViewIndex,
+    AccountPatch, AccountSummary, ChangeFeed, ChangePage, MarkDeleting, MessageRecord, NewAccount,
+    Secret, Store, StoreResult, ThreadDetail, ThreadRows, View, ViewIndex,
 };
 use tagmail_core::query::{Query, Term};
 use tagmail_core::{
@@ -1000,7 +1000,8 @@ impl Store for SqliteStore {
                     .query_row(
                         &format!(
                             "SELECT {ACCOUNT_COLUMNS}, secret_ct, secret_nonce FROM account \
-                             WHERE id = ?1"
+                             WHERE id = ?1 AND status != '{}'",
+                            AccountStateDto::Deleting.as_str()
                         ),
                         [id.0],
                         |r| {
@@ -1097,24 +1098,26 @@ impl Store for SqliteStore {
         Ok(account)
     }
 
-    async fn mark_deleting(&self, id: AccountId) -> StoreResult<bool> {
-        let account = self
+    async fn mark_deleting(&self, id: AccountId) -> StoreResult<MarkDeleting> {
+        let (marked, account) = self
             .config
             .write(move |tx| {
-                tx.execute(
-                    "UPDATE account SET status = ?2 WHERE id = ?1",
+                let marked = tx.execute(
+                    "UPDATE account SET status = ?2, secret_ct = x'', secret_nonce = x'' \
+                     WHERE id = ?1 AND status != ?2",
                     params![id.0, AccountStateDto::Deleting.as_str()],
                 )?;
-                Ok(read_account(tx, id)?)
+                Ok((marked > 0, read_account(tx, id)?))
             })
             .await?;
-        match account {
-            Some(account) => {
+        Ok(match (marked, account) {
+            (true, Some(account)) => {
                 self.emit_account(&account).await?;
-                Ok(true)
+                MarkDeleting::Marked
             }
-            None => Ok(false),
-        }
+            (false, Some(_)) => MarkDeleting::AlreadyDeleting,
+            (_, None) => MarkDeleting::Missing,
+        })
     }
 }
 

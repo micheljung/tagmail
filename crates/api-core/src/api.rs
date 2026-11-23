@@ -17,8 +17,8 @@ use crate::id_index;
 use crate::routes::{self, Miss, RouteId};
 use crate::signing::UrlKeys;
 use crate::store::{
-    AccountPatch, AccountRegistry, AccountSummary, ChangePage, ImageProxy, NewAccount, Secret,
-    Store, StoreError, View, ViewError,
+    AccountPatch, AccountRegistry, AccountSummary, ChangePage, ImageProxy, MarkDeleting,
+    NewAccount, Secret, Store, StoreError, View, ViewError,
 };
 use crate::writes::WriteService;
 
@@ -513,11 +513,14 @@ impl<S: Store> Api<S> {
         let Some(id) = parse_row_id(id).map(AccountId) else {
             return Ok(no_account());
         };
-        if !self.store.mark_deleting(id).await? {
-            return Ok(no_account());
+        match self.store.mark_deleting(id).await? {
+            MarkDeleting::Missing => return Ok(no_account()),
+            MarkDeleting::AlreadyDeleting => {}
+            MarkDeleting::Marked => {
+                tracing::info!(account = id.0, "account deleting");
+                tokio::spawn(registry.account_removed(id));
+            }
         }
-        tracing::info!(account = id.0, "account deleting");
-        tokio::spawn(registry.account_removed(id));
         Ok(Response::json(202, &serde_json::json!({ "id": id.0 })))
     }
 }

@@ -23,7 +23,7 @@ pub use api::{API_VERSION, Api, Method, Request, Response};
 pub use events::{ChangeFeed, Event, EventSession, EventSource, OpenError};
 pub use store::{
     AccountPatch, AccountRegistry, AccountSummary, BoxFuture, ChangePage, FetchRawError,
-    ImageProxy, MessageRecord, NewAccount, ProxiedImage, ProxyError, RuntimeStatus, Secret, Store,
-    StoreError, StoreResult, ThreadDetail, ThreadRows, View, ViewError, ViewIndex,
+    ImageProxy, MarkDeleting, MessageRecord, NewAccount, ProxiedImage, ProxyError, RuntimeStatus,
+    Secret, Store, StoreError, StoreResult, ThreadDetail, ThreadRows, View, ViewError, ViewIndex,
 };
 pub use writes::{OpRequest, Submitted, WriteError, WriteResult, WriteService};

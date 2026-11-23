@@ -155,6 +155,14 @@ pub struct NewAccount {
     pub display_name: Option<String>,
 }
 
+/// Outcome of [`Store::mark_deleting`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MarkDeleting {
+    Marked,
+    AlreadyDeleting,
+    Missing,
+}
+
 /// A validated `PATCH /api/accounts/{id}`: the fields to change.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AccountPatch {
@@ -292,8 +300,12 @@ pub trait Store: Send + Sync + 'static {
         patch: AccountPatch,
     ) -> impl Future<Output = StoreResult<Option<AccountDto>>> + Send;
 
-    /// Sets `status = 'deleting'`; `false` if the account does not exist.
-    fn mark_deleting(&self, id: AccountId) -> impl Future<Output = StoreResult<bool>> + Send;
+    /// Sets `status = 'deleting'` and discards the stored password in one
+    /// step, so only the first of concurrent deletes starts a removal.
+    fn mark_deleting(
+        &self,
+        id: AccountId,
+    ) -> impl Future<Output = StoreResult<MarkDeleting>> + Send;
 
     /// Persists the account with its password encrypted; returns its id.
     fn create_account(
