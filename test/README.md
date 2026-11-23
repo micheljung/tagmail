@@ -135,6 +135,22 @@ above, with `TAGMAIL_SMTP_ADDR=mailpit:1025` and
 `TAGMAIL_MAILPIT_API=mailpit:8025`; add `--log-driver k8s-file` to
 `docker create` if `docker logs` shows nothing (Podman's journald driver).
 
+## Multi-account integration tests
+
+`crates/engine/tests/multi_account.rs` runs one engine with two accounts,
+`engine8` and `engine9` (shared with `send.rs`, so run the two files one
+after the other): a label op from the unified view on a thread of the
+second account must reach that account's server as a keyword and its label
+registry, and a reply to mail sent to the second account's alias must reach
+Mailpit from the alias with the alias's signature:
+
+```bash
+cargo xtask dovecot up
+cargo test -p tagmail-engine --features mailpit-tests --test multi_account
+```
+
+With a remote Docker daemon, run it like `send.rs` above.
+
 ## RSS gate
 
 `cargo xtask bench-rss` checks AC 9 on the full scenario: it needs the seed

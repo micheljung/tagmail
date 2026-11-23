@@ -16,57 +16,8 @@ use tagmail_api_core::compose::{Compose, DraftInput, ReplyRefs};
 use tagmail_api_core::dto::AddressDto;
 use tagmail_imap::*;
 use tagmail_store::rusqlite::params;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 
 const SEND_BUDGET: Duration = Duration::from_secs(30);
-
-fn mailpit_addr() -> String {
-    std::env::var("TAGMAIL_MAILPIT_API").unwrap_or_else(|_| "127.0.0.1:10825".into())
-}
-
-/// `GET path` on Mailpit's API; the response body.
-async fn mailpit(path: &str) -> Vec<u8> {
-    let mut stream = TcpStream::connect(mailpit_addr())
-        .await
-        .expect("Mailpit API");
-    stream
-        .write_all(format!("GET {path} HTTP/1.0\r\nHost: mailpit\r\n\r\n").as_bytes())
-        .await
-        .unwrap();
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response).await.unwrap();
-    let split = response
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .expect("HTTP response");
-    let head = String::from_utf8_lossy(&response[..split]);
-    assert!(
-        head.starts_with("HTTP/1.1 200") || head.starts_with("HTTP/1.0 200"),
-        "{head}"
-    );
-    response[split + 4..].to_vec()
-}
-
-fn encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| {
-            if b.is_ascii_alphanumeric() || b == b'-' || b == b'.' {
-                (b as char).to_string()
-            } else {
-                format!("%{b:02X}")
-            }
-        })
-        .collect()
-}
-
-/// Mailpit's id of the message with this Message-ID, if it arrived.
-async fn mailpit_id(msgid: &str) -> Option<String> {
-    let query = encode(&format!("message-id:\"{msgid}\""));
-    let found: Value =
-        serde_json::from_slice(&mailpit(&format!("/api/v1/search?query={query}")).await).unwrap();
-    found["messages"][0]["ID"].as_str().map(str::to_owned)
-}
 
 fn addr(email: &str) -> AddressDto {
     AddressDto {
