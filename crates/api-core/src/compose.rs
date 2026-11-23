@@ -18,7 +18,7 @@ use crate::compose_dto::{
 };
 use crate::dto::{AddressDto, ApiErrorDto};
 use crate::identities::{
-    IdentityPatch, NewIdentity, ReplyHeaders, choose_reply_identity, reply_headers,
+    IdentityPatch, NewIdentity, ReplyHeaders, choose_reply_identity, reply_headers, without_tag,
 };
 use crate::mime;
 use crate::store::{BoxFuture, MessageRecord, Store, StoreError};
@@ -349,7 +349,9 @@ fn display_list(list: &[AddressDto]) -> String {
 
 fn push_unique(out: &mut Vec<AddressDto>, a: &AddressDto, skip: &[&str]) {
     let taken = out.iter().any(|o| o.email.eq_ignore_ascii_case(&a.email))
-        || skip.iter().any(|s| s.eq_ignore_ascii_case(&a.email));
+        || skip.iter().any(|s| {
+            s.eq_ignore_ascii_case(&a.email) || s.eq_ignore_ascii_case(&without_tag(&a.email))
+        });
     if !taken {
         out.push(a.clone());
     }
@@ -813,7 +815,7 @@ mod tests {
         let o = original(
             "ann@x",
             &["me@a.example", "bob@x"],
-            &["cat@x", "ann@x", "me@b.example"],
+            &["cat@x", "ann@x", "me@b.example", "Me+lists@A.example"],
         );
         let r = reply_fields(&o, ReplyMode::All, &ids);
         assert_eq!(r.identity_id, Some(1));

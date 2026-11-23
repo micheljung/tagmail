@@ -161,7 +161,7 @@ pub fn reply_headers(message: &Message<'_>) -> ReplyHeaders {
 }
 
 /// `me+tag@a` → `me@a`.
-fn without_tag(address: &str) -> Cow<'_, str> {
+pub(crate) fn without_tag(address: &str) -> Cow<'_, str> {
     match address.rsplit_once('@') {
         Some((local, domain)) => match local.split_once('+') {
             Some((base, _)) if !base.is_empty() => Cow::Owned(format!("{base}@{domain}")),
