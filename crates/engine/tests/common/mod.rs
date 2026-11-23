@@ -192,7 +192,8 @@ impl ImapSession for Counted {
         flags: &[Flag],
         message: &[u8],
     ) -> Result<AppendResult> {
-        self.inner.append(mailbox, flags, message).await
+        let appended = self.inner.append(mailbox, flags, message).await?;
+        Ok(self.without_appenduid_unless_uidplus(appended))
     }
     async fn append_stream(
         &mut self,
@@ -201,9 +202,11 @@ impl ImapSession for Counted {
         size: u64,
         message: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
     ) -> Result<AppendResult> {
-        self.inner
+        let appended = self
+            .inner
             .append_stream(mailbox, flags, size, message)
-            .await
+            .await?;
+        Ok(self.without_appenduid_unless_uidplus(appended))
     }
     async fn expunge_uids(&mut self, uids: &UidSet) -> Result<()> {
         self.inner.expunge_uids(uids).await
@@ -228,6 +231,17 @@ impl ImapSession for Counted {
     }
     async fn logout(&mut self) -> Result<()> {
         self.inner.logout().await
+    }
+}
+
+impl Counted {
+    /// Servers send `APPENDUID` whatever the capability override hides, so
+    /// a hidden UIDPLUS drops it here.
+    fn without_appenduid_unless_uidplus(&self, mut appended: AppendResult) -> AppendResult {
+        if !self.inner.capabilities().uidplus() {
+            appended.uid = None;
+        }
+        appended
     }
 }
 
@@ -276,6 +290,13 @@ pub struct Fixture {
     user: &'static str,
     password: &'static str,
     server: Server,
+    /// Accounts 2, 3, … with [`PASSWORD`].
+    more: Vec<&'static str>,
+}
+
+/// The sender address of a test user: `<user>@tagmail.test`.
+pub fn email_of(user: &str) -> String {
+    format!("{user}@tagmail.test")
 }
 
 pub struct Running {
@@ -308,7 +329,16 @@ impl Fixture {
             user,
             password,
             server: Server::Dovecot,
+            more: Vec::new(),
         }
+    }
+
+    /// Adds account `2`, `3`, … for the test-owned `engineN` user, emptied
+    /// first.
+    pub async fn with_account(mut self, user: &'static str) -> Fixture {
+        reset_user_at(self.server, user).await;
+        self.more.push(user);
+        self
     }
 
     pub async fn start(
@@ -388,25 +418,41 @@ impl Fixture {
             }
         };
         let vault = Arc::new(Vault::unlock(&config, &master).await.unwrap());
-        let sealed = vault.seal(AccountId(1), password).unwrap();
         let (smtp_host, smtp_port) = smtp_addr();
         let saves_sent = sending.and_then(|s| s.server_saves_sent);
+        let users =
+            std::iter::once((user, password)).chain(self.more.iter().map(|u| (*u, PASSWORD)));
+        let mut accounts = Vec::new();
+        for (id, (user, password)) in (1..).zip(users) {
+            let sealed = vault.seal(AccountId(id), password).unwrap();
+            accounts.push((id, user, sealed));
+        }
         config
             .write(move |tx| {
-                tx.execute(
-                    "INSERT OR IGNORE INTO account (id, name, imap_host, imap_port, imap_tls, \
-                     smtp_host, smtp_port, smtp_tls, username, secret_ct, secret_nonce, \
-                     server_saves_sent) \
-                     VALUES (1, 'it', 'dovecot', 10143, 'tls', ?4, ?5, 'starttls', ?1, ?2, ?3, ?6)",
-                    params![
-                        user,
-                        sealed.ciphertext,
-                        sealed.nonce,
-                        smtp_host,
-                        smtp_port,
-                        saves_sent
-                    ],
-                )?;
+                for (id, user, sealed) in &accounts {
+                    tx.execute(
+                        "INSERT OR IGNORE INTO account (id, name, imap_host, imap_port, imap_tls, \
+                         smtp_host, smtp_port, smtp_tls, username, secret_ct, secret_nonce, \
+                         server_saves_sent, email) \
+                         VALUES (?7, ?1, 'dovecot', 10143, 'tls', ?4, ?5, 'starttls', ?1, ?2, ?3, ?6, ?8)",
+                        params![
+                            user,
+                            sealed.ciphertext,
+                            sealed.nonce,
+                            smtp_host,
+                            smtp_port,
+                            saves_sent,
+                            id,
+                            email_of(user)
+                        ],
+                    )?;
+                    tx.execute(
+                        "INSERT INTO identity (account_id, address, is_default) \
+                         SELECT ?1, ?2, 1 WHERE NOT EXISTS \
+                         (SELECT 1 FROM identity WHERE account_id = ?1)",
+                        params![id, email_of(user)],
+                    )?;
+                }
                 Ok(())
             })
             .await

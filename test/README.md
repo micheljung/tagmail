@@ -18,8 +18,9 @@ cargo xtask stalwart down
 | `mailpit` | SMTP 10025, UI and API 10825 | `axllent/mailpit:v1.27` | SMTP sink; accepts any login, also without TLS (test stack only) |
 
 Every server has the users `user1` / `pass1` and `user2` / `pass2`, with
-cleartext login over plain IMAP. Dovecot also has `engine1` … `engine9` /
-`engine`, one per engine integration test. These are test-only credentials.
+cleartext login over plain IMAP. Dovecot also has `engine1` … `engine9` and
+`ops1` … `ops4` / `engine`, one per engine integration test; Stalwart has
+`ops4` / `engine` for the engine smoke test. These are test-only credentials.
 `tagmail-server` reaches them with `--insecure-plain-imap`, which turns TLS
 off for **all** of its accounts: never use it on a server that also syncs
 real mail.
@@ -34,6 +35,9 @@ python3 test/smoke/check_seed.py --manifest target/seed/tagmail-seed.json
 
 `seed` writes a deterministic Maildir++ tree (`INBOX`, `.Sent`, `.Archive`)
 plus `tagmail-seed.json`, which holds the expected per-mailbox counts.
+`--huge-mb 25` also appends one unread 25 MB message (HTML body plus one
+attachment, subject `tagmail-bench-huge`) as the newest in INBOX, for the
+RSS gate.
 `check_seed.py` compares those counts with what an independent IMAP client
 sees.
 
@@ -90,6 +94,13 @@ users and the Gmail-mode `dovecot-gmail` service (`cargo xtask dovecot up
 --gmail`), whose virtual `[Gmail]/All` saves into `Archive` so a MOVE to
 `\All` leaves INBOX as on Gmail; `TAGMAIL_IMAP_GMAIL_ADDR` (default
 `127.0.0.1:10144`) points them elsewhere.
+`labels.rs` also runs against Stalwart with
+`TAGMAIL_IMAP_SERVER=stalwart TAGMAIL_IMAP_ADDR=127.0.0.1:10145` after
+`cargo xtask stalwart up` (the `imap-stalwart` job): there only
+`label_round_trip_and_draft_uid_without_uidplus` runs (as `ops4`), the
+others need Dovecot and say so. It hides UIDPLUS, so the draft's UID must
+come from the Message-ID lookup, which Stalwart's `UID SEARCH HEADER`
+cannot answer once Drafts holds two messages.
 `dovecot_seed.rs` checks that the newest INBOX message of the seed loaded
 into `user1` is cached within 30 s:
 
@@ -126,16 +137,31 @@ above, with `TAGMAIL_SMTP_ADDR=mailpit:1025` and
 
 ## RSS gate
 
-`cargo xtask bench-rss` checks AC 9 against the seed loaded into `user1`:
-it starts a release `tagmail-server`, adds the account, waits until the sync
-and the text pass are done, idles 5 minutes and fails if the highest VmRSS
-of the last 60 s exceeds 64 MB (decimal, 64 × 10^6 bytes = 61.04 MiB, as
-in the spec). It writes `target/bench-rss.json` and, under GitHub Actions,
-the job summary (`--idle-secs`, `--window-secs`, `--limit-mb`, `--out`
-adjust it). With a remote Docker daemon, `--in-dovecot-network` builds static binaries and runs
-the benchmark in the Dovecot container's network namespace. These binaries
-use musl's allocator, so their RSS is not comparable with the glibc build
-that `bench.yml` measures.
+`cargo xtask bench-rss` checks AC 9 on the full scenario: it needs the seed
+with `--seed 1 --huge-mb 25` in `user1` and `--seed 2` in `user2`. It starts
+a release `tagmail-server`, adds both accounts (`--account user:password`,
+repeated; default `user1:pass1 user2:pass2`), waits until every account is
+live with the text pass done, then opens one `/api/events` stream that
+stays connected, runs one search (`meeting`: view index plus the first
+page of rows) and opens and renders the `tagmail-bench-huge` message. It
+then idles 5 minutes and fails if the highest VmRSS of the last 60 s
+exceeds 64 MB (decimal, 64 × 10^6 bytes = 61.04 MiB, as in the spec) or the
+event stream closed. It writes `target/bench-rss.json` (with `accounts`,
+`sseConnected`, `searchMs`, `renderMs`) and, under GitHub Actions, the job
+summary (`--idle-secs`, `--window-secs`, `--limit-mb`, `--out` adjust it).
+
+```bash
+cargo xtask seed --count 100000 --avg-kb 8 --seed 1 --huge-mb 25 --out target/seed
+cargo xtask seed --count 100000 --avg-kb 8 --seed 2 --out target/seed2
+cargo xtask dovecot load --from target/seed --user user1
+cargo xtask dovecot load --from target/seed2 --user user2
+cargo xtask bench-rss
+```
+
+With a remote Docker daemon, `--in-dovecot-network` builds static binaries
+and runs the benchmark in the Dovecot container's network namespace. These
+binaries use musl's allocator, so their RSS is not comparable with the
+glibc build that `bench.yml` measures.
 
 ## Search gate
 

@@ -43,6 +43,12 @@ class = "individual"
 secret = "pass2"
 email = ["user2@tagmail.test"]
 
+[[directory.memory.principals]]
+name = "ops4"
+class = "individual"
+secret = "engine"
+email = ["ops4@tagmail.test"]
+
 [tracer.stdout]
 type = "stdout"
 level = "info"

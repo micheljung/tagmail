@@ -1,6 +1,8 @@
 //! Labels and ops against the Dovecot test servers (AC 5, Gmail-mode
-//! archive, rename job across a restart). Each test owns an `engineN`
-//! user; see `dovecot.rs` for how to run them.
+//! archive, rename job across a restart). Each test owns an `opsN` user;
+//! see `dovecot.rs` for how to run them. With `TAGMAIL_IMAP_SERVER=stalwart`
+//! and `TAGMAIL_IMAP_ADDR` at Stalwart only the server-agnostic smoke test
+//! runs: Stalwart has no METADATA, no `\Archive` and no Gmail mode.
 #![cfg(feature = "dovecot-tests")]
 
 mod common;
@@ -8,14 +10,30 @@ mod common;
 use std::time::Duration;
 
 use common::*;
+use tagmail_api_core::compose::{Compose, DraftInput};
+use tagmail_api_core::dto::AddressDto;
 use tagmail_api_core::ops_dto::{LabelPatchDto, NewLabelDto, OpStatusDto};
 use tagmail_api_core::{OpRequest, Submitted, WriteService};
 use tagmail_core::ThreadId;
 use tagmail_core::ops::OpKind;
 use tagmail_imap::*;
 
+/// The engine's label registry annotation.
+const REGISTRY_ENTRY: &str = "/private/vendor/tagmail/labels";
 /// Budget for an op or job to reach the server.
 const APPLY: Duration = Duration::from_secs(20);
+
+fn stalwart() -> bool {
+    std::env::var("TAGMAIL_IMAP_SERVER").is_ok_and(|s| s == "stalwart")
+}
+
+fn skipped_on_stalwart(test: &str) -> bool {
+    let skip = stalwart();
+    if skip {
+        eprintln!("{test}: needs Dovecot, skipped on Stalwart");
+    }
+    skip
+}
 
 fn op(id: &str, kind: OpKind, thread: ThreadId, label: Option<&str>) -> OpRequest {
     OpRequest {
@@ -68,6 +86,9 @@ async fn status(running: &Running, id: &str) -> OpStatusDto {
 
 #[tokio::test]
 async fn label_reaches_every_copy_as_a_keyword_for_other_clients() {
+    if skipped_on_stalwart("label_reaches_every_copy_as_a_keyword_for_other_clients") {
+        return;
+    }
     let user = "ops1";
     let fixture = Fixture::new(user).await;
     let mut s = second(user).await;
@@ -181,6 +202,9 @@ async fn label_reaches_every_copy_as_a_keyword_for_other_clients() {
 
 #[tokio::test]
 async fn gmail_mode_archive_only_leaves_inbox() {
+    if skipped_on_stalwart("gmail_mode_archive_only_leaves_inbox") {
+        return;
+    }
     let user = "ops2";
     let fixture = Fixture::on(Server::Gmail, user).await;
     let mut s = second_at(Server::Gmail, user, PASSWORD).await;
@@ -216,5 +240,169 @@ async fn gmail_mode_archive_only_leaves_inbox() {
         count(Server::Gmail, user, "INBOX").await == 1
     })
     .await;
+    running.stop().await;
+}
+
+/// Empties `user` on any server: deletes its own mailboxes, expunges the
+/// rest and drops the label registry annotation where there is METADATA.
+async fn reset_anywhere(user: &str) {
+    let mut s = second(user).await;
+    for mailbox in s.list().await.unwrap() {
+        if mailbox.special_use.is_none() && !mailbox.name.eq_ignore_ascii_case("INBOX") {
+            s.delete_mailbox(&mailbox.name).await.unwrap();
+            continue;
+        }
+        s.select(&mailbox.name, SelectOptions::default())
+            .await
+            .unwrap();
+        let all = s.uid_search(SearchCriteria::All).await.unwrap();
+        if !all.is_empty() {
+            s.store_flags(&all, StoreOp::Add, &[Flag::Deleted], None)
+                .await
+                .unwrap();
+            s.expunge_uids(&all).await.unwrap();
+        }
+    }
+    if s.capabilities().metadata() {
+        s.set_metadata(REGISTRY_ENTRY, None).await.unwrap();
+    }
+    s.logout().await.unwrap();
+}
+
+async fn drafts_mailbox(user: &str) -> String {
+    let mut s = second(user).await;
+    s.list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|m| m.special_use == Some(SpecialUse::Drafts))
+        .expect("a \\Drafts mailbox")
+        .name
+}
+
+/// Engine smoke test that also runs against Stalwart: a label round trip
+/// as keywords, and a draft saved without UIDPLUS into a Drafts mailbox
+/// holding other messages, where Stalwart's `UID SEARCH HEADER` finds
+/// nothing, still records the draft's UID.
+#[tokio::test]
+async fn label_round_trip_and_draft_uid_without_uidplus() {
+    const USER: &str = "ops4";
+    const KEYWORD: &str = "$label_Smoke";
+    reset_anywhere(USER).await;
+    let fixture = Fixture::existing(USER, PASSWORD);
+    let drafts = drafts_mailbox(USER).await;
+    let mut s = second(USER).await;
+    let id = format!("smoke-{}@it", nanos());
+    s.append("INBOX", &[], &message(&id, "Smoke", &[]))
+        .await
+        .unwrap();
+    for n in 0..2 {
+        let other = format!("other-draft-{n}-{}@it", nanos());
+        s.append(
+            &drafts,
+            &[Flag::Draft],
+            &message(&other, "Other draft", &[]),
+        )
+        .await
+        .unwrap();
+    }
+
+    let running = fixture
+        .start(
+            CapabilityOverride {
+                remove: vec!["UIDPLUS".into()],
+                add: Vec::new(),
+            },
+            None,
+        )
+        .await;
+    running.wait_live().await;
+    running
+        .engine
+        .create_label(NewLabelDto {
+            name: "Smoke".into(),
+            color: None,
+        })
+        .await
+        .unwrap();
+    let thread = thread_of(&running, &id).await;
+    running
+        .engine
+        .submit_op(op("smoke-add", OpKind::LabelAdd, thread, Some("smoke")))
+        .await
+        .unwrap();
+    eventually("label added", APPLY, || async {
+        status(&running, "smoke-add").await == OpStatusDto::Done
+    })
+    .await;
+    let flags = raw_flags(Server::Dovecot, USER, "INBOX").await;
+    assert!(flags.iter().all(|l| l.contains(KEYWORD)), "{flags:?}");
+    running
+        .engine
+        .submit_op(op(
+            "smoke-remove",
+            OpKind::LabelRemove,
+            thread,
+            Some("smoke"),
+        ))
+        .await
+        .unwrap();
+    eventually("label removed", APPLY, || async {
+        status(&running, "smoke-remove").await == OpStatusDto::Done
+    })
+    .await;
+    let flags = raw_flags(Server::Dovecot, USER, "INBOX").await;
+    assert!(flags.iter().all(|l| !l.contains(KEYWORD)), "{flags:?}");
+
+    let identity = running.engine.identities().await.unwrap()[0].id;
+    let created = running
+        .engine
+        .create_draft(DraftInput {
+            identity_id: identity,
+            to: vec![AddressDto {
+                name: None,
+                email: "ann@example.com".into(),
+            }],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: "Smoke draft".into(),
+            text: Some("Draft body\n".into()),
+            html: None,
+            attachment_ids: Vec::new(),
+            reply: None,
+            forward_of: None,
+            save_now: true,
+            forwarded: Vec::new(),
+        })
+        .await
+        .unwrap();
+    eventually("draft saved", APPLY, || async {
+        running.engine.draft(created.id).await.unwrap().saved
+    })
+    .await;
+    let draft = created.id;
+    let (msgid, mailbox, uid): (String, String, u32) = running
+        .config
+        .read(move |c| {
+            Ok(c.query_row(
+                "SELECT msgid_hdr, saved_mailbox, saved_uid FROM draft WHERE id = ?1",
+                [draft],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(mailbox, drafts);
+    let mut s = second(USER).await;
+    s.select(&drafts, SelectOptions::default()).await.unwrap();
+    let mut saved = Vec::new();
+    s.fetch_body(Uid(uid), "HEADER", &mut saved, 1 << 16)
+        .await
+        .unwrap();
+    let saved = String::from_utf8_lossy(&saved);
+    assert!(
+        saved.contains(&msgid),
+        "UID {uid} is not the draft: {saved}"
+    );
     running.stop().await;
 }
