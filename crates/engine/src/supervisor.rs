@@ -370,6 +370,10 @@ pub(crate) struct Inner<F: ConnectorFactory> {
     /// Accounts whose server answered OK to a label but did not keep its
     /// keyword; cleared by the next label it keeps.
     labels_dropped: Mutex<HashSet<AccountId>>,
+    /// Serializes stop, restart and remove of each account.
+    lifecycle: Mutex<HashMap<AccountId, Arc<tokio::sync::Mutex<()>>>>,
+    /// Accounts being removed; never started again.
+    removing: Mutex<HashSet<AccountId>>,
     /// Blob writes of every account; stops wait for them to finish.
     pub(crate) blob_writes: Arc<Semaphore>,
     #[cfg(test)]
@@ -430,6 +434,8 @@ impl<F: ConnectorFactory> Engine<F> {
                 }),
                 bulk: Semaphore::new(config.bulk_permits.max(1)),
                 labels_dropped: Mutex::new(HashSet::new()),
+                lifecycle: Mutex::new(HashMap::new()),
+                removing: Mutex::new(HashSet::new()),
                 blob_writes: crate::ctx::blob_writes(),
                 #[cfg(test)]
                 loop_turns: std::sync::atomic::AtomicUsize::new(0),
@@ -462,10 +468,32 @@ impl<F: ConnectorFactory> Engine<F> {
         }
     }
 
-    /// Restores the pending overlay, then starts every `active` account in
-    /// `config.db`, staggered; returns how many.
+    /// Restores the pending overlay, resumes the removal of `deleting`
+    /// accounts, then starts every `active` account in `config.db`,
+    /// staggered; returns how many.
     pub async fn start_all(&self) -> Result<usize> {
         self.restore_overlays().await?;
+        let deleting: Vec<i64> = self
+            .inner
+            .stores
+            .config
+            .read(|c| {
+                let mut stmt = c.prepare("SELECT id FROM account WHERE status = 'deleting'")?;
+                let ids = stmt
+                    .query_map([], |r| r.get(0))?
+                    .collect::<tagmail_store::rusqlite::Result<_>>()?;
+                Ok(ids)
+            })
+            .await?;
+        for id in deleting {
+            tracing::info!(account = id, "resuming the removal of an account");
+            let engine = self.clone();
+            self.inner.runtime.spawn(async move {
+                if let Err(e) = engine.remove_account(AccountId(id)).await {
+                    tracing::error!(account = id, error = %e, "cannot remove the account");
+                }
+            });
+        }
         let ids: Vec<i64> = self
             .inner
             .stores
@@ -498,6 +526,15 @@ impl<F: ConnectorFactory> Engine<F> {
     }
 
     fn start_after(&self, id: AccountId, delay: Duration) {
+        if self
+            .inner
+            .removing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&id)
+        {
+            return;
+        }
         let mut accounts = self
             .inner
             .accounts
@@ -643,9 +680,25 @@ impl<F: ConnectorFactory> Engine<F> {
             .collect()
     }
 
+    fn lifecycle(&self, id: AccountId) -> Arc<tokio::sync::Mutex<()>> {
+        self.inner
+            .lifecycle
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(id)
+            .or_default()
+            .clone()
+    }
+
     /// Stops the account's sync task and op executor and waits for both.
     /// Its pending ops stay queued.
     pub async fn stop_account(&self, id: AccountId) {
+        let lock = self.lifecycle(id);
+        let _serial = lock.lock().await;
+        self.stop_unlocked(id).await;
+    }
+
+    async fn stop_unlocked(&self, id: AccountId) {
         let handle = self
             .inner
             .accounts
@@ -667,7 +720,9 @@ impl<F: ConnectorFactory> Engine<F> {
     /// Stops the account and starts it again with its current settings if
     /// it is `active`; a changed password logs in at once.
     pub async fn restart_account(&self, id: AccountId) -> Result<()> {
-        self.stop_account(id).await;
+        let lock = self.lifecycle(id);
+        let _serial = lock.lock().await;
+        self.stop_unlocked(id).await;
         let active = self
             .inner
             .stores
@@ -695,7 +750,29 @@ impl<F: ConnectorFactory> Engine<F> {
     /// blobs, then its config rows, and emits the change events: one bulk
     /// per mailbox, then the account's delete.
     pub async fn remove_account(&self, id: AccountId) -> Result<()> {
-        self.stop_account(id).await;
+        let lock = self.lifecycle(id);
+        let _serial = lock.lock().await;
+        let exists = self
+            .inner
+            .stores
+            .config
+            .read(move |c| {
+                Ok(
+                    c.query_row("SELECT 1 FROM account WHERE id = ?1", [id.0], |_| Ok(()))
+                        .optional()?
+                        .is_some(),
+                )
+            })
+            .await?;
+        if !exists {
+            return Ok(());
+        }
+        self.inner
+            .removing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id);
+        self.stop_unlocked(id).await;
         self.inner.overlays.remove_account(id);
         self.inner
             .labels_dropped
@@ -723,7 +800,13 @@ impl<F: ConnectorFactory> Engine<F> {
             w.emit(Entity::Account, id.0, ChangeOp::Delete, None);
             Ok(())
         })
-        .await
+        .await?;
+        self.inner
+            .removing
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+        Ok(())
     }
 
     /// Re-reads the sender address and probe result of a running account.

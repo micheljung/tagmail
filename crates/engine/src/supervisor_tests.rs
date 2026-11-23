@@ -561,6 +561,78 @@ async fn removing_an_account_purges_its_rows_and_reports_them() {
 }
 
 #[tokio::test]
+async fn start_all_resumes_an_interrupted_removal() {
+    let (a, b) = (seeded("a", 1), seeded("b", 2));
+    let f = fixture(&[account(1, 2, &a), account(2, 2, &b)], config(|_| {})).await;
+    f.engine.start_all().await.unwrap();
+    eventually("both live", || async {
+        f.all_live(1).await && f.all_live(2).await
+    })
+    .await;
+    f.engine.shutdown().await;
+    f.stores
+        .config
+        .write(|tx| {
+            tx.execute(
+                "UPDATE account SET status = 'deleting', secret_ct = x'', secret_nonce = x'' \
+                 WHERE id = 2",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    let again = Engine::with_smtp(
+        f.stores.clone(),
+        f.factory.clone(),
+        config(|_| {}),
+        Arc::new(SmtpCheck),
+    );
+    assert_eq!(again.start_all().await.unwrap(), 1);
+    eventually("removal finished", || async {
+        f.config_count("SELECT count(*) FROM account WHERE id = ?1", 2)
+            .await
+            == 0
+    })
+    .await;
+    assert!(cache_rows(&f, 2).await.iter().all(|(_, n)| *n == 0));
+    assert!(again.runtime_status(AccountId(2)).is_none());
+    eventually("account 1 live", || f.all_live(1)).await;
+    again.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_restart_racing_a_removal_does_not_resurrect_the_account() {
+    let (a, b) = (seeded("a", 1), seeded("b", 3));
+    let f = fixture(&[account(1, 2, &a), account(2, 2, &b)], config(|_| {})).await;
+    f.engine.start_all().await.unwrap();
+    eventually("both live", || async {
+        f.all_live(1).await && f.all_live(2).await
+    })
+    .await;
+    let (restarted, removed) = tokio::join!(
+        f.engine.restart_account(AccountId(2)),
+        f.engine.remove_account(AccountId(2)),
+    );
+    restarted.unwrap();
+    removed.unwrap();
+    assert!(f.engine.runtime_status(AccountId(2)).is_none());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        cache_rows(&f, 2).await.iter().all(|(_, n)| *n == 0),
+        "{:?}",
+        cache_rows(&f, 2).await
+    );
+    assert_eq!(
+        f.config_count("SELECT count(*) FROM account WHERE id = ?1", 2)
+            .await,
+        0
+    );
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn keyword_probe_result_is_persisted_and_shown() {
     for max_connections in [2, 1] {
         let ok = seeded("ok", 1);
