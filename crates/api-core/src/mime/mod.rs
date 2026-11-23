@@ -214,6 +214,7 @@ pub fn body(
         .collect();
     let mut source = String::new();
     let mut kind = BodyKind::None;
+    let mut inline_images = HashMap::new();
     for part in root.html_body() {
         match part.kind() {
             PartKind::Html => {
@@ -235,7 +236,10 @@ pub fn body(
                 }
             }
             PartKind::InlineBinary | PartKind::Binary if sniff_image(&head(&part)).is_some() => {
-                let _ = write!(source, "<img src=\"{}\">", part_url(part.id()));
+                // Signed part URLs only pass the sanitizer as cid: targets.
+                let key = format!("{INLINE_IMAGE_CID}{}", part.id());
+                let _ = write!(source, "<img src=\"cid:{key}\">");
+                inline_images.insert(key, part_url(part.id()));
             }
             _ => {}
         }
@@ -245,10 +249,11 @@ pub fn body(
         .filter(|cid| contains_cid(&source, cid))
         .cloned()
         .collect();
-    let cids = referenced
+    let mut cids: HashMap<String, String> = referenced
         .iter()
         .map(|cid| (cid.clone(), part_url(cid_parts[cid])))
         .collect();
+    cids.extend(inline_images);
     let (html, stats) = sanitize::sanitize(&source, Links { cids, remote });
     Body {
         kind,
@@ -257,6 +262,9 @@ pub fn body(
         cids: referenced,
     }
 }
+
+/// Content-ID prefix standing for an inline image part of the body list.
+const INLINE_IMAGE_CID: &str = "tagmail-inline-part-";
 
 /// Bytes of a body text part decoded for display; the rest is cut.
 pub const BODY_TEXT_CAP: usize = 1 << 20;
@@ -392,6 +400,33 @@ mod tests {
                 email: "ann@example.com".into()
             }]
         );
+    }
+
+    #[test]
+    fn inline_body_images_get_signed_part_urls_and_nothing_else_does() {
+        let raw = concat!(
+            "Subject: inline\r\n",
+            "Content-Type: multipart/mixed; boundary=\"m\"\r\n\r\n",
+            "--m\r\nContent-Type: text/html\r\n\r\n",
+            "<p>see</p><img src=\"/api/parts/forged\"><img src=\"/etc/x.png\">",
+            "<img src=\"//evil.example/x.png\"><img src=\"cid:tagmail-inline-part-9\">\r\n",
+            "--m\r\nContent-Type: image/png\r\nContent-Disposition: inline\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\niVBORw0KGgoAAAANSUhEUg==\r\n",
+            "--m--\r\n",
+        );
+        let msg = parse(raw.as_bytes()).unwrap();
+        let body = body(&msg, &|id| format!("/api/parts/t{id}"), None);
+        let png = parts(&msg, &body.cids)
+            .into_iter()
+            .find(|p| p.content_type == "image/png")
+            .unwrap();
+        let srcs: Vec<&str> = body
+            .html
+            .match_indices("src=\"")
+            .map(|(i, _)| body.html[i + 5..].split('"').next().unwrap())
+            .collect();
+        assert_eq!(srcs, [format!("/api/parts/t{}", png.id)], "{}", body.html);
+        assert!(png.inline);
     }
 
     #[test]
