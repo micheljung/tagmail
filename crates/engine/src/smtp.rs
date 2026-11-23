@@ -56,6 +56,16 @@ pub trait SmtpSender: Send + Sync + 'static {
         recipients: Vec<String>,
         message: PathBuf,
     ) -> BoxFuture<Result<(), SmtpError>>;
+
+    /// Connects and logs in without sending anything.
+    fn check(&self, server: SmtpServer) -> BoxFuture<Result<(), SmtpError>> {
+        let _ = server;
+        Box::pin(async {
+            Err(permanent(
+                "this sender cannot test an SMTP server".to_owned(),
+            ))
+        })
+    }
 }
 
 /// Submits with lettre's connection API so the message streams from its
@@ -121,21 +131,8 @@ fn has_8bit(path: &PathBuf) -> io::Result<bool> {
     }
 }
 
-async fn submit(
-    insecure: bool,
-    server: SmtpServer,
-    envelope: Envelope,
-    path: PathBuf,
-) -> Result<(), SmtpError> {
-    let read = |e: io::Error| permanent(format!("reading the queued message: {e}"));
-    let eight_bit = {
-        let path = path.clone();
-        tokio::task::spawn_blocking(move || has_8bit(&path))
-            .await
-            .map_err(|e| permanent(e.to_string()))?
-            .map_err(read)?
-    };
-    let file = File::open(&path).map_err(read)?;
+/// Connects with the account's TLS mode and authenticates.
+async fn login(insecure: bool, server: SmtpServer) -> Result<AsyncSmtpConnection, SmtpError> {
     let hello = ClientId::default();
     let tls = || {
         TlsParameters::new_rustls(server.host.clone())
@@ -162,6 +159,25 @@ async fn submit(
     conn.auth(&[Mechanism::Plain, Mechanism::Login], &credentials)
         .await
         .map_err(smtp)?;
+    Ok(conn)
+}
+
+async fn submit(
+    insecure: bool,
+    server: SmtpServer,
+    envelope: Envelope,
+    path: PathBuf,
+) -> Result<(), SmtpError> {
+    let read = |e: io::Error| permanent(format!("reading the queued message: {e}"));
+    let eight_bit = {
+        let path = path.clone();
+        tokio::task::spawn_blocking(move || has_8bit(&path))
+            .await
+            .map_err(|e| permanent(e.to_string()))?
+            .map_err(read)?
+    };
+    let file = File::open(&path).map_err(read)?;
+    let mut conn = login(insecure, server).await?;
     let mut parameters = Vec::new();
     let non_ascii = envelope
         .from()
@@ -213,6 +229,15 @@ async fn submit(
 }
 
 impl SmtpSender for LettreSender {
+    fn check(&self, server: SmtpServer) -> BoxFuture<Result<(), SmtpError>> {
+        let insecure = self.insecure_plaintext;
+        Box::pin(async move {
+            let mut conn = login(insecure, server).await?;
+            let _ = conn.quit().await;
+            Ok(())
+        })
+    }
+
     fn send(
         &self,
         server: SmtpServer,

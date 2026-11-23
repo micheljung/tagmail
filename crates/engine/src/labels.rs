@@ -18,7 +18,7 @@ use tagmail_api_core::ops_dto::{
 };
 use tagmail_api_core::writes::normalize_color;
 use tagmail_api_core::{WriteError, WriteResult};
-use tagmail_core::ops::label_spellings;
+use tagmail_core::ops::{LabelArg, label_spellings};
 use tagmail_core::{
     AccountId, DEFAULT_KEYWORD_LIMIT, Keyword, KeywordClass, KeywordSet, LabelKey,
     classify_keyword, encode_label,
@@ -540,6 +540,53 @@ impl<F: ConnectorFactory> Engine<F> {
                 Ok(())
             })
             .await
+    }
+
+    /// Registers a label the executor just added in `account`, e.g. from
+    /// a unified view, when the account's registry lacks it: name and
+    /// color come from another account's entry, else from the keyword.
+    pub(crate) async fn ensure_registered(
+        &self,
+        account: AccountId,
+        label: &LabelArg,
+    ) -> Result<()> {
+        let (registered, cached) = self.find_label(&label.key).await?;
+        if registered.iter().any(|(a, _, _)| *a == account.0) {
+            return Ok(());
+        }
+        let (name, color) = match registered.first() {
+            Some((_, name, color)) => (name.clone(), color.clone()),
+            None => match classify_keyword(&label.keyword) {
+                KeywordClass::Label { name, .. } => (name, None),
+                KeywordClass::Hidden => return Ok(()),
+            },
+        };
+        let (k, n, c) = (label.key.to_string(), name.clone(), color.clone());
+        self.inner
+            .stores
+            .config
+            .write(move |tx| {
+                tx.execute(
+                    "INSERT OR IGNORE INTO label_registry \
+                     (account_id, label_key, display_name, color, sort) VALUES (?1, ?2, ?3, ?4, \
+                     (SELECT coalesce(max(sort), 0) + 1 FROM label_registry WHERE account_id = ?1))",
+                    params![account.0, k, n, c],
+                )?;
+                Ok(())
+            })
+            .await?;
+        let mut accounts: BTreeSet<i64> = registered.iter().map(|(a, _, _)| *a).collect();
+        accounts.extend(cached.iter().map(|(a, _)| *a));
+        accounts.insert(account.0);
+        let dto = LabelDto {
+            key: label.key.to_string(),
+            name,
+            color,
+            account_ids: accounts.into_iter().collect(),
+        };
+        self.label_event(ChangeOp::Upsert, json!(dto)).await?;
+        self.mirror_registry(account);
+        Ok(())
     }
 
     pub(crate) async fn create_label(&self, dto: NewLabelDto) -> WriteResult<LabelDto> {

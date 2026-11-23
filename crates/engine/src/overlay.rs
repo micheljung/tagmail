@@ -51,4 +51,12 @@ impl Overlays {
         self.update(account, |a| removed = a.ops.remove(id));
         removed
     }
+
+    /// Forgets a removed account.
+    pub fn remove_account(&self, account: AccountId) {
+        self.accounts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&account);
+    }
 }

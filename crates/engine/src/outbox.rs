@@ -25,7 +25,7 @@ use tagmail_api_core::compose::ComposeResult;
 use tagmail_api_core::compose_dto::OutboxStateDto;
 use tagmail_api_core::dto::AddressDto;
 use tagmail_core::{AccountId, SpecialUse};
-use tagmail_imap::{Flag, ImapSession, SearchCriteria, SelectOptions, StoreOp, UidSet};
+use tagmail_imap::{Flag, ImapSession, SelectOptions, StoreOp, UidSet};
 use tagmail_store::rusqlite::{self, OptionalExtension, params};
 use tagmail_store::{ChangeOp, Entity, NewChange, changes};
 use tokio::sync::watch;
@@ -37,6 +37,7 @@ use crate::compose::{
 };
 use crate::error::{Error, Result};
 use crate::jobs::Priority;
+use crate::msgid_search;
 use crate::outgoing::Purpose;
 use crate::smtp;
 use crate::supervisor::{ConnectorFactory, Engine};
@@ -76,12 +77,8 @@ async fn find_message<S: ImapSession>(s: &mut S, mailbox: &str, msgid: &str) -> 
         read_only: true,
         qresync: None,
     };
-    s.select(mailbox, read_only).await?;
-    Ok(s.uid_search(SearchCriteria::Header {
-        name: "Message-ID".to_owned(),
-        value: format!("<{msgid}>"),
-    })
-    .await?)
+    let sel = s.select(mailbox, read_only).await?;
+    msgid_search::find(s, &sel, msgid).await
 }
 
 /// APPENDs a draft version to Drafts; the previous version is expunged

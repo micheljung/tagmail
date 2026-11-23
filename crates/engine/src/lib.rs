@@ -17,12 +17,16 @@ mod identities;
 mod jobs;
 mod labels;
 mod message;
+mod msgid_search;
 mod outbox;
 mod outgoing;
 mod overlay;
+mod probe;
 mod raw;
 mod smtp;
 mod supervisor;
+#[cfg(test)]
+mod supervisor_tests;
 mod sync;
 #[cfg(test)]
 mod sync_tests;

@@ -20,7 +20,8 @@ use tagmail_core::{
     SpecialUse, encode_label,
 };
 use tagmail_imap::{
-    FetchSpec, Flag, ImapSession, ModSeq, SearchCriteria, SelectOptions, StoreOp, Uid, UidSet,
+    FetchSpec, Flag, ImapSession, ModSeq, SearchCriteria, SelectOptions, SelectedMailbox, StoreOp,
+    Uid, UidSet,
 };
 use tagmail_store::rusqlite::{self, Connection, OptionalExtension, params};
 use tagmail_store::{CacheDb, ChangeOp, ConfigDb, Entity};
@@ -32,6 +33,7 @@ use crate::error::{Error, Result};
 use crate::jobs::{JobFuture, Priority};
 use crate::labels;
 use crate::message;
+use crate::msgid_search;
 use crate::supervisor::{ConnectorFactory, Engine, Session};
 use crate::sync;
 
@@ -867,6 +869,8 @@ pub(crate) struct Batch {
     pub outcomes: Vec<(String, Outcome)>,
     /// The session broke after `outcomes`; the remaining ops are retried.
     pub aborted: Option<String>,
+    /// A label the server answered OK to but did not keep.
+    pub dropped_label: Option<String>,
 }
 
 async fn run_ops<F: ConnectorFactory>(
@@ -925,7 +929,23 @@ async fn run_ops<F: ConnectorFactory>(
         }
         Err(e) => (Batch::default(), Some(e.to_string())),
     };
-    finish(engine, ctx, account, due, batch, transient).await
+    let added: Vec<LabelArg> = due
+        .iter()
+        .filter(|s| s.op.kind == OpKind::LabelAdd)
+        .filter(|s| {
+            batch
+                .outcomes
+                .iter()
+                .any(|(id, o)| *id == s.op.id && *o == Outcome::Done)
+        })
+        .filter_map(|s| s.op.label.clone())
+        .collect();
+    engine.record_label_health(account, batch.dropped_label.clone(), !added.is_empty());
+    finish(engine, ctx, account, due, batch, transient).await?;
+    for label in added {
+        engine.ensure_registered(account, &label).await?;
+    }
+    Ok(())
 }
 
 /// Records each op's outcome; ops without one get a transient failure.
@@ -1153,10 +1173,14 @@ pub(crate) async fn execute_batch<S: ImapSession>(
                 return Ok(batch);
             }
             Err(OpError::Failed(why)) => why,
-            Err(OpError::KeywordNotPersisted(label)) => format!(
-                "the server did not keep the label \u{201c}{label}\u{201d}; \
-                 it may have reached its limit of labels"
-            ),
+            Err(OpError::KeywordNotPersisted(label)) => {
+                let why = format!(
+                    "the server did not keep the label \u{201c}{label}\u{201d}; \
+                     it may have reached its limit of labels"
+                );
+                batch.dropped_label = Some(label);
+                why
+            }
         };
         tracing::info!(op = op.id, error = why, "op failed");
         batch.outcomes.push((op.id, Outcome::Failed(why)));
@@ -1240,6 +1264,7 @@ async fn locations(ctx: &Ctx, op: &Op) -> Result<Vec<Loc>> {
 /// server, for when the cached UIDs belong to another UIDVALIDITY.
 async fn search_locations<S: ImapSession>(
     s: &mut S,
+    sel: &SelectedMailbox,
     cached: &[Loc],
     mailbox: i64,
 ) -> std::result::Result<Vec<Loc>, OpError> {
@@ -1252,18 +1277,11 @@ async fn search_locations<S: ImapSession>(
         let Ok(email_id) = EmailId::parse(&l.email_id) else {
             continue;
         };
-        let (criteria, verify) = match ops::message_search(&email_id, l.msgid.as_deref()) {
-            MessageSearch::EmailId(id) => (SearchCriteria::EmailId(id), false),
-            MessageSearch::MessageId(m) => (
-                SearchCriteria::Header {
-                    name: "Message-ID".to_owned(),
-                    value: m,
-                },
-                true,
-            ),
+        let (uids, verify) = match ops::message_search(&email_id, l.msgid.as_deref()) {
+            MessageSearch::EmailId(id) => (s.uid_search(SearchCriteria::EmailId(id)).await?, false),
+            MessageSearch::MessageId(m) => (msgid_search::find(s, sel, &m).await?, true),
             MessageSearch::Unsearchable => continue,
         };
-        let uids = s.uid_search(criteria).await?;
         if uids.is_empty() {
             continue;
         }
@@ -1537,7 +1555,7 @@ async fn execute_op<S: ImapSession>(
         let targets = if trusted {
             cached
         } else {
-            search_locations(s, &cached, mailbox).await?
+            search_locations(s, &sel, &cached, mailbox).await?
         };
         if targets.is_empty() {
             continue;

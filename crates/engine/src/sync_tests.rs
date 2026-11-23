@@ -346,6 +346,10 @@ async fn external_changes_are_applied_per_capability_path() {
             .and_then(|c| c.payload.clone())
             .unwrap();
         assert!(last_date.contains("lastDate"), "{last_date}");
+        assert!(
+            last_date.contains(&format!("\"accountId\":{}", t.ctx.account.0)),
+            "{last_date}"
+        );
         assert_eq!(
             *t.feed.subscribe().borrow(),
             t.ctx.cache.head().await.unwrap()

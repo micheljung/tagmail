@@ -1030,6 +1030,51 @@ pub fn purge_orphans(w: &mut W<'_>) -> Result<Vec<String>> {
     Ok(purged)
 }
 
+/// Deletes up to `limit` of the account's messages with their index rows,
+/// locations and labels; once none are left, its threads, labels and
+/// mailboxes, each mailbox reported as one bulk change. Returns the
+/// deleted `email_id`s, for their blobs, and whether the account is gone.
+pub fn purge_account(w: &mut W<'_>, limit: usize) -> Result<(Vec<String>, bool)> {
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = w
+            .conn
+            .prepare_cached("SELECT id, email_id FROM message WHERE account_id = ?1 LIMIT ?2")?;
+        stmt.query_map(
+            params![w.account, i64::try_from(limit).unwrap_or(i64::MAX)],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?
+        .collect::<tagmail_store::rusqlite::Result<_>>()?
+    };
+    let mut purged = Vec::with_capacity(rows.len());
+    for (id, email_id) in rows {
+        fts::delete(w.conn, MessageRowId(id))?;
+        w.conn.execute("DELETE FROM message WHERE id = ?1", [id])?;
+        purged.push(email_id);
+    }
+    if purged.len() == limit {
+        return Ok((purged, false));
+    }
+    for table in ["thread_ref", "label", "thread"] {
+        w.conn.execute(
+            &format!("DELETE FROM {table} WHERE account_id = ?1"),
+            [w.account],
+        )?;
+    }
+    let mailboxes: Vec<i64> = {
+        let mut stmt = w
+            .conn
+            .prepare_cached("SELECT id FROM mailbox WHERE account_id = ?1")?;
+        stmt.query_map([w.account], |r| r.get(0))?
+            .collect::<tagmail_store::rusqlite::Result<_>>()?
+    };
+    w.conn
+        .execute("DELETE FROM mailbox WHERE account_id = ?1", [w.account])?;
+    for mailbox in mailboxes {
+        w.bulk(mailbox);
+    }
+    Ok((purged, true))
+}
+
 /// Records the text blob, fills a missing snippet and re-indexes the
 /// message with its body.
 pub fn set_text(w: &mut W<'_>, message: i64, blob: &str, snippet: &str, body: &str) -> Result<()> {
@@ -1243,6 +1288,7 @@ fn refresh_thread(w: &mut W<'_>, thread: i64, bulk: bool) -> Result<()> {
             thread,
             ChangeOp::Upsert,
             Some(json!({
+                "accountId": w.account,
                 "lastDate": last_date,
                 "mailboxes": after.keys().collect::<Vec<_>>(),
                 "removedFrom": removed,

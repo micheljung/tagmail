@@ -3,7 +3,9 @@
 //! see the changes like a real server's would, per capability set.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use tagmail_core::SpecialUse;
 use tagmail_imap::{
@@ -165,13 +167,55 @@ pub struct FakeServer {
     /// STOREs answer OK but keep no keywords, like Stalwart past its
     /// per-account keyword limit.
     pub drop_keywords: bool,
+    /// SELECT reports whether keywords can be stored.
+    pub keyword_capable: bool,
+    /// UIDs another client changes just before the next STORE, so an
+    /// `UNCHANGEDSINCE` guard reports them MODIFIED; consumed by that STORE.
+    pub change_before_store: Vec<u32>,
+    /// `UID SEARCH HEADER` finds nothing, like Stalwart with more than one
+    /// message in the mailbox.
+    pub header_search_empty: bool,
+    /// Every STORE: mailbox and the UIDs asked for.
+    pub stores: Vec<FetchLog>,
     /// Server annotations; `Some` when METADATA is advertised.
     pub metadata: BTreeMap<String, Vec<u8>>,
+    /// Counts full-window FETCHes in flight, each held for the delay; one
+    /// gauge may be shared by the servers of several accounts.
+    pub full_fetch_gauge: Option<(Arc<Gauge>, Duration)>,
+    /// The password a login must present; any when `None`.
+    pub password: Option<String>,
     pub logins: usize,
     changed: Arc<Notify>,
 }
 
 pub type Shared = Arc<Mutex<FakeServer>>;
+
+/// How many of something run at once, and the most ever.
+#[derive(Debug, Default)]
+pub struct Gauge {
+    now: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+impl Gauge {
+    pub fn peak(&self) -> usize {
+        self.peak.load(Ordering::SeqCst)
+    }
+
+    fn enter(&self) -> GaugeGuard<'_> {
+        let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(now, Ordering::SeqCst);
+        GaugeGuard(self)
+    }
+}
+
+struct GaugeGuard<'a>(&'a Gauge);
+
+impl Drop for GaugeGuard<'_> {
+    fn drop(&mut self) {
+        self.0.now.fetch_sub(1, Ordering::SeqCst);
+    }
+}
 
 pub fn lock(server: &Shared) -> MutexGuard<'_, FakeServer> {
     server.lock().unwrap_or_else(PoisonError::into_inner)
@@ -202,7 +246,13 @@ pub fn server(caps: &[&str]) -> Shared {
         fail_appends: false,
         fail_stores: false,
         drop_keywords: false,
+        keyword_capable: true,
+        change_before_store: Vec::new(),
+        header_search_empty: false,
+        stores: Vec::new(),
         metadata: BTreeMap::new(),
+        full_fetch_gauge: None,
+        password: None,
         logins: 0,
         changed: Arc::new(Notify::new()),
     }))
@@ -346,6 +396,33 @@ impl FakeSession {
         self.selected.clone().ok_or(Error::NoMailboxSelected)
     }
 
+    fn fetch_now(&mut self, uids: &UidSet, spec: &FetchSpec) -> Result<Vec<MessageMeta>> {
+        let name = self.selected_name()?;
+
+        let mut server = self.server();
+        if spec.envelope {
+            let full = server.fetches.iter().filter(|f| f.full).count();
+            if server.fail_after_full_fetches.is_some_and(|n| full >= n) {
+                drop(server);
+                self.broken = true;
+                return Err(closed());
+            }
+        }
+        let mb = server.mailbox(&name).clone();
+        let out: Vec<MessageMeta> = uids
+            .iter()
+            .filter_map(|u| mb.msgs.get(&u.0).map(|m| (u.0, m)))
+            .map(|(uid, m)| self.meta(&mb, uid, m, spec))
+            .collect();
+        let fetched: Vec<u32> = out.iter().filter_map(|m| m.uid.map(|u| u.0)).collect();
+        server.fetches.push(FetchLog {
+            mailbox: name,
+            uids: fetched,
+            full: spec.envelope,
+        });
+        Ok(out)
+    }
+
     fn modseq_for(&self, mb: &FakeMailbox) -> Option<ModSeq> {
         (self.caps.condstore() && !mb.nomodseq).then_some(ModSeq(mb.modseq))
     }
@@ -363,6 +440,19 @@ impl FakeSession {
                 parts: vec![m.part()],
             });
         }
+        if !spec.header_fields.is_empty() {
+            let mut lines = String::new();
+            for field in &spec.header_fields {
+                if field.eq_ignore_ascii_case("REFERENCES") {
+                    let refs: Vec<String> = m.refs.iter().map(|r| format!("<{r}>")).collect();
+                    lines.push_str(&format!("References: {}\r\n", refs.join(" ")));
+                } else if field.eq_ignore_ascii_case("MESSAGE-ID") {
+                    lines.push_str(&format!("Message-ID: <{}>\r\n", m.id));
+                }
+            }
+            lines.push_str("\r\n");
+            meta.header_fields = Some(lines.into_bytes());
+        }
         if full {
             meta.internal_date = Some(m.date);
             meta.size = Some(u32::try_from(m.body.len() + 200).unwrap_or(u32::MAX));
@@ -375,9 +465,6 @@ impl FakeSession {
                 message_id: Some(format!("<{}>", m.id).into_bytes()),
                 ..Envelope::default()
             });
-            let refs: Vec<String> = m.refs.iter().map(|r| format!("<{r}>")).collect();
-            meta.header_fields =
-                Some(format!("References: {}\r\n\r\n", refs.join(" ")).into_bytes());
             meta.snippet = snippet.map(|n| {
                 let n = usize::try_from(n).unwrap_or(usize::MAX).min(m.body.len());
                 m.body.as_bytes()[..n].to_vec()
@@ -455,7 +542,7 @@ impl ImapSession for FakeSession {
             nomodseq: mb.nomodseq,
             flags: Vec::new(),
             permanent_flags: Vec::new(),
-            keyword_capable: true,
+            keyword_capable: server.keyword_capable,
             vanished: UidSet::new(),
             changed: Vec::new(),
         };
@@ -496,13 +583,14 @@ impl ImapSession for FakeSession {
     async fn uid_search(&mut self, criteria: SearchCriteria) -> Result<UidSet> {
         let name = self.selected_name()?;
         let mut server = self.server();
+        let header_search_empty = server.header_search_empty;
         let msgs = &server.mailbox(&name).msgs;
         let matches = |m: &FakeMsg| match &criteria {
             SearchCriteria::All => true,
             SearchCriteria::Deleted => m.flags.contains(&Flag::Deleted),
             SearchCriteria::Header { name, value } => {
                 assert!(name.eq_ignore_ascii_case("Message-ID"), "header {name}");
-                value.contains(&m.id)
+                !header_search_empty && value.contains(&m.id)
             }
             SearchCriteria::EmailId(_) => panic!("EMAILID search"),
         };
@@ -514,29 +602,16 @@ impl ImapSession for FakeSession {
     }
 
     async fn fetch(&mut self, uids: &UidSet, spec: &FetchSpec) -> Result<Vec<MessageMeta>> {
-        let name = self.selected_name()?;
-        let mut server = self.server();
-        if spec.envelope {
-            let full = server.fetches.iter().filter(|f| f.full).count();
-            if server.fail_after_full_fetches.is_some_and(|n| full >= n) {
-                drop(server);
-                self.broken = true;
-                return Err(closed());
-            }
-        }
-        let mb = server.mailbox(&name).clone();
-        let out: Vec<MessageMeta> = uids
-            .iter()
-            .filter_map(|u| mb.msgs.get(&u.0).map(|m| (u.0, m)))
-            .map(|(uid, m)| self.meta(&mb, uid, m, spec))
-            .collect();
-        let fetched: Vec<u32> = out.iter().filter_map(|m| m.uid.map(|u| u.0)).collect();
-        server.fetches.push(FetchLog {
-            mailbox: name,
-            uids: fetched,
-            full: spec.envelope,
-        });
-        Ok(out)
+        let gauge = spec
+            .envelope
+            .then(|| self.server().full_fetch_gauge.clone())
+            .flatten();
+        let Some((gauge, delay)) = gauge else {
+            return self.fetch_now(uids, spec);
+        };
+        let _busy = gauge.enter();
+        tokio::time::sleep(delay).await;
+        self.fetch_now(uids, spec)
     }
 
     async fn fetch_changed_since(
@@ -619,6 +694,15 @@ impl ImapSession for FakeSession {
             .copied()
             .filter(|u| uids.contains(Uid(*u)))
             .collect();
+        server.stores.push(FetchLog {
+            mailbox: name.clone(),
+            uids: targets.clone(),
+            full: false,
+        });
+        for uid in std::mem::take(&mut server.change_before_store) {
+            let flags = server.mailbox(&name).msgs[&uid].flags.clone();
+            server.set_flags(&name, uid, &flags);
+        }
         let mut modified = UidSet::new();
         let mut touched = false;
         for uid in targets {
@@ -837,5 +921,55 @@ impl ConnectorFactory for FakeConnector {
 
     fn connector(&self, _account: &AccountSettings) -> FakeConnector {
         self.clone()
+    }
+}
+
+/// One fake server per account, by IMAP username; a login must present
+/// the server's [`FakeServer::password`] when it has one.
+#[derive(Clone, Default)]
+pub struct FakeAccounts(pub Arc<Mutex<BTreeMap<String, Shared>>>);
+
+impl FakeAccounts {
+    pub fn add(&self, username: &str, server: Shared) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(username.to_owned(), server);
+    }
+}
+
+pub struct FakeLogin {
+    connector: FakeConnector,
+    password: String,
+}
+
+impl Connector for FakeLogin {
+    type Session = FakeSession;
+
+    async fn connect(&self) -> Result<FakeSession> {
+        let expected = lock(&self.connector.0).password.clone();
+        if expected.is_some_and(|p| p != self.password) {
+            lock(&self.connector.0).logins += 1;
+            return Err(Error::Auth("wrong password".into()));
+        }
+        self.connector.connect().await
+    }
+}
+
+impl ConnectorFactory for FakeAccounts {
+    type Connector = FakeLogin;
+
+    fn connector(&self, account: &AccountSettings) -> FakeLogin {
+        let server = self
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&account.username)
+            .cloned()
+            .expect("a fake server for the account");
+        FakeLogin {
+            connector: FakeConnector(server),
+            password: account.password.expose().to_owned(),
+        }
     }
 }

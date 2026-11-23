@@ -18,9 +18,14 @@ pub const LABEL_PREFIX: &str = "$label_";
 /// Server-safe encoded keyword length unless a server overrides it.
 pub const DEFAULT_KEYWORD_LIMIT: usize = 200;
 
-/// Keywords of other clients and of RFC 5788 / IANA that are never shown as
-/// labels. Compared case-insensitively.
+/// Set and cleared again by the engine to learn whether a server keeps
+/// custom keywords.
+pub const PROBE_KEYWORD: &str = "$tagmail_probe";
+
+/// Keywords of other clients and of RFC 5788 / IANA, and the probe keyword,
+/// that are never shown as labels. Compared case-insensitively.
 const HIDDEN_KEYWORDS: &[&str] = &[
+    PROBE_KEYWORD,
     "$Forwarded",
     "$MDNSent",
     "$Junk",

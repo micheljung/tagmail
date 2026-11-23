@@ -103,7 +103,7 @@ fn below(set: &UidSet, bound: u32) -> UidSet {
 }
 
 /// UIDNEXT, or one past the highest UID when the server omitted it.
-async fn uid_next<S: ImapSession>(s: &mut S, sel: &SelectedMailbox) -> Result<u32> {
+pub(crate) async fn uid_next<S: ImapSession>(s: &mut S, sel: &SelectedMailbox) -> Result<u32> {
     if let Some(next) = sel.uid_next {
         return Ok(next.0);
     }
@@ -374,6 +374,16 @@ async fn incremental<S: ImapSession>(
     Ok(Progress::Done)
 }
 
+/// Whether a message outside `skip` still lacks its text.
+pub async fn text_pending(ctx: &Ctx, skip: &BTreeSet<i64>) -> Result<bool> {
+    let account = ctx.account.0;
+    let exclude = skip.clone();
+    let pending = ctx
+        .read(move |c| cache::pending_text(c, account, 1, &exclude))
+        .await?;
+    Ok(!pending.is_empty())
+}
+
 /// Fetches the text of up to `limit` messages that lack it, newest first:
 /// stores the text blob, fills missing snippets and indexes the body.
 /// Messages that cannot be fetched now are added to `skip`. Returns how
@@ -465,21 +475,28 @@ pub async fn text_pass<S: ImapSession>(
 pub async fn purge(ctx: &Ctx) -> Result<usize> {
     let purged = ctx.write(cache::purge_orphans).await?;
     let n = purged.len();
-    if n > 0 {
-        let blobs = ctx.blobs.clone();
-        let account = ctx.account;
-        tokio::task::spawn_blocking(move || {
-            for email_id in purged {
-                if let Ok(id) = tagmail_core::EmailId::parse(&email_id) {
-                    let key = BlobKey::for_message(account, &id);
-                    blobs.delete_text(&key)?;
-                    blobs.delete_raw(&key)?;
-                }
-            }
-            Ok::<_, tagmail_store::Error>(())
-        })
-        .await
-        .map_err(|_| tagmail_store::Error::Closed)??;
-    }
+    delete_blobs(ctx, purged).await?;
     Ok(n)
+}
+
+/// Deletes the text and raw blobs of the account's messages `email_ids`.
+pub(crate) async fn delete_blobs(ctx: &Ctx, email_ids: Vec<String>) -> Result<()> {
+    if email_ids.is_empty() {
+        return Ok(());
+    }
+    let blobs = ctx.blobs.clone();
+    let account = ctx.account;
+    tokio::task::spawn_blocking(move || {
+        for email_id in email_ids {
+            if let Ok(id) = tagmail_core::EmailId::parse(&email_id) {
+                let key = BlobKey::for_message(account, &id);
+                blobs.delete_text(&key)?;
+                blobs.delete_raw(&key)?;
+            }
+        }
+        Ok::<_, tagmail_store::Error>(())
+    })
+    .await
+    .map_err(|_| tagmail_store::Error::Closed)??;
+    Ok(())
 }

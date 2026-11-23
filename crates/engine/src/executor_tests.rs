@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tagmail_api_core::ops_dto::{LabelPatchDto, NewLabelDto, OpStatusDto};
-use tagmail_api_core::{ChangeFeed, OpRequest, Submitted};
+use tagmail_api_core::{AccountRegistry, ChangeFeed, OpRequest, Submitted};
 use tagmail_core::ops::OpKind;
 use tagmail_core::{AccountId, ChangeCursor, MailboxRowId, SpecialUse, ThreadId};
 use tagmail_imap::{Flag, PoolConfig};
@@ -217,6 +217,12 @@ impl Fixture {
             .collect();
         out.sort();
         out
+    }
+
+    fn labels_degraded(&self) -> bool {
+        self.engine
+            .runtime_status(AccountId(1))
+            .is_some_and(|s| s.degraded.contains(&"labels_degraded".to_owned()))
     }
 
     async fn status(&self, op_id: &str) -> OpStatusDto {
@@ -434,6 +440,7 @@ async fn label_the_server_did_not_keep_fails_visibly() {
         f.labels_of("k1@x").await.is_empty()
     })
     .await;
+    assert!(f.labels_degraded(), "the account shows it");
 
     lock(&srv).drop_keywords = false;
     f.engine.retry_failed_op("kw-1".into()).await.unwrap();
@@ -442,7 +449,51 @@ async fn label_the_server_did_not_keep_fails_visibly() {
     })
     .await;
     assert_eq!(lock(&srv).flags_of("INBOX", uid), ["$label_Work"]);
+    assert!(!f.labels_degraded(), "cleared by a label the server kept");
     f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn store_retries_only_the_message_changed_concurrently() {
+    let srv = server(CAPS);
+    let first = lock(&srv).append("INBOX", msg("m1@x", "Plan", 1_790_000_000));
+    let second = lock(&srv).append(
+        "INBOX",
+        msg("m2@x", "Re: Plan", 1_790_000_100).refs(&["m1@x"]),
+    );
+    let f = fixture(&srv).await;
+    f.engine.start_all().await.unwrap();
+    eventually("initial sync", || f.all_live()).await;
+    let thread = f.thread_of("m1@x").await;
+    assert_eq!(f.thread_of("m2@x").await, thread);
+    {
+        let mut s = lock(&srv);
+        s.change_before_store = vec![second];
+        s.stores.clear();
+        s.fetches.clear();
+    }
+
+    created(
+        f.engine
+            .queue_op(op("mod-1", OpKind::Star, thread))
+            .await
+            .unwrap(),
+    );
+    eventually("op done", || async {
+        f.status("mod-1").await == OpStatusDto::Done
+    })
+    .await;
+    f.engine.shutdown().await;
+    let mut s = lock(&srv);
+    let stores: Vec<Vec<u32>> = s.stores.iter().map(|l| l.uids.clone()).collect();
+    assert_eq!(stores, [vec![first, second], vec![second]]);
+    assert!(
+        s.fetches.iter().any(|l| !l.full && l.uids == [second]),
+        "the changed message re-read alone: {:?}",
+        s.fetches
+    );
+    assert_eq!(s.flags_of("INBOX", first), ["\\Flagged"]);
+    assert_eq!(s.flags_of("INBOX", second), ["\\Flagged"]);
 }
 
 #[tokio::test]
@@ -681,73 +732,76 @@ async fn overlay_is_rebuilt_over_resynced_rows_and_echoes_do_not_clobber_it() {
 
 #[tokio::test]
 async fn ops_find_messages_again_after_uidvalidity_changes() {
-    let srv = server(CAPS);
-    lock(&srv).add_mailbox("Projects", None, 500);
-    lock(&srv).append("INBOX", msg("u1@x", "Renumbered", 1_790_000_000));
-    lock(&srv).append("INBOX", msg("u0@x", "Other", 1_790_000_000));
-    let f = fixture(&srv).await;
-    f.engine.start_all().await.unwrap();
-    eventually("initial sync", || f.all_live()).await;
-    let thread = f.thread_of("u1@x").await;
-    let projects = f.mailbox_id("Projects").await;
-    f.engine.shutdown().await;
-    created(
-        f.engine
-            .queue_op(op("rr-1", OpKind::Star, thread))
-            .await
-            .unwrap(),
-    );
-    let mut mv = op("rr-2", OpKind::Move, thread);
-    mv.mailbox = Some(MailboxRowId(projects));
-    created(f.engine.queue_op(mv).await.unwrap());
+    for header_search_empty in [false, true] {
+        let srv = server(CAPS);
+        lock(&srv).add_mailbox("Projects", None, 500);
+        lock(&srv).append("INBOX", msg("u1@x", "Renumbered", 1_790_000_000));
+        lock(&srv).append("INBOX", msg("u0@x", "Other", 1_790_000_000));
+        let f = fixture(&srv).await;
+        f.engine.start_all().await.unwrap();
+        eventually("initial sync", || f.all_live()).await;
+        let thread = f.thread_of("u1@x").await;
+        let projects = f.mailbox_id("Projects").await;
+        f.engine.shutdown().await;
+        created(
+            f.engine
+                .queue_op(op("rr-1", OpKind::Star, thread))
+                .await
+                .unwrap(),
+        );
+        let mut mv = op("rr-2", OpKind::Move, thread);
+        mv.mailbox = Some(MailboxRowId(projects));
+        created(f.engine.queue_op(mv).await.unwrap());
 
-    {
+        {
+            let mut s = lock(&srv);
+            let readded = s.expunge("INBOX", 1);
+            s.append("INBOX", readded);
+            s.renumber("INBOX");
+            assert_eq!(
+                s.uid_of("INBOX", "u0@x"),
+                Some(1),
+                "the stale UID is another message"
+            );
+            s.mailbox("Projects").name = "Work/Projects".into();
+            s.header_search_empty = header_search_empty;
+        }
+        let ctx = f.engine.ctx(AccountId(1));
+        let ops = f
+            .stores
+            .config
+            .read(|c| {
+                Ok(crate::executor::load_pending(c)?
+                    .into_iter()
+                    .map(|s| s.op)
+                    .collect::<Vec<_>>())
+            })
+            .await
+            .unwrap();
+        let mut session = FakeConnector(srv.clone()).session();
+        let batch = crate::executor::execute_batch(&mut session, &ctx, ops, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            batch.outcomes,
+            [
+                ("rr-1".to_owned(), crate::executor::Outcome::Done),
+                ("rr-2".to_owned(), crate::executor::Outcome::Done),
+            ]
+        );
         let mut s = lock(&srv);
-        let readded = s.expunge("INBOX", 1);
-        s.append("INBOX", readded);
-        s.renumber("INBOX");
+        let moved = s
+            .uid_of("Work/Projects", "u1@x")
+            .expect("moved to the renamed folder");
+        assert_eq!(s.flags_of("Work/Projects", moved), ["\\Flagged"]);
+        assert!(s.uid_of("INBOX", "u1@x").is_none());
         assert_eq!(
             s.uid_of("INBOX", "u0@x"),
             Some(1),
-            "the stale UID is another message"
+            "the other message untouched"
         );
-        s.mailbox("Projects").name = "Work/Projects".into();
+        assert!(s.flags_of("INBOX", 1).is_empty());
     }
-    let ctx = f.engine.ctx(AccountId(1));
-    let ops = f
-        .stores
-        .config
-        .read(|c| {
-            Ok(crate::executor::load_pending(c)?
-                .into_iter()
-                .map(|s| s.op)
-                .collect::<Vec<_>>())
-        })
-        .await
-        .unwrap();
-    let mut session = FakeConnector(srv.clone()).session();
-    let batch = crate::executor::execute_batch(&mut session, &ctx, ops, None)
-        .await
-        .unwrap();
-    assert_eq!(
-        batch.outcomes,
-        [
-            ("rr-1".to_owned(), crate::executor::Outcome::Done),
-            ("rr-2".to_owned(), crate::executor::Outcome::Done),
-        ]
-    );
-    let mut s = lock(&srv);
-    let moved = s
-        .uid_of("Work/Projects", "u1@x")
-        .expect("moved to the renamed folder");
-    assert_eq!(s.flags_of("Work/Projects", moved), ["\\Flagged"]);
-    assert!(s.uid_of("INBOX", "u1@x").is_none());
-    assert_eq!(
-        s.uid_of("INBOX", "u0@x"),
-        Some(1),
-        "the other message untouched"
-    );
-    assert!(s.flags_of("INBOX", 1).is_empty());
 }
 
 #[tokio::test]
