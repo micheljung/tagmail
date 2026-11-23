@@ -22,7 +22,7 @@ use crate::store::{
 };
 use crate::writes::WriteService;
 
-pub const API_VERSION: ApiVersion = ApiVersion { major: 1, minor: 0 };
+pub const API_VERSION: ApiVersion = ApiVersion { major: 1, minor: 1 };
 pub const MIN_CLIENT: ApiVersion = ApiVersion { major: 1, minor: 0 };
 
 /// Thread rows per `/api/threads` request (plan §3.11 pages of 100).
@@ -39,6 +39,9 @@ const MAX_HOST_LABEL_LEN: usize = 63;
 
 /// Response header carrying the `<epoch>:<seq>` state of a binary index.
 pub const CURSOR_HEADER: &str = "x-tagmail-cursor";
+/// Set to `offline` by the desktop on a search it could only answer from
+/// the local window.
+pub const PARTIAL_HEADER: &str = "x-tagmail-partial";
 pub const JSON: &str = "application/json";
 pub const OCTET_STREAM: &str = "application/octet-stream";
 /// CSP of every API response; the SPA's own CSP is [`APP_CSP`].
@@ -120,6 +123,12 @@ impl Response {
             .find(|(n, _)| n.eq_ignore_ascii_case(name))
             .map(|(_, v)| v.as_str())
     }
+}
+
+/// 503 of the desktop for what needs the server; the SPA shows `message`
+/// verbatim.
+pub fn offline_error(message: impl Into<String>) -> Response {
+    Response::error(503, "offline", message)
 }
 
 pub fn gone_error() -> ApiErrorDto {

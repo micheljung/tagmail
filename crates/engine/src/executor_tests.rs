@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tagmail_api_core::ops_dto::{LabelPatchDto, NewLabelDto, OpStatusDto};
-use tagmail_api_core::{AccountRegistry, ChangeFeed, OpRequest, Submitted};
+use tagmail_api_core::{AccountRegistry, ChangeFeed, OpMailbox, OpRequest, Submitted};
 use tagmail_core::ops::OpKind;
 use tagmail_core::{AccountId, ChangeCursor, MailboxRowId, SpecialUse, ThreadId};
 use tagmail_imap::{Flag, PoolConfig};
@@ -624,7 +624,7 @@ async fn move_and_trash_fail_visibly_without_a_destination() {
 
     let projects = f.mailbox_id("Projects").await;
     let mut mv = op("move-1", OpKind::Move, thread);
-    mv.mailbox = Some(MailboxRowId(projects));
+    mv.mailbox = Some(OpMailbox::Id(MailboxRowId(projects)));
     created(f.engine.queue_op(mv).await.unwrap());
     assert_eq!(f.lists(thread).await, ["Projects"]);
     eventually("moved", || async {
@@ -750,7 +750,7 @@ async fn ops_find_messages_again_after_uidvalidity_changes() {
                 .unwrap(),
         );
         let mut mv = op("rr-2", OpKind::Move, thread);
-        mv.mailbox = Some(MailboxRowId(projects));
+        mv.mailbox = Some(OpMailbox::Id(MailboxRowId(projects)));
         created(f.engine.queue_op(mv).await.unwrap());
 
         {

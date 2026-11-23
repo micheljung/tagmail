@@ -19,4 +19,5 @@ pub use credentials::{CredentialError, MasterKey, Sealed, Vault};
 pub use db::{CacheDb, ConfigDb, Database};
 pub use error::{Error, Result};
 pub use fts::FtsDocument;
+pub use migrations::{CACHE_SCHEMA, CONFIG_SCHEMA};
 pub use rusqlite;

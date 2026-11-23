@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use tagmail_store::rusqlite::{self, Connection};
-use tagmail_store::{CacheDb, ConfigDb, Database, Error};
+use tagmail_store::{CACHE_SCHEMA, CONFIG_SCHEMA, CacheDb, ConfigDb, Database, Error};
 use tempfile::TempDir;
 
 #[test]
@@ -52,7 +52,7 @@ async fn config_migrations_apply_to_fresh_db_and_reopen() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("config.db");
     let db = ConfigDb::open(&path).unwrap();
-    assert_eq!(user_version(&db).await, 6);
+    assert_eq!(user_version(&db).await, CONFIG_SCHEMA);
     assert_eq!(
         tables(&db).await,
         [
@@ -80,7 +80,7 @@ async fn config_migrations_apply_to_fresh_db_and_reopen() {
     db.close().await.unwrap();
 
     let db = ConfigDb::open(&path).unwrap();
-    assert_eq!(user_version(&db).await, 6);
+    assert_eq!(user_version(&db).await, CONFIG_SCHEMA);
     db.close().await.unwrap();
 }
 
@@ -90,7 +90,7 @@ async fn cache_migrations_apply_to_fresh_db_and_reopen() {
     let path = dir.path().join("cache.db");
     let db = CacheDb::open(&path).unwrap();
     let epoch = db.epoch();
-    assert_eq!(user_version(&db).await, 3);
+    assert_eq!(user_version(&db).await, CACHE_SCHEMA);
     assert_eq!(
         tables(&db).await,
         [
@@ -127,7 +127,7 @@ async fn newer_schema_is_refused() {
         ConfigDb::open(&path),
         Err(Error::SchemaTooNew {
             found: 99,
-            supported: 6
+            supported: CONFIG_SCHEMA
         })
     ));
 }
@@ -222,6 +222,7 @@ fn cache_references(conn: &Connection) -> rusqlite::Result<Vec<String>> {
         "cred_id",
         "reply_to_email_id",
         "draft_id",
+        "client_id",
     ];
     let mut found = Vec::new();
     for table in table_names(conn)? {
@@ -335,7 +336,7 @@ async fn config_v3_upgrades_to_outbox_files() {
         .unwrap();
     }
     let db = ConfigDb::open(&path).unwrap();
-    assert_eq!(user_version(&db).await, 6);
+    assert_eq!(user_version(&db).await, CONFIG_SCHEMA);
     let row = db
         .read(|c| {
             Ok(c.query_row(
@@ -401,7 +402,7 @@ async fn config_v4_upgrades_with_duplicate_identities() {
         .unwrap();
     }
     let db = ConfigDb::open(&path).unwrap();
-    assert_eq!(user_version(&db).await, 6);
+    assert_eq!(user_version(&db).await, CONFIG_SCHEMA);
     let (identities, emails) = db
         .read(|c| {
             let mut stmt =
@@ -462,7 +463,7 @@ async fn config_v5_gives_identityless_accounts_a_default() {
         tx.commit().unwrap();
     }
     let db = ConfigDb::open(&path).unwrap();
-    assert_eq!(user_version(&db).await, 6);
+    assert_eq!(user_version(&db).await, CONFIG_SCHEMA);
     let identities = db
         .read(|c| {
             let mut stmt = c.prepare(
@@ -480,6 +481,59 @@ async fn config_v5_gives_identityless_accounts_a_default() {
             (2, "alias@example.com".to_owned(), 1),
         ]
     );
+    integrity(&db).await;
+    db.close().await.unwrap();
+}
+
+#[test]
+fn schema_constants_count_the_migrations() {
+    assert_eq!((CONFIG_SCHEMA, CACHE_SCHEMA), (7, 3));
+}
+
+#[tokio::test]
+async fn config_v7_makes_draft_client_ids_unique() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("config.db");
+    {
+        let conn = open_raw(&path);
+        for sql in [
+            include_str!("../migrations/config/V1__init.sql"),
+            include_str!("../migrations/config/V2__image_sender.sql"),
+            include_str!("../migrations/config/V3__compose.sql"),
+            include_str!("../migrations/config/V4__outbox_file.sql"),
+            include_str!("../migrations/config/V5__multi_account.sql"),
+            include_str!("../migrations/config/V6__default_identity.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 6).unwrap();
+        conn.execute_batch(
+            "INSERT INTO account (id, name, imap_host, imap_port, imap_tls, smtp_host, \
+             smtp_port, smtp_tls, username, secret_ct, secret_nonce) VALUES \
+             (1, 'a', 'i', 993, 'tls', 's', 465, 'tls', 'u', x'00', x'00'); \
+             INSERT INTO draft (id, account_id, msgid_hdr, content) VALUES (1, 1, 'm1', '{}');",
+        )
+        .unwrap();
+    }
+    let db = ConfigDb::open(&path).unwrap();
+    assert_eq!(user_version(&db).await, 7);
+    let insert = |id: i64, client_id: Option<&'static str>| {
+        db.write(move |c| {
+            Ok(c.execute(
+                "INSERT INTO draft (id, account_id, msgid_hdr, content, client_id) \
+                 VALUES (?1, 1, 'm', '{}', ?2)",
+                rusqlite::params![id, client_id],
+            )?)
+        })
+    };
+    insert(2, None).await.unwrap();
+    insert(3, Some("c-1")).await.unwrap();
+    assert!(insert(4, Some("c-1")).await.is_err(), "duplicate client id");
+    let legacy: Option<String> = db
+        .read(|c| Ok(c.query_row("SELECT client_id FROM draft WHERE id = 1", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(legacy, None);
     integrity(&db).await;
     db.close().await.unwrap();
 }

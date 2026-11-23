@@ -42,6 +42,7 @@ fn draft(identity: i64, subject: &str, reply: Option<&str>) -> DraftInput {
         }),
         forward_of: None,
         save_now: false,
+        client_id: None,
         forwarded: vec![],
     }
 }

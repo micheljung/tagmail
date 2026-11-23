@@ -99,7 +99,7 @@ pub struct PairingExchangeDto {
 }
 
 /// The device token is shown once; send it as `Authorization: Bearer`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DeviceTokenDto {
     pub device_id: i64,

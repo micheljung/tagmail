@@ -186,6 +186,7 @@ fn input(identity: i64, subject: &str) -> DraftInput {
         reply: None,
         forward_of: None,
         save_now: false,
+        client_id: None,
         forwarded: vec![],
     }
 }

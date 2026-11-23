@@ -13,8 +13,8 @@ use crate::dto::{
     LabelImportResultDto,
 };
 use crate::ops_dto::{
-    LabelChangeDto, LabelJobDto, LabelJobsDto, LabelPatchDto, NewLabelDto, NewOpDto, OpDto,
-    OpStatusDto, OpsDto,
+    LabelChangeDto, LabelJobDto, LabelJobsDto, LabelPatchDto, MailboxRefDto, NewLabelDto, NewOpDto,
+    OpDto, OpStatusDto, OpsDto,
 };
 use crate::store::{BoxFuture, Store, StoreError};
 
@@ -29,6 +29,8 @@ pub const MAX_IMPORTED_LABELS: usize = 1000;
 pub const MAX_OP_ID_LEN: usize = 64;
 /// Targets per op.
 pub const MAX_OP_TARGETS: usize = 10_000;
+/// IMAP mailbox names are short in practice; this only bounds the input.
+pub const MAX_MAILBOX_NAME_LEN: usize = 1000;
 
 /// A validated `POST /api/ops`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,7 +40,14 @@ pub struct OpRequest {
     pub thread_ids: Vec<ThreadId>,
     pub email_ids: Vec<String>,
     pub label: Option<String>,
-    pub mailbox: Option<MailboxRowId>,
+    pub mailbox: Option<OpMailbox>,
+}
+
+/// Destination of a `move`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpMailbox {
+    Id(MailboxRowId),
+    Ref(MailboxRefDto),
 }
 
 /// Whether `submit_op` created the op or found it already submitted.
@@ -176,18 +185,28 @@ pub(crate) fn op_request(dto: NewOpDto) -> Result<OpRequest, Response> {
         (true, Some(l)) if l.trim().is_empty() => return invalid("label", "empty label"),
         _ => {}
     }
-    match (kind.needs_mailbox(), dto.mailbox_id) {
-        (true, None) => return invalid("mailboxId", "required for move"),
-        (false, Some(_)) => return invalid("mailboxId", "only for move"),
-        _ => {}
-    }
+    let mailbox = match (kind.needs_mailbox(), dto.mailbox_id, dto.mailbox) {
+        (false, None, None) => None,
+        (false, _, _) => return invalid("mailbox", "only for move"),
+        (true, Some(id), None) => Some(OpMailbox::Id(MailboxRowId(id))),
+        (true, None, Some(r)) => {
+            if r.name.trim().is_empty() || r.name.len() > MAX_MAILBOX_NAME_LEN {
+                return invalid("mailbox", "name the mailbox");
+            }
+            Some(OpMailbox::Ref(r))
+        }
+        (true, None, None) => return invalid("mailbox", "required for move"),
+        (true, Some(_), Some(_)) => {
+            return invalid("mailbox", "give mailboxId or mailbox, not both");
+        }
+    };
     Ok(OpRequest {
         op_id: dto.op_id,
         kind,
         thread_ids: thread_ids.into_iter().map(ThreadId).collect(),
         email_ids,
         label: dto.label,
-        mailbox: dto.mailbox_id.map(MailboxRowId),
+        mailbox,
     })
 }
 
@@ -437,6 +456,7 @@ mod tests {
             email_ids: None,
             label: None,
             mailbox_id: None,
+            mailbox: None,
         }
     }
 
@@ -467,8 +487,38 @@ mod tests {
         assert_eq!(field(op_request(extra).unwrap_err()), "label");
         assert_eq!(
             field(op_request(dto(OpKindDto::Move)).unwrap_err()),
-            "mailboxId"
+            "mailbox"
         );
+        let archive = MailboxRefDto {
+            name: "Archive".into(),
+            special_use: Some(crate::dto::SpecialUseDto::Archive),
+            uidvalidity: None,
+        };
+        let mut both = dto(OpKindDto::Move);
+        both.mailbox_id = Some(4);
+        both.mailbox = Some(archive.clone());
+        assert_eq!(field(op_request(both).unwrap_err()), "mailbox");
+        let mut by_ref = dto(OpKindDto::Move);
+        by_ref.mailbox = Some(archive.clone());
+        assert_eq!(
+            op_request(by_ref).unwrap().mailbox,
+            Some(OpMailbox::Ref(archive.clone()))
+        );
+        let mut by_id = dto(OpKindDto::Move);
+        by_id.mailbox_id = Some(4);
+        assert_eq!(
+            op_request(by_id).unwrap().mailbox,
+            Some(OpMailbox::Id(MailboxRowId(4)))
+        );
+        let mut nameless = dto(OpKindDto::Move);
+        nameless.mailbox = Some(MailboxRefDto {
+            name: " ".into(),
+            ..archive.clone()
+        });
+        assert_eq!(field(op_request(nameless).unwrap_err()), "mailbox");
+        let mut stray = dto(OpKindDto::Star);
+        stray.mailbox = Some(archive);
+        assert_eq!(field(op_request(stray).unwrap_err()), "mailbox");
         let mut email = dto(OpKindDto::Star);
         email.email_ids = Some(vec!["nope".into()]);
         assert_eq!(field(op_request(email).unwrap_err()), "emailIds");

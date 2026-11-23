@@ -108,6 +108,8 @@ pub struct DraftInput {
     /// Save to IMAP Drafts now instead of after the idle debounce.
     pub save_now: bool,
     /// Create only.
+    pub client_id: Option<String>,
+    /// Create only.
     pub forwarded: Vec<ForwardedPart>,
 }
 
@@ -272,6 +274,12 @@ pub fn validate_draft(dto: DraftInputDto) -> ComposeResult<DraftInput> {
         .ok_or_else(|| invalid("attachmentIds", "attachment ids are numbers"))?;
     attachment_ids.sort_unstable();
     attachment_ids.dedup();
+    if dto.client_id.as_deref().is_some_and(|id| !valid_op_id(id)) {
+        return Err(invalid(
+            "clientId",
+            "1 to 64 characters of letters, digits, '-' or '_'",
+        ));
+    }
     Ok(DraftInput {
         identity_id: dto.identity_id,
         to,
@@ -285,6 +293,7 @@ pub fn validate_draft(dto: DraftInputDto) -> ComposeResult<DraftInput> {
         forward_of: None,
         save_now: dto.save_now.unwrap_or(false),
         forwarded: Vec::new(),
+        client_id: dto.client_id,
     })
 }
 
@@ -913,6 +922,7 @@ mod tests {
             forward_of: None,
             attachment_ids: vec!["3".into(), "1".into(), "3".into()],
             save_now: None,
+            client_id: None,
         };
         let ok = validate_draft(dto(" ann@x.example ", " Hi ")).unwrap();
         assert_eq!(ok.to[0].email, "ann@x.example");
@@ -928,6 +938,21 @@ mod tests {
                 "{bad}"
             );
         }
+        let mut keyed = dto("a@x", "s");
+        keyed.client_id = Some("9f1c-77".into());
+        assert_eq!(
+            validate_draft(keyed).unwrap().client_id.as_deref(),
+            Some("9f1c-77")
+        );
+        let mut spaced = dto("a@x", "s");
+        spaced.client_id = Some("a b".into());
+        assert!(matches!(
+            validate_draft(spaced),
+            Err(ComposeError::Invalid {
+                field: "clientId",
+                ..
+            })
+        ));
         assert!(matches!(
             validate_draft(dto("a@x", "line\r\nBcc: evil@x")),
             Err(ComposeError::Invalid {

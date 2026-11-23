@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use tagmail_core::ops::{OpKind, OpState};
 use ts_rs::TS;
 
-use crate::dto::LabelDto;
+use crate::dto::{LabelDto, SpecialUseDto};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 pub enum OpKindDto {
@@ -18,7 +18,7 @@ pub enum OpKindDto {
     /// Back to INBOX.
     #[serde(rename = "unarchive")]
     Unarchive,
-    /// To `mailboxId`.
+    /// To `mailboxId` or `mailbox`.
     #[serde(rename = "move")]
     Move,
     #[serde(rename = "markRead")]
@@ -94,10 +94,31 @@ pub struct NewOpDto {
     #[serde(default)]
     #[ts(optional)]
     pub label: Option<String>,
-    /// Destination mailbox id, for `move`.
+    /// Destination mailbox id, for `move`; exclusive with `mailbox`.
     #[serde(default)]
     #[ts(optional)]
     pub mailbox_id: Option<i64>,
+    /// Destination of `move` by name, for clients whose mailbox ids may be
+    /// stale (the desktop replica); exclusive with `mailboxId`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub mailbox: Option<MailboxRefDto>,
+}
+
+/// A mailbox by what survives a cache rebuild, resolved by special-use,
+/// then name, then a unique `uidvalidity`. An op whose mailbox does not
+/// resolve fails with "mailbox not found".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MailboxRefDto {
+    /// IMAP name as stored by the server (modified UTF-7).
+    pub name: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub special_use: Option<SpecialUseDto>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub uidvalidity: Option<u32>,
 }
 
 /// `running` ops report `pending`.
@@ -121,7 +142,7 @@ impl From<OpState> for OpStatusDto {
 
 /// One op; also the payload of `op` change events (whose id is the op's
 /// numeric `seq`). Done ops are not listed but stay readable by id.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct OpDto {
     pub op_id: String,
@@ -144,7 +165,7 @@ pub struct OpDto {
 }
 
 /// `GET /api/ops?status=`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct OpsDto {
     pub ops: Vec<OpDto>,

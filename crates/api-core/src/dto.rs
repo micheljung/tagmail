@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiVersion {
     pub major: u32,
@@ -14,7 +14,7 @@ pub struct ApiVersion {
 
 /// `GET /api/version`. A client whose own API version is older than
 /// `minClient` must update before it syncs.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct VersionDto {
     pub api: ApiVersion,
@@ -104,7 +104,7 @@ pub struct ThreadsDto {
     pub threads: Vec<ThreadRowDto>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum EntityDto {
     /// `upsert` carries an `AccountDto`; `delete` (no payload) once the
@@ -125,7 +125,7 @@ pub enum EntityDto {
     LabelJob,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum ChangeOpDto {
     Upsert,
@@ -140,7 +140,7 @@ pub enum ChangeOpDto {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangeDto {
     pub seq: i64,
@@ -153,7 +153,7 @@ pub struct ChangeDto {
 }
 
 /// `GET /api/changes?since=` and the data of an SSE `changes` event.
-#[derive(Debug, Clone, PartialEq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ChangesDto {
     pub changes: Vec<ChangeDto>,
@@ -249,7 +249,7 @@ impl std::fmt::Debug for NewAccountDto {
 }
 
 /// An account as returned by the API; never carries the secret.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountDto {
     pub id: i64,
@@ -268,7 +268,7 @@ pub struct AccountDto {
 }
 
 /// `GET /api/accounts`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountsDto {
     pub accounts: Vec<AccountDto>,
@@ -333,7 +333,7 @@ pub struct AccountTestDto {
 }
 
 /// Body of every error response and of the SSE `reset` event.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ApiErrorDto {
     /// Stable machine-readable code, e.g. `gone`, `invalid`, `not_found`.
@@ -344,7 +344,7 @@ pub struct ApiErrorDto {
     pub field: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum SpecialUseDto {
     All,
@@ -355,6 +355,22 @@ pub enum SpecialUseDto {
     Junk,
     Sent,
     Trash,
+}
+
+impl From<SpecialUseDto> for tagmail_core::SpecialUse {
+    fn from(u: SpecialUseDto) -> tagmail_core::SpecialUse {
+        use tagmail_core::SpecialUse;
+        match u {
+            SpecialUseDto::All => SpecialUse::All,
+            SpecialUseDto::Archive => SpecialUse::Archive,
+            SpecialUseDto::Drafts => SpecialUse::Drafts,
+            SpecialUseDto::Flagged => SpecialUse::Flagged,
+            SpecialUseDto::Important => SpecialUse::Important,
+            SpecialUseDto::Junk => SpecialUse::Junk,
+            SpecialUseDto::Sent => SpecialUse::Sent,
+            SpecialUseDto::Trash => SpecialUse::Trash,
+        }
+    }
 }
 
 /// `GET /api/mailboxes`, one entry per mailbox of every account. The view

@@ -9,12 +9,18 @@ pub(crate) const CONFIG: &[&str] = &[
     include_str!("../migrations/config/V4__outbox_file.sql"),
     include_str!("../migrations/config/V5__multi_account.sql"),
     include_str!("../migrations/config/V6__default_identity.sql"),
+    include_str!("../migrations/config/V7__draft_client_id.sql"),
 ];
 pub(crate) const CACHE: &[&str] = &[
     include_str!("../migrations/cache/V1__init.sql"),
     include_str!("../migrations/cache/V2__pending_text_index.sql"),
     include_str!("../migrations/cache/V3__op_overlay.sql"),
 ];
+
+/// `user_version` of an up-to-date `config.db`.
+pub const CONFIG_SCHEMA: i64 = CONFIG.len() as i64;
+/// `user_version` of an up-to-date `cache.db`.
+pub const CACHE_SCHEMA: i64 = CACHE.len() as i64;
 
 /// Applies the migrations after `PRAGMA user_version`, each in its own
 /// transaction together with the version bump.

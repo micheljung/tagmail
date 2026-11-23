@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use tagmail_api_core::ops_dto::{OpDto, OpKindDto, OpStatusDto};
-use tagmail_api_core::{OpRequest, Submitted, WriteError, WriteResult};
+use tagmail_api_core::{OpMailbox, OpRequest, Submitted, WriteError, WriteResult};
 use tagmail_core::ops::{
     self, ARCHIVE_NAME, ArchiveMode, Candidate, Destination, LabelArg, MailboxView, MessageSearch,
     Op, OpKind, OpState, Role,
@@ -438,7 +438,13 @@ impl<F: ConnectorFactory> Engine<F> {
             None => None,
         };
         let mailbox = match req.mailbox {
-            Some(id) => Some(self.mailbox_ref(account, id.0).await?),
+            Some(OpMailbox::Id(id)) => Some(self.mailbox_ref(account, id.0).await?),
+            // IMAP never assigns uidvalidity 0, so an unknown one matches nothing.
+            Some(OpMailbox::Ref(r)) => Some(MailboxRef {
+                name: r.name,
+                special_use: r.special_use.map(Into::into),
+                uidvalidity: r.uidvalidity.unwrap_or(0),
+            }),
             None => None,
         };
         let stored = Stored {

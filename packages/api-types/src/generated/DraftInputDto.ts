@@ -17,4 +17,9 @@ html?: string, inReplyTo?: number, forwardOf?: number, attachmentIds: Array<stri
  * Save to the IMAP Drafts mailbox now (compose closed) rather than
  * after 30 s without edits.
  */
-saveNow?: boolean, };
+saveNow?: boolean, 
+/**
+ * Client-generated id (create only): a create repeating it updates
+ * and returns that draft instead of making a second one.
+ */
+clientId?: string, };

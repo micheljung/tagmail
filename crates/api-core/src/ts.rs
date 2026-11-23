@@ -9,6 +9,7 @@ use ts_rs::{Config, ExportError, TS};
 
 use crate::auth_dto::*;
 use crate::compose_dto::*;
+use crate::desktop_dto::*;
 use crate::dto::*;
 use crate::ops_dto::*;
 
@@ -115,6 +116,14 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<SendDto>(&cfg, &mut files)?;
     file::<SendStatusDto>(&cfg, &mut files)?;
     file::<LabelChangeDto>(&cfg, &mut files)?;
+    file::<DesktopPairDto>(&cfg, &mut files)?;
+    file::<DesktopPhaseDto>(&cfg, &mut files)?;
+    file::<DesktopSettingsDto>(&cfg, &mut files)?;
+    file::<DesktopSettingsPatchDto>(&cfg, &mut files)?;
+    file::<DesktopStatusDto>(&cfg, &mut files)?;
+    file::<MailboxRefDto>(&cfg, &mut files)?;
+    file::<MailtoDto>(&cfg, &mut files)?;
+    file::<UpdateRequiredDto>(&cfg, &mut files)?;
     file::<LabelJobDto>(&cfg, &mut files)?;
     file::<LabelJobKindDto>(&cfg, &mut files)?;
     file::<LabelJobStatusDto>(&cfg, &mut files)?;

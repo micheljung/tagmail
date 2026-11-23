@@ -405,7 +405,7 @@ async fn version_reports_api_and_min_client() {
     let resp = get(&api, "/api/version").await;
     assert_eq!(resp.status, 200);
     let body = json_body(&resp);
-    assert_eq!(body["api"], json!({ "major": 1, "minor": 0 }));
+    assert_eq!(body["api"], json!({ "major": 1, "minor": 1 }));
     assert_eq!(body["minClient"], json!({ "major": 1, "minor": 0 }));
     assert_eq!(resp.header("x-content-type-options"), Some("nosniff"));
     assert!(resp.header("content-security-policy").is_some());
@@ -1064,7 +1064,7 @@ async fn write_routes_reach_the_write_service() {
     .await;
     assert_eq!(
         (bad.status, json_body(&bad)["field"].clone()),
-        (422, json!("mailboxId"))
+        (422, json!("mailbox"))
     );
     let unknown = post(
         &api,

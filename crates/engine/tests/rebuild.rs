@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use common::*;
 use tagmail_api_core::ops_dto::{LabelPatchDto, NewLabelDto, OpStatusDto};
-use tagmail_api_core::{OpRequest, WriteService};
+use tagmail_api_core::{OpMailbox, OpRequest, WriteService};
 use tagmail_core::ops::OpKind;
 use tagmail_core::{MailboxRowId, ThreadId};
 use tagmail_imap::*;
@@ -209,7 +209,7 @@ async fn wipe_resync_keeps_labels_and_applies_queued_ops() {
         .await
         .unwrap();
     let mut doomed_move = op("rb-move", OpKind::Move, t_orphan);
-    doomed_move.mailbox = Some(MailboxRowId(doomed));
+    doomed_move.mailbox = Some(OpMailbox::Id(MailboxRowId(doomed)));
     queued.engine.submit_op(doomed_move).await.unwrap();
     let job = queued
         .engine

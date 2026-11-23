@@ -8,7 +8,7 @@ use crate::dto::AddressDto;
 
 /// A From identity. Every account has at least one and exactly one
 /// default.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct IdentityDto {
     pub id: i64,
@@ -21,7 +21,7 @@ pub struct IdentityDto {
 }
 
 /// `GET /api/identities`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct IdentitiesDto {
     pub identities: Vec<IdentityDto>,
@@ -61,7 +61,7 @@ pub struct IdentityPatchDto {
 /// An uploaded attachment: `POST /api/attachments` as
 /// `multipart/form-data` with one field `file` (its file name and type
 /// are taken from the part), at most 25 MB.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachmentDto {
     pub id: String,
@@ -107,9 +107,14 @@ pub struct DraftInputDto {
     #[serde(default)]
     #[ts(optional)]
     pub save_now: Option<bool>,
+    /// Client-generated id (create only): a create repeating it updates
+    /// and returns that draft instead of making a second one.
+    #[serde(default)]
+    #[ts(optional)]
+    pub client_id: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DraftDto {
     pub id: i64,
@@ -145,7 +150,7 @@ pub struct SendDto {
     pub draft_id: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum OutboxStateDto {
     Queued,
@@ -158,7 +163,7 @@ pub enum OutboxStateDto {
     Failed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SendStatusDto {
     pub op_id: String,
@@ -167,7 +172,7 @@ pub struct SendStatusDto {
 
 /// An outbox item; sent items stay listed for an hour. Changes arrive as
 /// change events of entity `outbox` with payload `{status, error?}`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct OutboxItemDto {
     pub id: i64,
@@ -185,7 +190,7 @@ pub struct OutboxItemDto {
     pub sent_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct OutboxDto {
     pub items: Vec<OutboxItemDto>,

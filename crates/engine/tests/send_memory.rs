@@ -371,6 +371,7 @@ async fn a_30_mb_message_streams_through_draft_send_and_sent() {
             reply: None,
             forward_of: None,
             save_now: true,
+            client_id: None,
             forwarded: vec![],
         })
         .await
