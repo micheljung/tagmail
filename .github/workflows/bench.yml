@@ -22,6 +22,7 @@ env:
   SEED_DIR: ${{ github.workspace }}/../tagmail-seed
   SEED2: 2
   SEED2_DIR: ${{ github.workspace }}/../tagmail-seed2
+  HUGE_MB: 25
 
 jobs:
   changes:
@@ -54,28 +55,39 @@ jobs:
           contains(github.event.pull_request.labels.*.name, 'perf')))
       )
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.100"
       - uses: Swatinem/rust-cache@v2
-      - name: Restore seeded Maildir
+      - name: Restore seeded Maildir (user1, with the huge message)
         id: seed-cache
         uses: actions/cache@v6
         with:
           path: ${{ env.SEED_DIR }}
-          key: seed-${{ hashFiles('xtask/src/seed.rs') }}-${{ env.SEED }}-${{ env.SEED_COUNT }}-${{ env.SEED_AVG_KB }}
-      - name: Seed Maildir
+          key: seed-${{ hashFiles('xtask/src/seed.rs') }}-${{ env.SEED }}-${{ env.SEED_COUNT }}-${{ env.SEED_AVG_KB }}-huge${{ env.HUGE_MB }}
+      - name: Seed Maildir (user1, with the huge message)
         if: steps.seed-cache.outputs.cache-hit != 'true'
-        run: cargo xtask seed --seed "$SEED" --count "$SEED_COUNT" --avg-kb "$SEED_AVG_KB" --out "$SEED_DIR"
+        run: cargo xtask seed --seed "$SEED" --count "$SEED_COUNT" --avg-kb "$SEED_AVG_KB" --huge-mb "$HUGE_MB" --out "$SEED_DIR"
+      - name: Restore seeded Maildir (user2)
+        id: seed2-cache
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.SEED2_DIR }}
+          key: seed-${{ hashFiles('xtask/src/seed.rs') }}-${{ env.SEED2 }}-${{ env.SEED_COUNT }}-${{ env.SEED_AVG_KB }}
+      - name: Seed Maildir (user2)
+        if: steps.seed2-cache.outputs.cache-hit != 'true'
+        run: cargo xtask seed --seed "$SEED2" --count "$SEED_COUNT" --avg-kb "$SEED_AVG_KB" --out "$SEED2_DIR"
       - name: Start Dovecot
         run: cargo xtask dovecot up
-      - name: Load seed into Dovecot
-        run: cargo xtask dovecot load --from "$SEED_DIR"
+      - name: Load seeds into Dovecot
+        run: |
+          cargo xtask dovecot load --from "$SEED_DIR" --user user1
+          cargo xtask dovecot load --from "$SEED2_DIR" --user user2
       - name: Idle RSS gate
-        run: cargo xtask bench-rss --out target/bench-rss.json
+        run: cargo xtask bench-rss --account user1:pass1 --account user2:pass2 --out target/bench-rss.json
       - name: Upload result
         if: always()
         uses: actions/upload-artifact@v6

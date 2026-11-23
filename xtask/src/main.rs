@@ -30,6 +30,10 @@ enum Command {
         avg_kb: u64,
         #[arg(long, default_value_t = 1)]
         seed: u64,
+        /// Also append one message of this many megabytes (10^6 bytes) to
+        /// INBOX, with the subject `tagmail-bench-huge`
+        #[arg(long)]
+        huge_mb: Option<u64>,
         /// Output directory; must not exist or be empty
         #[arg(long)]
         out: PathBuf,
@@ -44,7 +48,8 @@ enum Command {
         #[command(subcommand)]
         action: ServerAction,
     },
-    /// Idle RSS gate (AC 9): sync the seeded `user1` with tagmail-server,
+    /// Idle RSS gate (AC 9): sync the seeded accounts with tagmail-server,
+    /// connect an event stream, search, render the `--huge-mb` message,
     /// idle, and fail if VmRSS over the last window exceeds the limit
     BenchRss {
         /// Prebuilt tagmail-server; built in release mode when absent
@@ -52,10 +57,9 @@ enum Command {
         server: Option<PathBuf>,
         #[arg(long, default_value = "127.0.0.1:10143")]
         imap: SocketAddr,
-        #[arg(long, default_value = "user1")]
-        user: String,
-        #[arg(long, default_value = "pass1")]
-        password: String,
+        /// `user:password`, once per account
+        #[arg(long = "account", default_values = ["user1:pass1", "user2:pass2"])]
+        accounts: Vec<String>,
         /// Idle period after the sync
         #[arg(long, default_value_t = 300)]
         idle_secs: u64,
@@ -171,6 +175,7 @@ fn main() -> Result<()> {
             count,
             avg_kb,
             seed,
+            huge_mb,
             out,
         } => {
             let started = std::time::Instant::now();
@@ -178,6 +183,7 @@ fn main() -> Result<()> {
                 count,
                 avg_kb,
                 seed,
+                huge_mb,
                 out: out.clone(),
             })?;
             println!(
@@ -213,8 +219,7 @@ fn main() -> Result<()> {
         Command::BenchRss {
             server,
             imap,
-            user,
-            password,
+            accounts,
             idle_secs,
             window_secs,
             limit_mb,
@@ -228,8 +233,7 @@ fn main() -> Result<()> {
             let opts = bench_rss::Options {
                 server,
                 imap,
-                user,
-                password,
+                accounts: parse_accounts(&accounts)?,
                 idle: Duration::from_secs(idle_secs),
                 window: Duration::from_secs(window_secs),
                 limit_mb,
@@ -252,13 +256,7 @@ fn main() -> Result<()> {
             out,
             in_dovecot_network,
         } => {
-            let accounts = accounts
-                .iter()
-                .map(|a| match a.split_once(':') {
-                    Some((user, password)) => Ok((user.to_owned(), password.to_owned())),
-                    None => bail!("--account {a}: expected user:password"),
-                })
-                .collect::<Result<Vec<_>>>()?;
+            let accounts = parse_accounts(&accounts)?;
             if warm_runs == 0 {
                 bail!("--warm-runs must be at least 1");
             }
@@ -317,4 +315,14 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn parse_accounts(accounts: &[String]) -> Result<Vec<(String, String)>> {
+    accounts
+        .iter()
+        .map(|a| match a.split_once(':') {
+            Some((user, password)) => Ok((user.to_owned(), password.to_owned())),
+            None => bail!("--account {a}: expected user:password"),
+        })
+        .collect()
 }

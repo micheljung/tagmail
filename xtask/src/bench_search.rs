@@ -16,11 +16,10 @@ use serde_json::{Value, json};
 use tagmail_api_core::id_index;
 
 use crate::bench_rss::{
-    self, Running, add_account, check_alive, in_work_dir, round, server_binary, sleep_until_next,
-    spawn_server, step_summary, stop,
+    self, Running, add_account, check_alive, in_work_dir, round, server_binary, spawn_server,
+    step_summary, stop, wait_for_sync,
 };
 
-const PROGRESS_INTERVAL: Duration = Duration::from_secs(30);
 /// Rows fetched with the index, as the list's first page.
 const FIRST_PAGE: usize = 50;
 const PERCENTILE: f64 = 0.95;
@@ -98,9 +97,9 @@ pub fn run_local(opts: &Options) -> Result<()> {
     in_work_dir("bench-search", |work| bench(opts, &server, work))
 }
 
-struct Sample {
-    hits: usize,
-    elapsed: Duration,
+pub(crate) struct Sample {
+    pub(crate) hits: usize,
+    pub(crate) elapsed: Duration,
 }
 
 fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
@@ -108,7 +107,7 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
     for (user, password) in &opts.accounts {
         add_account(&running, opts.imap, user, password)?;
     }
-    let sync = wait_for_sync(&mut running, opts)?;
+    let sync = wait_for_sync(&mut running, opts.accounts.len(), opts.sync_timeout)?.duration;
     println!(
         "synced in {:.0} s; restarting for the cold run",
         sync.as_secs_f64()
@@ -204,18 +203,9 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
 }
 
 /// One query: the view index, then the first page of rows.
-fn search(running: &Running, query: &str) -> Result<Sample> {
-    let view = format!("search:{query}");
-    let path = format!(
-        "/api/views/{}/index",
-        utf8_percent_encode(&view, NON_ALPHANUMERIC)
-    );
+pub(crate) fn search(running: &Running, query: &str) -> Result<Sample> {
     let started = Instant::now();
-    let (status, body) = running.get(&path)?;
-    if status != 200 {
-        bail!("{query}: {status} {}", String::from_utf8_lossy(&body));
-    }
-    let ids = id_index::decode(&body)?;
+    let ids = search_ids(running, query)?;
     if !ids.is_empty() {
         let page: Vec<String> = ids.iter().take(FIRST_PAGE).map(i64::to_string).collect();
         let (status, body) = running.get(&format!("/api/threads?ids={}", page.join(",")))?;
@@ -229,62 +219,18 @@ fn search(running: &Running, query: &str) -> Result<Sample> {
     })
 }
 
-fn accounts(running: &Running) -> Result<Vec<Value>> {
-    let (status, body) = running.get("/api/status")?;
+/// Thread ids matching `query`, newest first.
+pub(crate) fn search_ids(running: &Running, query: &str) -> Result<Vec<i64>> {
+    let view = format!("search:{query}");
+    let path = format!(
+        "/api/views/{}/index",
+        utf8_percent_encode(&view, NON_ALPHANUMERIC)
+    );
+    let (status, body) = running.get(&path)?;
     if status != 200 {
-        bail!(
-            "GET /api/status: {status} {}",
-            String::from_utf8_lossy(&body)
-        );
+        bail!("{query}: {status} {}", String::from_utf8_lossy(&body));
     }
-    let body: Value = serde_json::from_slice(&body)?;
-    Ok(body["accounts"].as_array().cloned().unwrap_or_default())
-}
-
-fn wait_for_sync(running: &mut Running, opts: &Options) -> Result<Duration> {
-    let started = Instant::now();
-    let mut next_progress = started;
-    let mut tick = started;
-    loop {
-        check_alive(running)?;
-        let accounts = accounts(running)?;
-        let done = accounts.len() == opts.accounts.len()
-            && accounts
-                .iter()
-                .all(|a| a["phase"] == "live" && a["textPending"] == 0);
-        if done {
-            return Ok(started.elapsed());
-        }
-        if tick >= next_progress {
-            let states: Vec<String> = accounts
-                .iter()
-                .map(|a| {
-                    format!(
-                        "{} {} {}/{} text pending {}{}",
-                        a["name"],
-                        a["phase"],
-                        a["mailboxesLive"],
-                        a["mailboxesTotal"],
-                        a["textPending"],
-                        a["lastError"]
-                            .as_str()
-                            .map(|e| format!(" last error: {e}"))
-                            .unwrap_or_default()
-                    )
-                })
-                .collect();
-            println!(
-                "  {:>5}s {}",
-                started.elapsed().as_secs(),
-                states.join("; ")
-            );
-            next_progress += PROGRESS_INTERVAL;
-        }
-        if started.elapsed() > opts.sync_timeout {
-            bail!("sync not finished after {:?}", opts.sync_timeout);
-        }
-        tick = sleep_until_next(tick);
-    }
+    Ok(id_index::decode(&body)?)
 }
 
 /// Threads of the whole corpus.
@@ -302,7 +248,7 @@ fn percentile(samples: &[Duration], p: f64) -> Duration {
     sorted[rank - 1]
 }
 
-fn ms(d: Duration) -> f64 {
+pub(crate) fn ms(d: Duration) -> f64 {
     (d.as_secs_f64() * 10_000.0).round() / 10.0
 }
 

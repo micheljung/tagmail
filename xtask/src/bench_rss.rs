@@ -1,5 +1,7 @@
-//! AC 9 RSS gate (plan §3.13, §6 row 9), M1 scenario: one account with the
-//! 100k seed in `user1` is synced to the end of the text pass, then the
+//! AC 9 RSS gate (plan §3.13, §6 row 9), full scenario: two accounts with
+//! the 100k seeds in `user1` and `user2` are synced to the end of the text
+//! pass; then one SSE client connects and stays connected, one search runs
+//! and the 25 MB message of `seed --huge-mb` is opened and rendered, and the
 //! server idles. VmRSS is sampled every second; the gate is the maximum over
 //! the last `window` of the idle period.
 
@@ -8,14 +10,22 @@ use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
+use crate::bench_search::{self, ms};
 use crate::harness::{self, output, run};
+use crate::seed::HUGE_SUBJECT;
 
-const SCENARIO: &str = "m1: 1 account x 100k messages synced, then idle";
+const SCENARIO: &str =
+    "m4: 2 accounts x 100k synced, 1 SSE client, 1 search, 1 25 MB message rendered, then idle";
+/// A broad query of `xtask seed`'s vocabulary.
+const SEARCH_QUERY: &str = "meeting";
+/// Sender addresses of the test users: `<user>@tagmail.test`.
+const EMAIL_DOMAIN: &str = "tagmail.test";
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(30);
 const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,8 +46,8 @@ pub struct Options {
     /// Prebuilt `tagmail-server`; built in release mode when absent.
     pub server: Option<PathBuf>,
     pub imap: SocketAddr,
-    pub user: String,
-    pub password: String,
+    /// `user:password` per account.
+    pub accounts: Vec<(String, String)>,
     pub idle: Duration,
     pub window: Duration,
     /// Gate in decimal megabytes (10^6 bytes), as the spec's "64 MB".
@@ -50,11 +60,15 @@ pub struct Options {
 /// Dovecot container's network namespace, for Docker daemons whose
 /// published ports are not reachable from here.
 pub fn run_in_dovecot_network(opts: &Options) -> Result<()> {
+    let accounts: Vec<String> = opts
+        .accounts
+        .iter()
+        .map(|(u, p)| format!("--account {u}:{p}"))
+        .collect();
     let args = format!(
-        "--user {user} --password {password} --idle-secs {idle} --window-secs {window} \
+        "{accounts} --idle-secs {idle} --window-secs {window} \
          --limit-mb {limit} --sync-timeout-secs {timeout}",
-        user = opts.user,
-        password = opts.password,
+        accounts = accounts.join(" "),
         idle = opts.idle.as_secs(),
         window = opts.window.as_secs(),
         limit = opts.limit_mb,
@@ -308,6 +322,7 @@ pub(crate) fn add_account(
         "smtpTls": "starttls",
         "username": user,
         "password": password,
+        "email": format!("{user}@{EMAIL_DOMAIN}"),
     });
     let (status, body) = http(
         running.addr,
@@ -325,49 +340,31 @@ pub(crate) fn add_account(
 fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
     let mut running = spawn_server(server, work)?;
     let pid = running.child.id();
-    add_account(&running, opts.imap, &opts.user, &opts.password)?;
+    for (user, password) in &opts.accounts {
+        add_account(&running, opts.imap, user, password)?;
+    }
 
-    println!("syncing {} at {}", opts.user, opts.imap);
-    let sync_started = Instant::now();
-    let mut sync_peak_kib = 0;
-    let mut next_progress = sync_started;
-    let mut tick = Instant::now();
-    let settled = loop {
-        check_alive(&mut running)?;
-        sync_peak_kib = sync_peak_kib.max(proc_status_kib(pid, "VmRSS")?);
-        let account = account_status(&running)?;
-        let live = account["phase"] == "live";
-        let pending = account["textPending"].as_u64().unwrap_or(u64::MAX);
-        if live && pending == 0 {
-            break account;
-        }
-        if tick >= next_progress {
-            println!(
-                "  {:>5}s phase {} mailboxes {}/{} text pending {pending} rss {:.1} MiB{}",
-                sync_started.elapsed().as_secs(),
-                account["phase"],
-                account["mailboxesLive"],
-                account["mailboxesTotal"],
-                mib(proc_status_kib(pid, "VmRSS")?),
-                account["lastError"]
-                    .as_str()
-                    .map(|e| format!(" last error: {e}"))
-                    .unwrap_or_default(),
-            );
-            next_progress += PROGRESS_INTERVAL;
-        }
-        if sync_started.elapsed() > opts.sync_timeout {
-            bail!("sync not finished after {:?}: {account}", opts.sync_timeout);
-        }
-        tick = sleep_until_next(tick);
-    };
-    let sync_duration = sync_started.elapsed();
+    println!("syncing {} accounts at {}", opts.accounts.len(), opts.imap);
+    let sync = wait_for_sync(&mut running, opts.accounts.len(), opts.sync_timeout)?;
     println!(
-        "synced in {:.0} s (peak RSS {:.1} MiB); idling {} s",
-        sync_duration.as_secs_f64(),
-        mib(sync_peak_kib),
+        "synced in {:.0} s (peak RSS {:.1} MiB)",
+        sync.duration.as_secs_f64(),
+        mib(sync.peak_kib)
+    );
+
+    let sse = SseClient::open(&running)?;
+    let searched = bench_search::search(&running, SEARCH_QUERY)?;
+    let render = render_huge(&running)?;
+    println!(
+        "SSE connected; search {SEARCH_QUERY:?}: {} threads in {:.1} ms; \
+         {HUGE_SUBJECT} opened and rendered ({} bytes of HTML) in {:.1} ms; idling {} s",
+        searched.hits,
+        ms(searched.elapsed),
+        render.html_bytes,
+        ms(render.elapsed),
         opts.idle.as_secs()
     );
+    let (sync_duration, sync_peak_kib) = (sync.duration, sync.peak_kib);
 
     let idle_started = Instant::now();
     let mut samples = Vec::new();
@@ -389,8 +386,11 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
         .max()
         .context("no RSS samples in the gate window")?;
     let idle_max_kib = samples.iter().map(|(_, kib)| *kib).max().unwrap_or(0);
-    let pass = window_max_kib * BYTES_PER_KIB <= opts.limit_mb * BYTES_PER_MB as u64;
+    let sse_connected = !sse.reader.is_finished();
+    let pass =
+        sse_connected && window_max_kib * BYTES_PER_KIB <= opts.limit_mb * BYTES_PER_MB as u64;
     stop(&mut running);
+    let sse_bytes = sse.reader.join().unwrap_or(0);
 
     let result = json!({
         "scenario": SCENARIO,
@@ -405,7 +405,15 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
         "syncSeconds": round(sync_duration.as_secs_f64()),
         "idleSeconds": opts.idle.as_secs(),
         "windowSeconds": opts.window.as_secs(),
-        "mailboxes": settled["mailboxesTotal"],
+        "accounts": opts.accounts.len(),
+        "mailboxes": sync.mailboxes,
+        "sseConnected": sse_connected,
+        "sseBytes": sse_bytes,
+        "searchQuery": SEARCH_QUERY,
+        "searchThreads": searched.hits,
+        "searchMs": ms(searched.elapsed),
+        "renderMs": ms(render.elapsed),
+        "renderedHtmlBytes": render.html_bytes,
         "idleRssKib": samples.iter().map(|(_, kib)| kib).collect::<Vec<_>>(),
     });
     if let Some(dir) = opts.out.parent() {
@@ -417,7 +425,7 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
     println!(
         "{SCENARIO}\n  idle max RSS, last {} s: {:.1} MB = {:.1} MiB (limit {} MB = {limit_mib:.2} MiB) \
          {verdict}\n  idle max RSS: {:.1} MiB\n  peak RSS during sync: {:.1} MiB (not gated)\n  \
-         VmHWM: {:.1} MiB\n  sync: {:.0} s",
+         VmHWM: {:.1} MiB\n  sync: {:.0} s\n  SSE connected through the idle period: {sse_connected}",
         opts.window.as_secs(),
         mb(window_max_kib),
         mib(window_max_kib),
@@ -435,7 +443,10 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
          | Idle max RSS | {:.1} MiB |\n\
          | Peak RSS during sync (not gated) | {:.1} MiB |\n\
          | VmHWM | {:.1} MiB |\n\
-         | Sync | {:.0} s |\n",
+         | Sync | {:.0} s |\n\
+         | Search `{SEARCH_QUERY}` | {:.1} ms |\n\
+         | Open + render {HUGE_SUBJECT} | {:.1} ms |\n\
+         | SSE connected through idle | {sse_connected} |\n",
         opts.window.as_secs(),
         mb(window_max_kib),
         mib(window_max_kib),
@@ -444,21 +455,169 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
         mib(sync_peak_kib),
         mib(hwm_kib),
         sync_duration.as_secs_f64(),
+        ms(searched.elapsed),
+        ms(render.elapsed),
     ))?;
+    if !sse_connected {
+        bail!("the SSE stream closed during the idle period");
+    }
     if !pass {
         bail!("idle RSS gate failed");
     }
     Ok(())
 }
 
-fn account_status(running: &Running) -> Result<Value> {
+pub(crate) struct Synced {
+    pub(crate) duration: Duration,
+    pub(crate) peak_kib: u64,
+    pub(crate) mailboxes: u64,
+}
+
+fn accounts(running: &Running) -> Result<Vec<Value>> {
     let (status, body) = running.get("/api/status")?;
-    let body = String::from_utf8_lossy(&body);
     if status != 200 {
-        bail!("GET /api/status: {status} {body}");
+        bail!(
+            "GET /api/status: {status} {}",
+            String::from_utf8_lossy(&body)
+        );
     }
-    let body: Value = serde_json::from_str(&body)?;
-    Ok(body["accounts"][0].clone())
+    let body: Value = serde_json::from_slice(&body)?;
+    Ok(body["accounts"].as_array().cloned().unwrap_or_default())
+}
+
+/// Waits until all `expected` accounts are live with the text pass done.
+pub(crate) fn wait_for_sync(
+    running: &mut Running,
+    expected: usize,
+    timeout: Duration,
+) -> Result<Synced> {
+    let pid = running.child.id();
+    let started = Instant::now();
+    let mut peak_kib = 0;
+    let mut next_progress = started;
+    let mut tick = started;
+    loop {
+        check_alive(running)?;
+        peak_kib = peak_kib.max(proc_status_kib(pid, "VmRSS")?);
+        let accounts = accounts(running)?;
+        let done = accounts.len() == expected
+            && accounts
+                .iter()
+                .all(|a| a["phase"] == "live" && a["textPending"] == 0);
+        if done {
+            return Ok(Synced {
+                duration: started.elapsed(),
+                peak_kib,
+                mailboxes: accounts
+                    .iter()
+                    .filter_map(|a| a["mailboxesTotal"].as_u64())
+                    .sum(),
+            });
+        }
+        if tick >= next_progress {
+            let states: Vec<String> = accounts
+                .iter()
+                .map(|a| {
+                    format!(
+                        "{} {} {}/{} text pending {}{}",
+                        a["name"],
+                        a["phase"],
+                        a["mailboxesLive"],
+                        a["mailboxesTotal"],
+                        a["textPending"],
+                        a["lastError"]
+                            .as_str()
+                            .map(|e| format!(" last error: {e}"))
+                            .unwrap_or_default()
+                    )
+                })
+                .collect();
+            println!(
+                "  {:>5}s rss {:.1} MiB; {}",
+                started.elapsed().as_secs(),
+                mib(proc_status_kib(pid, "VmRSS")?),
+                states.join("; ")
+            );
+            next_progress += PROGRESS_INTERVAL;
+        }
+        if started.elapsed() > timeout {
+            bail!("sync not finished after {timeout:?}: {accounts:?}");
+        }
+        tick = sleep_until_next(tick);
+    }
+}
+
+/// An `/api/events` stream whose reader thread drains it until the server
+/// closes it and returns the bytes read.
+struct SseClient {
+    reader: JoinHandle<u64>,
+}
+
+impl SseClient {
+    fn open(running: &Running) -> Result<SseClient> {
+        let mut stream = TcpStream::connect_timeout(&running.addr, HTTP_TIMEOUT)?;
+        stream.set_read_timeout(Some(HTTP_TIMEOUT))?;
+        write!(
+            stream,
+            "GET /api/events HTTP/1.1\r\nHost: {}\r\nAccept: text/event-stream\r\n\
+             Cookie: {}\r\n\r\n",
+            running.addr, running.session
+        )?;
+        let mut head = Vec::new();
+        let mut byte = [0u8];
+        while !head.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte)?;
+            head.push(byte[0]);
+        }
+        let head = String::from_utf8_lossy(&head);
+        if !head.starts_with("HTTP/1.1 200") {
+            bail!("GET /api/events: {head}");
+        }
+        stream.set_read_timeout(None)?;
+        let reader = std::thread::spawn(move || {
+            let mut sink = std::io::sink();
+            std::io::copy(&mut stream, &mut sink).unwrap_or(0)
+        });
+        Ok(SseClient { reader })
+    }
+}
+
+struct Render {
+    html_bytes: usize,
+    elapsed: Duration,
+}
+
+/// Opens and renders the `seed --huge-mb` message, as the reader does.
+fn render_huge(running: &Running) -> Result<Render> {
+    let ids = bench_search::search_ids(running, &format!("subject:{HUGE_SUBJECT}"))?;
+    let [thread] = ids[..] else {
+        bail!("expected one {HUGE_SUBJECT} thread, found {}", ids.len());
+    };
+    let thread: Value = get_json(running, &format!("/api/threads/{thread}"))?;
+    let message = thread["messages"]
+        .as_array()
+        .and_then(|m| m.iter().find(|m| m["subject"] == HUGE_SUBJECT))
+        .and_then(|m| m["id"].as_i64())
+        .with_context(|| format!("no {HUGE_SUBJECT} message in {thread}"))?;
+    let started = Instant::now();
+    get_json(running, &format!("/api/messages/{message}"))?;
+    let (status, html) = running.get(&format!("/api/messages/{message}/render"))?;
+    let elapsed = started.elapsed();
+    if status != 200 || html.is_empty() {
+        bail!("render {message}: {status}, {} bytes", html.len());
+    }
+    Ok(Render {
+        html_bytes: html.len(),
+        elapsed,
+    })
+}
+
+fn get_json(running: &Running, path: &str) -> Result<Value> {
+    let (status, body) = running.get(path)?;
+    if status != 200 {
+        bail!("GET {path}: {status} {}", String::from_utf8_lossy(&body));
+    }
+    Ok(serde_json::from_slice(&body)?)
 }
 
 fn wait_until_serving(running: &mut Running) -> Result<()> {

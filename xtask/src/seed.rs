@@ -33,6 +33,12 @@ const TEXT_WIDTH: usize = 72;
 const QP_WIDTH: usize = 75;
 const BASE64_WIDTH: usize = 76;
 const ENCODED_WORD_CHUNK: usize = 30;
+/// Subject of the `--huge-mb` message, for finding it through search.
+pub const HUGE_SUBJECT: &str = "tagmail-bench-huge";
+const HUGE_HTML_BYTES: usize = 2 << 20;
+const BYTES_PER_MB: u64 = 1_000_000;
+/// The huge message is the newest in INBOX.
+const HUGE_AFTER_SECS: i64 = 86_400;
 
 const SEEN: u8 = 1;
 const ANSWERED: u8 = 2;
@@ -68,6 +74,8 @@ pub struct Options {
     pub count: u64,
     pub avg_kb: u64,
     pub seed: u64,
+    /// Appends one message of this many megabytes to INBOX.
+    pub huge_mb: Option<u64>,
     pub out: PathBuf,
 }
 
@@ -201,18 +209,23 @@ pub fn generate(opts: &Options) -> Result<Summary> {
     for result in results {
         bytes += result?;
     }
+    let huge = match opts.huge_mb {
+        Some(mb) => Some(write_huge(opts.seed, mb, &opts.out)?),
+        None => None,
+    };
+    bytes += huge.unwrap_or(0);
 
     fs::write(
         opts.out.join(MANIFEST),
-        serde_json::to_vec_pretty(&manifest(opts, &plan, bytes))?,
+        serde_json::to_vec_pretty(&manifest(opts, &plan, bytes, huge))?,
     )?;
     Ok(Summary {
-        count: opts.count,
+        count: opts.count + u64::from(huge.is_some()),
         bytes,
     })
 }
 
-fn manifest(opts: &Options, plan: &Plan, bytes: u64) -> serde_json::Value {
+fn manifest(opts: &Options, plan: &Plan, bytes: u64, huge: Option<u64>) -> serde_json::Value {
     let mailboxes: serde_json::Map<String, serde_json::Value> = Mailbox::ALL
         .iter()
         .map(|&mailbox| {
@@ -226,8 +239,9 @@ fn manifest(opts: &Options, plan: &Plan, bytes: u64) -> serde_json::Value {
                     ((*k).to_owned(), json!(n.count()))
                 })
                 .collect();
+            let extra = usize::from(huge.is_some() && mailbox == Mailbox::Inbox);
             let value = json!({
-                "messages": messages.clone().count(),
+                "messages": messages.clone().count() + extra,
                 "seen": count(SEEN),
                 "answered": count(ANSWERED),
                 "flagged": count(FLAGGED),
@@ -244,6 +258,7 @@ fn manifest(opts: &Options, plan: &Plan, bytes: u64) -> serde_json::Value {
         "bytes": bytes,
         "threads": plan.threads.len(),
         "mailboxes": mailboxes,
+        "huge": huge.map(|bytes| json!({ "subject": HUGE_SUBJECT, "bytes": bytes })),
     })
 }
 
@@ -893,6 +908,48 @@ fn render(plan: &Plan, i: usize) -> Vec<u8> {
     out
 }
 
+/// An unread HTML newsletter with one attachment, `mb` megabytes in all,
+/// newer than every planned message; returns its size.
+fn write_huge(seed: u64, mb: u64, root: &Path) -> Result<u64> {
+    let mut rng = Rng::new(seed ^ HUGE_SUBJECT.len() as u64);
+    let date = START + SPAN_SECS + HUGE_AFTER_SECS;
+    let from = contact(rng.below(CONTACTS));
+    let mut h = String::new();
+    writeln!(h, "Date: {}", format_date(date, 0)).expect("write to string");
+    writeln!(h, "From: {}", mailbox_header(&from, false)).expect("write to string");
+    writeln!(h, "To: {}", mailbox_header(&me(), false)).expect("write to string");
+    writeln!(h, "Subject: {HUGE_SUBJECT}").expect("write to string");
+    writeln!(h, "Message-ID: <huge.{seed:x}@tagmail.test>").expect("write to string");
+    h.push_str("MIME-Version: 1.0\n");
+    let target = (mb * BYTES_PER_MB) as usize;
+    let html = text_part(&mut rng, "html", Lang::English, HUGE_HTML_BYTES, "");
+    let encoded_len = target.saturating_sub(h.len() + html.body.len());
+    let raw_len = encoded_len * 3 / 4 * BASE64_WIDTH / (BASE64_WIDTH + 1);
+    let file = attachment(&mut rng, raw_len);
+    let body = multipart(
+        "mixed",
+        &format!("=_tagmail_huge_{seed:x}"),
+        vec![html, file],
+    );
+    h.push_str(&body.headers);
+    h.push('\n');
+    let mut bytes = h.into_bytes();
+    bytes.extend_from_slice(&body.body);
+    let newlines = bytes.iter().filter(|&&b| b == b'\n').count();
+    let name = format!(
+        "{date}.Mhuge.tagmail,S={},W={}:2,",
+        bytes.len(),
+        bytes.len() + newlines
+    );
+    let path = Mailbox::Inbox.dir(root).join("cur").join(name);
+    fs::write(&path, &bytes).with_context(|| format!("writing {}", path.display()))?;
+    fs::File::options()
+        .write(true)
+        .open(&path)?
+        .set_modified(UNIX_EPOCH + Duration::from_secs(date as u64))?;
+    Ok(bytes.len() as u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -904,6 +961,7 @@ mod tests {
             count,
             avg_kb,
             seed,
+            huge_mb: None,
             out: dir.to_path_buf(),
         })
         .expect("seed")
@@ -960,6 +1018,7 @@ mod tests {
             count: 1,
             avg_kb: 1,
             seed: 1,
+            huge_mb: None,
             out: dir.path().to_path_buf(),
         };
         assert!(generate(&opts).is_err());
@@ -1143,6 +1202,41 @@ mod tests {
             assert_eq!(entry["keywords"]["Work"], flagged('a'));
             assert_eq!(entry["keywords"]["$Forwarded"], flagged('d'));
         }
+    }
+
+    #[test]
+    fn huge_message_is_the_newest_unread_inbox_message() {
+        const MB: u64 = 3;
+        let dir = tempfile::tempdir().unwrap();
+        let summary = generate(&Options {
+            count: 200,
+            avg_kb: 2,
+            seed: 5,
+            huge_mb: Some(MB),
+            out: dir.path().to_path_buf(),
+        })
+        .unwrap();
+        assert_eq!(summary.count, 201);
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&fs::read(dir.path().join(MANIFEST)).unwrap()).unwrap();
+        let inbox: Vec<_> = fs::read_dir(dir.path().join("cur"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(manifest["mailboxes"]["INBOX"]["messages"], inbox.len());
+        let newest = inbox
+            .iter()
+            .max_by_key(|p| fs::metadata(p).unwrap().modified().unwrap())
+            .unwrap();
+        assert!(newest.to_string_lossy().ends_with(":2,"), "unread");
+        let raw = fs::read(newest).unwrap();
+        assert_eq!(manifest["huge"]["bytes"], raw.len());
+        let target = (MB * BYTES_PER_MB) as usize;
+        assert!(raw.len().abs_diff(target) < target / 100, "{}", raw.len());
+        let parsed = MessageParser::default().parse(raw.as_slice()).unwrap();
+        assert_eq!(parsed.subject(), Some(HUGE_SUBJECT));
+        assert!(parsed.body_html(0).is_some());
+        assert_eq!(parsed.attachments().count(), 1);
     }
 
     #[test]
