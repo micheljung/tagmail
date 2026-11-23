@@ -13,6 +13,9 @@ class Composer {
 	identities = $state.raw<IdentityDto[]>([]);
 	#identities: Promise<IdentityDto[]> | null = null;
 	readonly #sending = new WeakSet<Draft>();
+	/** Every draft being written, docked or inline, for flushing when the page hides. */
+	readonly #live = new Set<Draft>();
+	#listening = false;
 
 	loadIdentities(): Promise<IdentityDto[]> {
 		this.#identities ??= api.identities().then(
@@ -32,6 +35,8 @@ class Composer {
 
 	newDraft(init: DraftInit = {}): Draft {
 		const draft = new Draft(api, init);
+		this.#live.add(draft);
+		this.#listen();
 		if (draft.identityId === null) {
 			draft.identityId = this.defaultIdentity();
 			if (draft.identityId === null) {
@@ -41,6 +46,18 @@ class Composer {
 			}
 		}
 		return draft;
+	}
+
+	#listen(): void {
+		if (this.#listening || typeof document === 'undefined') return;
+		this.#listening = true;
+		const flush = () => {
+			for (const d of this.#live) d.flush();
+		};
+		document.addEventListener('visibilitychange', () => {
+			if (document.visibilityState === 'hidden') flush();
+		});
+		window.addEventListener('pagehide', flush);
 	}
 
 	open(init: DraftInit = {}): Draft {
@@ -75,8 +92,10 @@ class Composer {
 		}
 	}
 
+	/** Ends `draft` (docked or inline): a last save to Drafts, or a discard. */
 	async close(draft: Draft, discard = false): Promise<void> {
 		this.windows = this.windows.filter((d) => d !== draft);
+		this.#live.delete(draft);
 		await draft.close(discard);
 		if (discard) toasts.show('Draft discarded');
 	}
@@ -97,7 +116,8 @@ class Composer {
 			return false;
 		}
 		this.windows = this.windows.filter((d) => d !== draft);
-		await draft.close();
+		this.#live.delete(draft);
+		draft.finish();
 		await outbox.send(draft.draftId, draft.subject);
 		return true;
 	}

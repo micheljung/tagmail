@@ -52,7 +52,7 @@
 	async function startReply(mode: ReplyMode) {
 		const last = detail?.messages.at(-1);
 		if (!last || replying) return;
-		if (reply) await reply.close();
+		if (reply) await composer.close(reply);
 		replying = mode;
 		try {
 			reply = await composer.reply(last.id, mode);
@@ -75,7 +75,7 @@
 	async function discardReply() {
 		const d = reply;
 		reply = null;
-		await d?.close(true);
+		if (d) await composer.close(d, true);
 	}
 
 	$effect(() =>
@@ -91,7 +91,7 @@
 		return () => {
 			const d = reply;
 			reply = null;
-			void d?.close();
+			if (d) void composer.close(d);
 		};
 	});
 

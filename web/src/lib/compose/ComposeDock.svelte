@@ -15,6 +15,12 @@
 	function toggle(set: SvelteSet<Draft>, d: Draft) {
 		if (!set.delete(d)) set.add(d);
 	}
+
+	/** A minimized window is out of the way like a closed one, so it goes to Drafts now. */
+	function minimize(d: Draft) {
+		toggle(minimized, d);
+		if (minimized.has(d)) void d.save({ imap: true }).catch(() => undefined);
+	}
 </script>
 
 <div class="dock">
@@ -37,14 +43,14 @@
 			}}
 		>
 			<header>
-				<button class="title" onclick={() => toggle(minimized, draft)} aria-expanded={!min}>
+				<button class="title" onclick={() => minimize(draft)} aria-expanded={!min}>
 					{title(draft)}
 				</button>
 				<button
 					class="ctl"
 					aria-label={min ? 'Restore' : 'Minimize'}
 					title={min ? 'Restore' : 'Minimize'}
-					onclick={() => toggle(minimized, draft)}
+					onclick={() => minimize(draft)}
 				>
 					<Icon name={min ? 'up' : 'minimize'} size={17} />
 				</button>

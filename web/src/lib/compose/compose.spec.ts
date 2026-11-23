@@ -31,14 +31,14 @@ function fakeApi(): DraftApi & { calls: string[]; uploads: ReturnType<typeof vi.
 	return {
 		calls,
 		uploads,
-		createDraft: vi.fn(() => {
-			calls.push('create');
+		createDraft: (body, keepalive) => {
+			calls.push(`create${body.saveNow ? '+now' : ''}${keepalive ? '+keepalive' : ''}`);
 			return Promise.resolve({ id: 9 });
-		}),
-		updateDraft: vi.fn(() => {
-			calls.push('update');
+		},
+		updateDraft: (_id, body, keepalive) => {
+			calls.push(`update${body.saveNow ? '+now' : ''}${keepalive ? '+keepalive' : ''}`);
 			return Promise.resolve();
-		}),
+		},
 		deleteDraft: vi.fn(() => Promise.resolve()),
 		uploadAttachment: (file) => uploads(file),
 		removeAttachment: vi.fn(() => Promise.resolve())
@@ -73,6 +73,23 @@ describe('Draft', () => {
 		expect(api.calls).toEqual(['create', 'update']);
 		await d.save();
 		expect(api.calls).toEqual(['create', 'update']);
+	});
+
+	it('asks for the Drafts mailbox only when closing or when the page hides', async () => {
+		const api = fakeApi();
+		const d = new Draft(api, { identityId: 1 });
+		d.subject = 'Hi';
+		d.touch();
+		await vi.advanceTimersByTimeAsync(AUTOSAVE_MS);
+		d.flush();
+		await vi.advanceTimersByTimeAsync(0);
+		d.flush();
+		await vi.advanceTimersByTimeAsync(0);
+		d.subject = 'Hi again';
+		d.touch();
+		await d.close();
+		await d.close();
+		expect(api.calls).toEqual(['create', 'update+now+keepalive', 'update+now']);
 	});
 
 	it('never stores an untouched empty draft', async () => {

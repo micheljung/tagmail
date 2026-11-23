@@ -12,8 +12,8 @@ import { parseAddresses, toRecipient, type Recipient } from './addresses';
 export const AUTOSAVE_MS = 1200;
 
 export interface DraftApi {
-	createDraft(draft: DraftInputDto): Promise<{ id: number }>;
-	updateDraft(id: number, draft: DraftInputDto): Promise<unknown>;
+	createDraft(draft: DraftInputDto, keepalive?: boolean): Promise<{ id: number }>;
+	updateDraft(id: number, draft: DraftInputDto, keepalive?: boolean): Promise<unknown>;
 	deleteDraft(id: number): Promise<void>;
 	uploadAttachment(
 		file: File,
@@ -80,6 +80,9 @@ export class Draft {
 	#again = false;
 	#closed = false;
 	#dirty = false;
+	/** The server holds edits it has not written to the IMAP Drafts mailbox yet. */
+	#imapBehind = false;
+	#againNow = false;
 
 	constructor(api: DraftApi, init: DraftInit = {}) {
 		this.#api = api;
@@ -177,32 +180,48 @@ export class Draft {
 		return body;
 	}
 
-	/** Saves now (coalescing with a save in flight); resolves once stored. */
-	async save(): Promise<void> {
+	/**
+	 * Saves now (coalescing with a save in flight); resolves once stored.
+	 * `imap` asks the server to write it to the Drafts mailbox right away
+	 * instead of after its idle delay; `keepalive` lets the request outlive
+	 * the page.
+	 */
+	async save(options: { imap?: boolean; keepalive?: boolean } = {}): Promise<void> {
 		if (this.#timer) {
 			clearTimeout(this.#timer);
 			this.#timer = null;
 		}
+		const imap = options.imap ?? false;
 		if (this.#saving) {
 			this.#again = true;
+			this.#againNow ||= imap;
 			return this.#saving;
 		}
-		if (this.draftId === null ? this.isEmpty() : !this.#dirty) return;
-		this.#saving = this.#store().finally(() => (this.#saving = null));
+		const needed =
+			this.draftId === null ? !this.isEmpty() : this.#dirty || (imap && this.#imapBehind);
+		if (!needed) return;
+		this.#saving = this.#store(imap, options.keepalive ?? false).finally(
+			() => (this.#saving = null)
+		);
 		await this.#saving;
 		if (this.#again) {
+			const again = { imap: this.#againNow };
 			this.#again = false;
-			await this.save();
+			this.#againNow = false;
+			await this.save(again);
 		}
 	}
 
-	async #store(): Promise<void> {
+	async #store(imap: boolean, keepalive: boolean): Promise<void> {
 		this.saveState = 'saving';
 		this.#dirty = false;
 		try {
 			const body = this.input();
-			if (this.draftId === null) this.draftId = (await this.#api.createDraft(body)).id;
-			else await this.#api.updateDraft(this.draftId, body);
+			if (imap) body.saveNow = true;
+			if (this.draftId === null) {
+				this.draftId = (await this.#api.createDraft(body, keepalive)).id;
+			} else await this.#api.updateDraft(this.draftId, body, keepalive);
+			this.#imapBehind = !imap;
 			this.saveState = 'saved';
 			this.saveError = null;
 		} catch (e) {
@@ -211,6 +230,12 @@ export class Draft {
 			this.saveError = e instanceof Error ? e.message : String(e);
 			throw e;
 		}
+	}
+
+	/** The page is going away or hidden: store everything, Drafts mailbox included. */
+	flush(): void {
+		if (this.#closed) return;
+		void this.save({ imap: true, keepalive: true }).catch(() => undefined);
 	}
 
 	/** Uploads files after checking the caps; rejected files show their reason. */
@@ -272,12 +297,15 @@ export class Draft {
 		this.touch();
 	}
 
-	/** Stops autosave; with `discard`, deletes the stored draft too. */
+	/**
+	 * Stops autosave after a last save that goes to the Drafts mailbox at
+	 * once; with `discard`, deletes the stored draft instead.
+	 */
 	async close(discard = false): Promise<void> {
 		if (this.#timer) clearTimeout(this.#timer);
 		this.#timer = null;
 		if (!discard) {
-			await this.save().catch(() => undefined);
+			await this.save({ imap: true }).catch(() => undefined);
 			this.#closed = true;
 			return;
 		}
@@ -285,5 +313,12 @@ export class Draft {
 		for (const u of this.uploads) u.controller?.abort();
 		await this.#saving?.catch(() => undefined);
 		if (this.draftId !== null) await this.#api.deleteDraft(this.draftId).catch(() => undefined);
+	}
+
+	/** Stops autosave once the draft is queued for sending (the server refuses edits then). */
+	finish(): void {
+		if (this.#timer) clearTimeout(this.#timer);
+		this.#timer = null;
+		this.#closed = true;
 	}
 }

@@ -60,6 +60,8 @@ interface MockOp {
 
 interface Draft extends DraftDto {
 	saves: number;
+	/** Saves that asked for the IMAP Drafts mailbox right away (`saveNow`). */
+	imapSaves: number;
 }
 
 export interface Change {
@@ -331,7 +333,8 @@ function draftOf(id: number, input: DraftInputDto, previous?: Draft): Draft {
 		saved: true,
 		saveError: null,
 		queued: false,
-		saves: (previous?.saves ?? 0) + 1
+		saves: (previous?.saves ?? 0) + 1,
+		imapSaves: (previous?.imapSaves ?? 0) + (input.saveNow ? 1 : 0)
 	};
 }
 

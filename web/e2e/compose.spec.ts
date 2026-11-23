@@ -9,7 +9,14 @@ declare global {
 }
 
 interface MockState {
-	drafts: { id: number; subject: string; html?: string; to: { email: string }[]; saves: number }[];
+	drafts: {
+		id: number;
+		subject: string;
+		html?: string;
+		to: { email: string }[];
+		saves: number;
+		imapSaves: number;
+	}[];
 	sent: { subject: string; html?: string; text?: string; attachmentIds: string[] }[];
 }
 
@@ -72,6 +79,19 @@ test('c composes, autosaves, sends and reports the outbox status', async ({ page
 	const after = await state(page);
 	expect(after.sent.map((d) => d.subject)).toEqual(['Lisbon photos']);
 	expect(after.sent[0].text).toContain('Here are the best ones.');
+});
+
+test('closing the window saves the draft to the Drafts mailbox at once', async ({ page }) => {
+	await openInbox(page);
+	await page.keyboard.press('c');
+	const win = compose(page);
+	await win.getByLabel('To recipients').fill('oskar@nyberg.se');
+	await win.getByLabel('Subject').fill('Ferry times');
+	await expect(win.getByRole('status')).toHaveText('Draft saved');
+	expect((await state(page)).drafts[0].imapSaves).toBe(0);
+	await win.getByRole('button', { name: 'Save and close' }).click();
+	await expect(win).toHaveCount(0);
+	await expect.poll(async () => (await state(page)).drafts[0]?.imapSaves).toBe(1);
 });
 
 test('a failed send says so and can be retried', async ({ page }) => {

@@ -96,9 +96,10 @@ export class Api {
 		return (await (await this.#send(path, init)).json()) as T;
 	}
 
-	#post<T>(path: string, body?: unknown, method = 'POST'): Promise<T> {
+	#post<T>(path: string, body?: unknown, method = 'POST', keepalive = false): Promise<T> {
 		return this.#json<T>(path, {
 			method,
+			keepalive,
 			headers: body === undefined ? undefined : { 'content-type': 'application/json' },
 			body: body === undefined ? undefined : JSON.stringify(body)
 		});
@@ -287,12 +288,13 @@ export class Api {
 		return this.#empty(`/api/attachments/${encodeURIComponent(id)}`, 'DELETE');
 	}
 
-	createDraft(draft: DraftInputDto): Promise<DraftDto> {
-		return this.#post<DraftDto>('/api/drafts', draft);
+	/** `keepalive` lets the save finish while the page unloads. */
+	createDraft(draft: DraftInputDto, keepalive = false): Promise<DraftDto> {
+		return this.#post<DraftDto>('/api/drafts', draft, 'POST', keepalive);
 	}
 
-	updateDraft(id: number, draft: DraftInputDto): Promise<DraftDto> {
-		return this.#post<DraftDto>(`/api/drafts/${id}`, draft, 'PUT');
+	updateDraft(id: number, draft: DraftInputDto, keepalive = false): Promise<DraftDto> {
+		return this.#post<DraftDto>(`/api/drafts/${id}`, draft, 'PUT', keepalive);
 	}
 
 	draft(id: number): Promise<DraftDto> {
