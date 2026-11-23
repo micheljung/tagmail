@@ -269,7 +269,8 @@ async fn reply_to_an_alias_goes_out_from_the_alias_with_its_signature() {
             forwarded: Vec::new(),
         })
         .await
-        .unwrap();
+        .unwrap()
+        .draft;
     let msgid: String = running
         .config
         .read(move |c| {

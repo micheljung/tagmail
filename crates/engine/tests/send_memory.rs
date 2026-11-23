@@ -375,7 +375,8 @@ async fn a_30_mb_message_streams_through_draft_send_and_sent() {
             forwarded: vec![],
         })
         .await
-        .unwrap();
+        .unwrap()
+        .draft;
     eventually("draft saved", || async {
         engine.draft(draft.id).await.unwrap().saved
     })

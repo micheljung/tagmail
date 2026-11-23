@@ -280,7 +280,7 @@ async fn wipe_resync_keeps_labels_and_applies_queued_ops() {
             .error
             .as_deref()
             .unwrap()
-            .contains("no longer exists")
+            .contains("mailbox not found")
     );
     for id in ["rb-arch", "rb-star"] {
         assert_eq!(

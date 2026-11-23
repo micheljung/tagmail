@@ -140,7 +140,8 @@ async fn drafts_replace_and_send_threads_with_the_conversation() {
         .engine
         .create_draft(draft(identity, "Re: Lunch (draft)", Some(&original)))
         .await
-        .unwrap();
+        .unwrap()
+        .draft;
     eventually("first draft version saved", SEND_BUDGET, || async {
         run.engine.draft(created.id).await.unwrap().saved
     })
@@ -263,7 +264,8 @@ async fn sent_copies_are_never_duplicated() {
         .engine
         .create_draft(draft(identity, "Preset", None))
         .await
-        .unwrap();
+        .unwrap()
+        .draft;
     let preset = draft_msgid(&run, created.id).await;
     run.engine
         .send(format!("p-{run_id}"), created.id)
@@ -286,7 +288,8 @@ async fn sent_copies_are_never_duplicated() {
         .engine
         .create_draft(draft(identity, "Probe", None))
         .await
-        .unwrap();
+        .unwrap()
+        .draft;
     run.engine
         .send(format!("q-{run_id}"), created.id)
         .await

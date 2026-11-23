@@ -6,7 +6,8 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tagmail_api_core::ops_dto::{LabelPatchDto, NewLabelDto, OpStatusDto};
+use tagmail_api_core::dto::SpecialUseDto;
+use tagmail_api_core::ops_dto::{LabelPatchDto, MailboxRefDto, NewLabelDto, OpStatusDto};
 use tagmail_api_core::{AccountRegistry, ChangeFeed, OpMailbox, OpRequest, Submitted};
 use tagmail_core::ops::OpKind;
 use tagmail_core::{AccountId, ChangeCursor, MailboxRowId, SpecialUse, ThreadId};
@@ -629,6 +630,57 @@ async fn move_and_trash_fail_visibly_without_a_destination() {
     assert_eq!(f.lists(thread).await, ["Projects"]);
     eventually("moved", || async {
         lock(&srv).uid_of("Projects", "mv@x").is_some()
+    })
+    .await;
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn moves_by_mailbox_reference_resolve_or_fail_visibly() {
+    let srv = server(CAPS);
+    lock(&srv).append("INBOX", msg("ref1@x", "By use", 1_790_000_000));
+    lock(&srv).append("INBOX", msg("ref2@x", "Nowhere", 1_790_000_100));
+    let f = fixture(&srv).await;
+    f.engine.start_all().await.unwrap();
+    eventually("initial sync", || f.all_live()).await;
+    let (by_use, nowhere) = (f.thread_of("ref1@x").await, f.thread_of("ref2@x").await);
+
+    let mut archive = op("ref-archive", OpKind::Move, by_use);
+    archive.mailbox = Some(OpMailbox::Ref(MailboxRefDto {
+        name: "Renamed meanwhile".into(),
+        special_use: Some(SpecialUseDto::Archive),
+        uidvalidity: None,
+    }));
+    created(f.engine.queue_op(archive).await.unwrap());
+    eventually("moved into \\Archive", || async {
+        let mut s = lock(&srv);
+        s.uid_of("Archive", "ref1@x").is_some() && s.uid_of("INBOX", "ref1@x").is_none()
+    })
+    .await;
+    eventually("done", || async {
+        f.status("ref-archive").await == OpStatusDto::Done
+    })
+    .await;
+
+    let mut lost = op("ref-lost", OpKind::Move, nowhere);
+    lost.mailbox = Some(OpMailbox::Ref(MailboxRefDto {
+        name: "Gone".into(),
+        special_use: None,
+        uidvalidity: Some(4242),
+    }));
+    created(f.engine.queue_op(lost).await.unwrap());
+    eventually("failed", || async {
+        f.status("ref-lost").await == OpStatusDto::Failed
+    })
+    .await;
+    let dto = f.engine.op_dto("ref-lost".into()).await.unwrap();
+    assert_eq!(dto.error.as_deref(), Some("mailbox not found"));
+    assert!(
+        lock(&srv).uid_of("INBOX", "ref2@x").is_some(),
+        "nothing moved"
+    );
+    eventually("listed in INBOX again", || async {
+        f.lists(nowhere).await == ["INBOX"]
     })
     .await;
     f.engine.shutdown().await;

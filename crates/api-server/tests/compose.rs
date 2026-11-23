@@ -195,6 +195,37 @@ async fn compose_routes_upload_draft_and_send() {
     assert_eq!(created["attachments"][0]["name"], "notes.txt");
     let id = created["id"].as_i64().unwrap();
 
+    let keyed = json!({
+        "identityId": identity,
+        "to": [{ "email": "ann@example.org" }],
+        "subject": "Offline",
+        "text": "written on the desktop",
+        "clientId": "3d1f0c55-desk-top",
+    });
+    let post_keyed = |body: Value| f.client.post(f.url("/api/drafts")).json(&body).send();
+    let first_keyed = post_keyed(keyed.clone()).await.unwrap();
+    assert_eq!(first_keyed.status(), 201);
+    let first_keyed: Value = first_keyed.json().await.unwrap();
+    let lost_ack = post_keyed(keyed.clone()).await.unwrap();
+    assert_eq!(lost_ack.status(), 200, "same client id: the same draft");
+    let lost_ack: Value = lost_ack.json().await.unwrap();
+    assert_eq!(lost_ack["id"], first_keyed["id"]);
+    assert_eq!(lost_ack["version"], 1, "unchanged");
+    let mut edited = keyed.clone();
+    edited["subject"] = json!("Offline, edited");
+    let edited = post_keyed(edited).await.unwrap();
+    assert_eq!(edited.status(), 200);
+    let edited: Value = edited.json().await.unwrap();
+    assert_eq!(edited["id"], first_keyed["id"]);
+    assert_eq!(edited["subject"], "Offline, edited");
+    assert_eq!(edited["version"], 2);
+    let mut spaced = keyed.clone();
+    spaced["clientId"] = json!("has space");
+    let spaced = post_keyed(spaced).await.unwrap();
+    assert_eq!(spaced.status(), 422);
+    let spaced: Value = spaced.json().await.unwrap();
+    assert_eq!(spaced["field"], "clientId");
+
     let mut bad = draft.clone();
     bad["to"] = json!([{ "email": "not an address" }]);
     let resp = f
@@ -260,6 +291,11 @@ async fn compose_routes_upload_draft_and_send() {
         .json()
         .await
         .unwrap();
+    assert_eq!(
+        outbox["items"].as_array().unwrap().len(),
+        1,
+        "the repeated send queued nothing"
+    );
     let item = &outbox["items"][0];
     assert_eq!(item["opId"], send["opId"]);
     assert_eq!(item["subject"], "Hello");

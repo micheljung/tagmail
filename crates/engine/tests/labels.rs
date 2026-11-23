@@ -376,7 +376,8 @@ async fn label_round_trip_and_draft_uid_without_uidplus() {
             forwarded: Vec::new(),
         })
         .await
-        .unwrap();
+        .unwrap()
+        .draft;
     eventually("draft saved", APPLY, || async {
         running.engine.draft(created.id).await.unwrap().saved
     })

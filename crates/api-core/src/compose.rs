@@ -122,6 +122,13 @@ pub struct NewUpload {
     pub size: u64,
 }
 
+/// A created draft, or the existing one of a repeated `clientId`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DraftOutcome {
+    pub draft: DraftDto,
+    pub created: bool,
+}
+
 /// Whether `POST /api/send` queued the message now or had seen its op id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendOutcome {
@@ -144,7 +151,8 @@ pub trait Compose: Send + Sync + 'static {
     /// `Conflict` for the account's last identity; deleting the default
     /// promotes the lowest remaining id.
     fn delete_identity(&self, id: i64) -> BoxFuture<ComposeResult<()>>;
-    fn create_draft(&self, input: DraftInput) -> BoxFuture<ComposeResult<DraftDto>>;
+    /// With a `client_id` already used, updates that draft instead.
+    fn create_draft(&self, input: DraftInput) -> BoxFuture<ComposeResult<DraftOutcome>>;
     fn update_draft(&self, id: i64, input: DraftInput) -> BoxFuture<ComposeResult<DraftDto>>;
     fn draft(&self, id: i64) -> BoxFuture<ComposeResult<DraftDto>>;
     fn delete_draft(&self, id: i64) -> BoxFuture<ComposeResult<()>>;
@@ -610,7 +618,10 @@ impl<S: Store> Api<S> {
             return Ok(resp);
         }
         Ok(match self.composer() {
-            Ok(c) => respond(201, c.create_draft(input).await),
+            Ok(c) => match c.create_draft(input).await {
+                Ok(out) => Response::json(if out.created { 201 } else { 200 }, &out.draft),
+                Err(e) => error_response(e),
+            },
             Err(resp) => resp,
         })
     }

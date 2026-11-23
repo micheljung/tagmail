@@ -11,8 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tagmail_api_core::BoxFuture;
 use tagmail_api_core::compose::{
-    Compose, ComposeError, ComposeResult, DraftInput, ForwardedPart, MAX_ATTACHMENTS_TOTAL,
-    MAX_UPLOAD, NewUpload, SendOutcome,
+    Compose, ComposeError, ComposeResult, DraftInput, DraftOutcome, ForwardedPart,
+    MAX_ATTACHMENTS_TOTAL, MAX_UPLOAD, NewUpload, SendOutcome,
 };
 use tagmail_api_core::compose_dto::{
     AttachmentDto, DraftDto, IdentityDto, OutboxItemDto, OutboxStateDto, SendStatusDto,
@@ -458,7 +458,25 @@ impl<F: ConnectorFactory> Engine<F> {
         self.inner.stores.uploads.clone()
     }
 
-    async fn create_draft_impl(&self, input: DraftInput) -> ComposeResult<DraftDto> {
+    async fn create_draft_impl(&self, input: DraftInput) -> ComposeResult<DraftOutcome> {
+        if let Some(client_id) = input.client_id.clone() {
+            let existing = read(self.stores(), move |c| {
+                c.query_row(
+                    "SELECT id FROM draft WHERE client_id = ?1",
+                    [client_id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(sql)
+            })
+            .await?;
+            if let Some(id) = existing {
+                return Ok(DraftOutcome {
+                    draft: self.repeat_create(id, input).await?,
+                    created: false,
+                });
+            }
+        }
         let dir = self.uploads();
         let parts = input
             .forwarded
@@ -481,14 +499,15 @@ impl<F: ConnectorFactory> Engine<F> {
             let save_now = input.save_now || !input.attachment_ids.is_empty() || !staged.is_empty();
             tx.execute(
                 "INSERT INTO draft (account_id, identity_id, msgid_hdr, content, created_at, \
-                 updated_at, next_save_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+                 updated_at, next_save_at, client_id) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7)",
                 params![
                     identity.account_id,
                     identity.id,
                     msgid,
                     json(&content),
                     now,
-                    save_now.then_some(now)
+                    save_now.then_some(now),
+                    input.client_id
                 ],
             )
             .map_err(sql)?;
@@ -512,7 +531,52 @@ impl<F: ConnectorFactory> Engine<F> {
             let _ = fs::remove_file(path);
         }
         self.inner.outbox_wake.notify_one();
-        result
+        result.map(|draft| DraftOutcome {
+            draft,
+            created: true,
+        })
+    }
+
+    /// A create repeating a `client_id` (its answer was lost): the same
+    /// content leaves the draft as it is, so IMAP gets no second copy;
+    /// anything else is an update. Forwarded parts were copied the first
+    /// time and stay.
+    async fn repeat_create(&self, id: i64, mut input: DraftInput) -> ComposeResult<DraftDto> {
+        let forwarded = !input.forwarded.is_empty();
+        input.forwarded.clear();
+        let (row, current) = read(self.stores(), move |c| {
+            let row = draft_row(c, id)?.ok_or(ComposeError::NotFound("draft"))?;
+            let current: Vec<i64> = attachments(c, id)?
+                .iter()
+                .filter_map(|a| a.id.parse().ok())
+                .collect();
+            Ok((row, current))
+        })
+        .await?;
+        if forwarded && input.attachment_ids.is_empty() {
+            input.attachment_ids = current.clone();
+        }
+        let unchanged = row.identity_id == Some(input.identity_id)
+            && current == input.attachment_ids
+            && content_of(&input, Some(&row.content)) == row.content;
+        if !unchanged {
+            return self.update_draft_impl(id, input).await;
+        }
+        let save_now = input.save_now;
+        let dto = write(self.stores(), move |tx| {
+            if save_now {
+                tx.execute(
+                    "UPDATE draft SET next_save_at = ?2 \
+                     WHERE id = ?1 AND saved_version < version AND queued = 0",
+                    params![id, now()],
+                )
+                .map_err(sql)?;
+            }
+            draft_dto(tx, id)
+        })
+        .await?;
+        self.inner.outbox_wake.notify_one();
+        Ok(dto)
     }
 
     async fn update_draft_impl(&self, id: i64, input: DraftInput) -> ComposeResult<DraftDto> {
@@ -987,7 +1051,7 @@ impl<F: ConnectorFactory> Compose for Engine<F> {
         Box::pin(async move { engine.delete_identity_impl(id).await })
     }
 
-    fn create_draft(&self, input: DraftInput) -> BoxFuture<ComposeResult<DraftDto>> {
+    fn create_draft(&self, input: DraftInput) -> BoxFuture<ComposeResult<DraftOutcome>> {
         let engine = self.clone();
         Box::pin(async move { engine.create_draft_impl(input).await })
     }

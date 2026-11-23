@@ -322,7 +322,7 @@ async fn drafts_are_saved_to_imap_and_replace_the_previous_version() {
     let file = f.upload("notes.txt", b"attached", 8).await;
     let mut first = input(identity, "First");
     first.attachment_ids = vec![file];
-    let draft = f.engine.create_draft(first).await.unwrap();
+    let draft = f.engine.create_draft(first).await.unwrap().draft;
     assert_eq!(draft.attachments.len(), 1);
     eventually("first version in Drafts", || async {
         f.messages("Drafts").iter().any(|m| m.0 == "First")
@@ -372,6 +372,52 @@ async fn drafts_are_saved_to_imap_and_replace_the_previous_version() {
 }
 
 #[tokio::test]
+async fn a_repeated_client_id_updates_the_draft_without_a_second_copy() {
+    let f = fixture(None, FakeSmtp::default()).await;
+    let identity = f.identity().await;
+    let mut first = input(identity, "Lost ack");
+    first.client_id = Some("c-1".into());
+    first.save_now = true;
+    let created = f.engine.create_draft(first.clone()).await.unwrap();
+    assert!(created.created);
+    eventually("saved", || async {
+        f.engine.draft(created.draft.id).await.unwrap().saved
+    })
+    .await;
+
+    let again = f.engine.create_draft(first.clone()).await.unwrap();
+    assert!(!again.created);
+    assert_eq!(again.draft.id, created.draft.id);
+    assert_eq!(again.draft.version, 1);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let uids: Vec<u32> = lock(&f.srv)
+        .mailbox("Drafts")
+        .msgs
+        .keys()
+        .copied()
+        .collect();
+    assert_eq!(uids, [1], "exactly one APPEND");
+
+    let mut edited = first.clone();
+    edited.subject = "Edited".into();
+    edited.save_now = false;
+    let edited = f.engine.create_draft(edited).await.unwrap();
+    assert!(!edited.created);
+    assert_eq!(edited.draft.id, created.draft.id);
+    assert_eq!(
+        (edited.draft.version, edited.draft.subject.as_str()),
+        (2, "Edited")
+    );
+
+    let mut other = input(identity, "Other");
+    other.client_id = Some("c-2".into());
+    let other = f.engine.create_draft(other).await.unwrap();
+    assert!(other.created);
+    assert_ne!(other.draft.id, created.draft.id);
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn send_strips_bcc_copies_to_sent_once_and_learns_the_server() {
     let f = fixture(None, FakeSmtp::default()).await;
     let identity = f.identity().await;
@@ -396,7 +442,7 @@ async fn send_strips_bcc_copies_to_sent_once_and_learns_the_server() {
         bytes: b"%PDF".to_vec(),
     }];
     eventually("original cached", || f.cached("orig@x.example")).await;
-    let draft = f.engine.create_draft(reply).await.unwrap();
+    let draft = f.engine.create_draft(reply).await.unwrap().draft;
     assert_eq!(
         draft.in_reply_to_message_id.as_deref(),
         Some("orig@x.example")
@@ -474,7 +520,8 @@ async fn server_that_saves_sent_gets_no_second_copy() {
             .engine
             .create_draft(input(identity, "Gmail"))
             .await
-            .unwrap();
+            .unwrap()
+            .draft;
         f.engine.send("op-g".to_owned(), draft.id).await.unwrap();
         eventually("completed", || f.settled()).await;
         assert_eq!(f.messages("Sent").len(), 1, "{preset:?}");
@@ -496,7 +543,8 @@ async fn sent_probe_reads_each_sent_header_once() {
         .engine
         .create_draft(input(identity, "Probe"))
         .await
-        .unwrap();
+        .unwrap()
+        .draft;
     f.engine.send("op-p".to_owned(), draft.id).await.unwrap();
     eventually("sent and completed", || f.settled()).await;
     assert_eq!(f.messages("Sent").len(), 4);
@@ -574,7 +622,8 @@ async fn failures_show_in_the_outbox_and_can_be_retried_or_cancelled() {
         .engine
         .create_draft(input(identity, "Bounce"))
         .await
-        .unwrap();
+        .unwrap()
+        .draft;
     f.engine.send("op-f".to_owned(), draft.id).await.unwrap();
     eventually("failed", || async {
         f.engine
@@ -670,7 +719,7 @@ async fn attachment_caps_are_enforced_and_orphans_cleaned() {
     ));
     let mut fits = input(identity, "Fits");
     fits.attachment_ids = vec![a];
-    let draft = f.engine.create_draft(fits).await.unwrap();
+    let draft = f.engine.create_draft(fits).await.unwrap().draft;
     let mut other = input(identity, "Other");
     other.attachment_ids = vec![a];
     assert!(
@@ -709,7 +758,7 @@ async fn forwarding_flags_the_original() {
     eventually("original cached", || f.cached("fw@x.example")).await;
     let mut forward = input(identity, "Fwd: Report");
     forward.forward_of = Some("fw@x.example".to_owned());
-    let draft = f.engine.create_draft(forward).await.unwrap();
+    let draft = f.engine.create_draft(forward).await.unwrap().draft;
     f.engine.send("op-fw".to_owned(), draft.id).await.unwrap();
     eventually("original flagged $Forwarded", || async {
         f.flags("Archive", "fw@x.example")
@@ -728,7 +777,8 @@ async fn text_edits_wait_for_idle_but_attachments_and_closing_save_at_once() {
         .engine
         .create_draft(input(identity, "Typing"))
         .await
-        .unwrap();
+        .unwrap()
+        .draft;
     let edited = f
         .engine
         .update_draft(draft.id, input(identity, "Typing more"))

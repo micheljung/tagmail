@@ -1495,7 +1495,7 @@ async fn destination<S: ImapSession>(
         Some(name) => Ok(Some(name)),
         None => Err(OpError::Failed(match dest {
             Destination::Special(u) => format!("the account has no {u} mailbox"),
-            _ => "the destination mailbox no longer exists".to_owned(),
+            _ => "mailbox not found".to_owned(),
         })),
     }
 }
