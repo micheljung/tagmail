@@ -187,6 +187,41 @@ pub struct Stores {
     pub outbox: PathBuf,
 }
 
+/// What an IMAP login depends on: server, username and sealed password.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LoginKey {
+    host: String,
+    port: u16,
+    tls: String,
+    username: String,
+    secret: Vec<u8>,
+}
+
+impl LoginKey {
+    async fn load(config: &ConfigDb, id: AccountId) -> Result<Option<LoginKey>> {
+        config
+            .read(move |c| {
+                Ok(c.query_row(
+                    "SELECT imap_host, imap_port, imap_tls, username, secret_ct \
+                     FROM account WHERE id = ?1",
+                    [id.0],
+                    |r| {
+                        Ok(LoginKey {
+                            host: r.get(0)?,
+                            port: r.get(1)?,
+                            tls: r.get(2)?,
+                            username: r.get(3)?,
+                            secret: r.get(4)?,
+                        })
+                    },
+                )
+                .optional()?)
+            })
+            .await
+            .map_err(Error::from)
+    }
+}
+
 /// Reads an account and decrypts its password.
 pub async fn load_account(stores: &Stores, id: AccountId) -> Result<AccountSettings> {
     let row = stores
@@ -370,6 +405,8 @@ pub(crate) struct Inner<F: ConnectorFactory> {
     /// Accounts whose server answered OK to a label but did not keep its
     /// keyword; cleared by the next label it keeps.
     labels_dropped: Mutex<HashSet<AccountId>>,
+    /// The login each account last started with.
+    logins: Mutex<HashMap<AccountId, LoginKey>>,
     /// Serializes stop, restart and remove of each account.
     lifecycle: Mutex<HashMap<AccountId, Arc<tokio::sync::Mutex<()>>>>,
     /// Accounts being removed; never started again.
@@ -445,6 +482,7 @@ impl<F: ConnectorFactory> Engine<F> {
                 }),
                 bulk: Semaphore::new(config.bulk_permits.max(1)),
                 labels_dropped: Mutex::new(HashSet::new()),
+                logins: Mutex::new(HashMap::new()),
                 lifecycle: Mutex::new(HashMap::new()),
                 removing: Mutex::new(HashSet::new()),
                 blob_writes: Mutex::new(HashMap::new()),
@@ -743,20 +781,32 @@ impl<F: ConnectorFactory> Engine<F> {
     }
 
     /// Stops the account and starts it again with its current settings if
-    /// it is `active`; a changed password logs in at once.
+    /// it is `active`; a changed server, username or password logs in at
+    /// once, anything else waits for the authentication backoff.
     pub async fn restart_account(&self, id: AccountId) -> Result<()> {
         let lock = self.lifecycle(id);
         let _serial = lock.lock().await;
         self.stop_unlocked(id).await;
+        let login = LoginKey::load(&self.inner.stores.config, id).await?;
+        let started_with = self
+            .inner
+            .logins
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&id)
+            .cloned();
+        let login_changed = started_with.is_none() || started_with != login;
         let active = self
             .inner
             .stores
             .config
             .write(move |tx| {
-                tx.execute(
-                    "UPDATE account SET auth_backoff_until = NULL WHERE id = ?1",
-                    [id.0],
-                )?;
+                if login_changed {
+                    tx.execute(
+                        "UPDATE account SET auth_backoff_until = NULL WHERE id = ?1",
+                        [id.0],
+                    )?;
+                }
                 Ok(tx
                     .query_row("SELECT status FROM account WHERE id = ?1", [id.0], |r| {
                         r.get::<_, String>(0)
@@ -833,6 +883,11 @@ impl<F: ConnectorFactory> Engine<F> {
             .remove(&id);
         self.inner
             .blob_writes
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+        self.inner
+            .logins
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .remove(&id);
@@ -1202,6 +1257,13 @@ async fn run_account<F: ConnectorFactory>(
     }
     let config = &inner.stores.config;
     let loaded = async {
+        if let Some(login) = LoginKey::load(config, id).await? {
+            inner
+                .logins
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(id, login);
+        }
         let settings = load_account(&inner.stores, id).await?;
         let backoff = PersistedBackoff::load(config.clone(), id).await?;
         let known = AccountFacts::load(config, id).await?;

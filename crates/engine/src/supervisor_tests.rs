@@ -391,6 +391,48 @@ async fn auth_backoff_of_one_account_does_not_hold_back_another() {
 }
 
 #[tokio::test]
+async fn a_restart_without_login_changes_keeps_the_auth_backoff() {
+    let a = seeded("a", 1);
+    lock(&a).password = Some("other".to_owned());
+    let f = fixture(&[account(1, 2, &a)], config(|_| {})).await;
+    f.engine.start_all().await.unwrap();
+    let backing_off =
+        "SELECT count(*) FROM account WHERE id = ?1 AND auth_backoff_until > unixepoch()";
+    eventually("backoff persisted", || async {
+        f.config_count(backing_off, 1).await == 1
+    })
+    .await;
+    let logins = lock(&a).logins;
+    f.stores
+        .config
+        .write(|tx| {
+            tx.execute("UPDATE account SET max_connections = 1 WHERE id = 1", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    f.engine.restart_account(AccountId(1)).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(f.config_count(backing_off, 1).await, 1);
+    assert_eq!(lock(&a).logins, logins, "no login before the backoff ends");
+
+    f.stores
+        .config
+        .write(|tx| {
+            tx.execute("UPDATE account SET imap_port = 994 WHERE id = 1", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    f.engine.restart_account(AccountId(1)).await.unwrap();
+    eventually("logs in again at once", || async {
+        lock(&a).logins > logins
+    })
+    .await;
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn connection_caps_are_clamped_to_the_budget() {
     let servers: Vec<Shared> = (0..3).map(|_| server(CAPS)).collect();
     let f = fixture(
