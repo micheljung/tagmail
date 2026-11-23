@@ -467,6 +467,9 @@ impl<S: Store> Api<S> {
         let Some(stored) = self.store.account_settings(id).await? else {
             return Ok(no_account());
         };
+        if patch.reuses_password_elsewhere(&stored) {
+            return Ok(password_required());
+        }
         Ok(Response::json(
             200,
             &registry.test_account(patch.merged(stored)).await,
@@ -485,6 +488,14 @@ impl<S: Store> Api<S> {
             Ok(patch) => patch,
             Err(resp) => return Ok(resp),
         };
+        if patch.password.is_none() && patch.touches_connection() {
+            let Some(stored) = self.store.account_settings(id).await? else {
+                return Ok(no_account());
+            };
+            if patch.reuses_password_elsewhere(&stored) {
+                return Ok(password_required());
+            }
+        }
         let restart = patch.needs_restart();
         let Some(account) = self.store.update_account(id, patch).await? else {
             return Ok(no_account());
@@ -513,6 +524,15 @@ impl<S: Store> Api<S> {
 
 fn no_account() -> Response {
     Response::error(404, "not_found", "no such account")
+}
+
+/// The stored password must not follow the account to a different server
+/// or login: whoever can change those could otherwise harvest it.
+fn password_required() -> Response {
+    invalid(
+        "password",
+        "re-enter the password to change the server, TLS mode or username",
+    )
 }
 
 fn parse_patch(body: &[u8]) -> Checked<AccountPatch> {
@@ -731,6 +751,13 @@ fn validate_patch(dto: AccountPatchDto) -> Checked<AccountPatch> {
 impl AccountPatch {
     /// The engine must reconnect to apply it.
     fn needs_restart(&self) -> bool {
+        self.touches_connection()
+            || self.password.is_some()
+            || self.max_connections.is_some()
+            || self.status.is_some()
+    }
+
+    fn touches_connection(&self) -> bool {
         self.imap_host.is_some()
             || self.imap_port.is_some()
             || self.imap_tls.is_some()
@@ -738,9 +765,22 @@ impl AccountPatch {
             || self.smtp_port.is_some()
             || self.smtp_tls.is_some()
             || self.username.is_some()
-            || self.password.is_some()
-            || self.max_connections.is_some()
-            || self.status.is_some()
+    }
+
+    /// Changes where or as whom `stored`'s password would be sent without
+    /// supplying a new one.
+    fn reuses_password_elsewhere(&self, stored: &NewAccount) -> bool {
+        fn differs<T: PartialEq>(new: Option<&T>, old: &T) -> bool {
+            new.is_some_and(|new| new != old)
+        }
+        self.password.is_none()
+            && (differs(self.imap_host.as_ref(), &stored.imap_host)
+                || differs(self.imap_port.as_ref(), &stored.imap_port)
+                || differs(self.imap_tls.as_ref(), &stored.imap_tls)
+                || differs(self.smtp_host.as_ref(), &stored.smtp_host)
+                || differs(self.smtp_port.as_ref(), &stored.smtp_port)
+                || differs(self.smtp_tls.as_ref(), &stored.smtp_tls)
+                || differs(self.username.as_ref(), &stored.username))
     }
 
     /// `base` with this patch applied.

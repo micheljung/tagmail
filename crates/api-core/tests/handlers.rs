@@ -753,6 +753,61 @@ async fn accounts_are_listed_patched_tested_and_deleted() {
 }
 
 #[tokio::test]
+async fn moving_the_connection_needs_the_password_again() {
+    let (api, registry) = api(MemStore::default());
+    post(&api, "/api/accounts", &account_json()).await;
+    for body in [
+        json!({ "imapHost": "evil.example.net" }),
+        json!({ "imapPort": 143 }),
+        json!({ "imapTls": "starttls" }),
+        json!({ "smtpHost": "evil.example.net" }),
+        json!({ "smtpPort": 465 }),
+        json!({ "smtpTls": "tls" }),
+        json!({ "username": "other@example.com" }),
+    ] {
+        for path in ["/api/accounts/1", "/api/accounts/1/test"] {
+            let method = if path.ends_with("test") {
+                Method::Post
+            } else {
+                Method::Patch
+            };
+            let resp = send(&api, method, path, &body).await;
+            assert_eq!(
+                (resp.status, json_body(&resp)["field"].clone()),
+                (422, json!("password")),
+                "{path} {body}"
+            );
+        }
+    }
+    assert!(registry.tested.lock().unwrap().is_empty());
+    assert!(registry.updated.lock().unwrap().is_empty());
+    assert_eq!(
+        api.store().accounts.lock().unwrap()[0].1.imap_host,
+        "imap.example.com"
+    );
+
+    let unchanged = json!({ "imapHost": "imap.example.com", "smtpPort": 587, "name": "W" });
+    assert_eq!(patch(&api, "/api/accounts/1", &unchanged).await.status, 200);
+    assert_eq!(
+        post(&api, "/api/accounts/1/test", &unchanged).await.status,
+        200
+    );
+    let moved = json!({ "imapHost": "imap2.example.com", "password": "hunter2" });
+    assert_eq!(post(&api, "/api/accounts/1/test", &moved).await.status, 200);
+    assert_eq!(patch(&api, "/api/accounts/1", &moved).await.status, 200);
+    assert_eq!(
+        api.store().accounts.lock().unwrap()[0].1.imap_host,
+        "imap2.example.com"
+    );
+    assert_eq!(
+        patch(&api, "/api/accounts/9", &json!({ "imapPort": 1 }))
+            .await
+            .status,
+        404
+    );
+}
+
+#[tokio::test]
 async fn create_account_needs_an_engine() {
     let api = Api::new(Arc::new(MemStore::default()), None);
     let resp = post(&api, "/api/accounts", &account_json()).await;

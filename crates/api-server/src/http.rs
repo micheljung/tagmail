@@ -158,12 +158,29 @@ fn body_limit(method: &HttpMethod, path: &str) -> usize {
     }
 }
 
-/// `POST /api/accounts/test` or `POST /api/accounts/{id}/test`.
-fn is_account_test(method: &HttpMethod, path: &str) -> bool {
-    *method == HttpMethod::POST
-        && path.strip_prefix("/api/accounts/").is_some_and(|rest| {
+/// Patch keys that make the engine log in somewhere, so a patch with any of
+/// them probes credentials like a test does.
+const CONNECTION_KEYS: [&str; 7] = [
+    "imapHost", "imapPort", "imapTls", "smtpHost", "smtpPort", "smtpTls", "username",
+];
+
+/// `POST /api/accounts/test`, `POST /api/accounts/{id}/test`, or a
+/// `PATCH /api/accounts/{id}` that changes the connection.
+fn is_account_test(method: &HttpMethod, path: &str, body: &[u8]) -> bool {
+    let Some(rest) = path.strip_prefix("/api/accounts/") else {
+        return false;
+    };
+    match *method {
+        HttpMethod::POST => {
             rest == "test" || rest.split_once('/').is_some_and(|(_, t)| t == "test")
-        })
+        }
+        HttpMethod::PATCH => {
+            !rest.contains('/')
+                && serde_json::from_slice::<serde_json::Map<String, serde_json::Value>>(body)
+                    .is_ok_and(|patch| CONNECTION_KEYS.iter().any(|k| patch.contains_key(*k)))
+        }
+        _ => false,
+    }
 }
 
 async fn dispatch(
@@ -186,7 +203,7 @@ async fn dispatch(
                 ));
             }
         };
-        if is_account_test(&method, &path) {
+        if is_account_test(&method, &path, &body) {
             let shared = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
             if let Err(wait) = state.account_tests.check(shared) {
                 let mut resp = Response::error(
@@ -392,5 +409,37 @@ mod tests {
         );
         headers.insert("last-event-id", HeaderValue::from_static("garbage"));
         assert_eq!(resume_cursor(&headers, None), Err(()));
+    }
+
+    #[test]
+    fn connection_patches_count_as_account_tests() {
+        let post = HttpMethod::POST;
+        let patch = HttpMethod::PATCH;
+        assert!(is_account_test(&post, "/api/accounts/test", b""));
+        assert!(is_account_test(&post, "/api/accounts/3/test", b""));
+        assert!(!is_account_test(&post, "/api/accounts", b""));
+        for key in CONNECTION_KEYS {
+            let body = format!(r#"{{"{key}":1}}"#);
+            assert!(
+                is_account_test(&patch, "/api/accounts/3", body.as_bytes()),
+                "{key}"
+            );
+        }
+        assert!(!is_account_test(
+            &patch,
+            "/api/accounts/3",
+            br#"{"name":"x"}"#
+        ));
+        assert!(!is_account_test(&patch, "/api/accounts/3", b"not json"));
+        assert!(!is_account_test(
+            &patch,
+            "/api/labels/3",
+            br#"{"username":"x"}"#
+        ));
+        assert!(!is_account_test(
+            &HttpMethod::DELETE,
+            "/api/accounts/3",
+            b""
+        ));
     }
 }
