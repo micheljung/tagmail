@@ -9,6 +9,7 @@ pub mod proxy;
 pub mod ratelimit;
 pub mod session;
 pub mod sqlite_store;
+mod upload;
 pub mod web;
 mod webauthn;
 
@@ -18,8 +19,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Context;
+use tagmail_api_core::compose::Compose;
 use tagmail_api_core::{AccountRegistry, Api, ChangeFeed, EventSource};
-use tagmail_engine::{Engine, EngineConfig, ImapConnectorFactory, Stores};
+use tagmail_engine::{Engine, EngineConfig, ImapConnectorFactory, LettreSender, Stores};
 use tagmail_store::{BlobStore, CacheDb, ConfigDb};
 use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, watch};
@@ -39,6 +41,8 @@ pub const CONFIG_DB: &str = "config.db";
 pub const CACHE_DB: &str = "cache.db";
 /// Message blobs (raw and text), next to `cache.db` and as disposable.
 pub const BLOBS_DIR: &str = "blobs";
+/// Draft attachments; durable, back up with `config.db`.
+pub const UPLOADS_DIR: &str = "uploads";
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -47,7 +51,8 @@ pub struct Config {
     pub master_key: PathBuf,
     /// Generate the master key if it does not exist.
     pub init_key: bool,
-    /// Connect to IMAP servers without TLS (local test servers only).
+    /// Connect to IMAP and SMTP servers without TLS (local test servers
+    /// only).
     pub insecure_plain_imap: bool,
     pub max_sse_clients: usize,
     pub auth: AuthConfig,
@@ -68,7 +73,7 @@ pub struct Server {
 /// What syncs the accounts.
 enum Sync {
     Registry(Option<Arc<dyn AccountRegistry>>),
-    Engine(EngineConfig),
+    Engine(Box<EngineConfig>),
 }
 
 impl Server {
@@ -88,7 +93,7 @@ impl Server {
         config: &Config,
         engine: EngineConfig,
     ) -> anyhow::Result<Server> {
-        Server::start_with(config, Sync::Engine(engine)).await
+        Server::start_with(config, Sync::Engine(Box::new(engine))).await
     }
 
     async fn start_with(config: &Config, sync: Sync) -> anyhow::Result<Server> {
@@ -119,17 +124,21 @@ impl Server {
                     cache: store.cache().clone(),
                     blobs: store.blobs().clone(),
                     feed: feed.clone(),
+                    uploads: config.data_dir.join(UPLOADS_DIR),
                 };
                 if config.insecure_plain_imap {
                     tracing::warn!(
-                        "connecting to IMAP servers WITHOUT TLS (--insecure-plain-imap); development only"
+                        "connecting to IMAP and SMTP servers WITHOUT TLS (--insecure-plain-imap); development only"
                     );
                 }
                 let factory = ImapConnectorFactory {
                     insecure_plaintext: config.insecure_plain_imap,
                     ..ImapConnectorFactory::default()
                 };
-                let engine = Arc::new(Engine::new(stores, factory, engine_config));
+                let smtp = Arc::new(LettreSender {
+                    insecure_plaintext: config.insecure_plain_imap,
+                });
+                let engine = Arc::new(Engine::with_smtp(stores, factory, *engine_config, smtp));
                 let started = engine.start_all().await?;
                 tracing::info!(accounts = started, "sync engine started");
                 (
@@ -145,11 +154,13 @@ impl Server {
         let addr = listener.local_addr()?;
         let auth = Arc::new(Auth::new(store.config().clone(), &config.auth, addr.port()).await?);
         let (stop, shutdown) = watch::channel(false);
+        let mut api = Api::new(store.clone(), registry)
+            .with_image_proxy(Arc::new(ImageFetcher::with_webpki_roots()?));
+        if let Some(engine) = &engine {
+            api = api.with_compose(engine.clone() as Arc<dyn Compose>);
+        }
         let state = http::AppState {
-            api: Arc::new(
-                Api::new(store.clone(), registry)
-                    .with_image_proxy(Arc::new(ImageFetcher::with_webpki_roots()?)),
-            ),
+            api: Arc::new(api),
             events: feed.clone() as Arc<dyn EventSource>,
             sse_slots: Arc::new(Semaphore::new(config.max_sse_clients)),
             shutdown: shutdown.clone(),

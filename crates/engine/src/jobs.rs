@@ -50,6 +50,8 @@ pub(crate) struct Jobs<S> {
     pub(crate) wake: Arc<Notify>,
     /// Jobs are queued; pauses non-INBOX initial sync between windows.
     pub(crate) pending: Arc<AtomicBool>,
+    /// Poll every mailbox at the next opportunity.
+    pub(crate) poll_now: AtomicBool,
 }
 
 impl<S> Jobs<S> {
@@ -58,6 +60,7 @@ impl<S> Jobs<S> {
             queue: Mutex::new(std::array::from_fn(|_| VecDeque::new())),
             wake: Arc::new(Notify::new()),
             pending: Arc::new(AtomicBool::new(false)),
+            poll_now: AtomicBool::new(false),
         }
     }
 

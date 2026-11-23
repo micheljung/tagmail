@@ -15,7 +15,7 @@ cargo xtask stalwart down
 | `dovecot` | IMAP 10143 | `dovecot/dovecot:2.4.5` | CONDSTORE, QRESYNC, METADATA, SPECIAL-USE (`Sent`, `Drafts`, `Trash`, `Junk`, `Archive`). Does **not** advertise OBJECTID. |
 | `dovecot-gmail` | IMAP 10144 | same | Adds a virtual `[Gmail]/All` mailbox with `\All` for Gmail-mode tests |
 | `stalwart` | IMAP 10145, HTTP 10080 | `stalwartlabs/stalwart:v0.15.3` | Advertises OBJECTID. Admin `admin` / `admin` |
-| `mailpit` | SMTP 10025, UI 10825 | `axllent/mailpit:v1.27` | SMTP sink |
+| `mailpit` | SMTP 10025, UI and API 10825 | `axllent/mailpit:v1.27` | SMTP sink; accepts any login, also without TLS (test stack only) |
 
 Every server has the users `user1` / `pass1` and `user2` / `pass2`, with
 cleartext login over plain IMAP. Dovecot also has `engine1` … `engine9` /
@@ -91,6 +91,24 @@ For the static musl build, the bundled SQLite needs
 `LIBSQLITE3_FLAGS=-DSQLITE_DISABLE_LFS` (glibc headers otherwise reference
 `open64` and friends, which musl does not export). Pass the manifest into the
 container with `-e TAGMAIL_SEED_MANIFEST=/seed.json` after copying it there.
+
+## Send integration tests
+
+`crates/engine/tests/send.rs` saves drafts to Dovecot's Drafts as
+`engine8` and `engine9`, submits through Mailpit and checks what Mailpit
+received (its HTTP API) and what Sent holds:
+
+```bash
+cargo xtask dovecot up
+cargo test -p tagmail-engine --features mailpit-tests --test send
+```
+
+`TAGMAIL_SMTP_ADDR` (default `127.0.0.1:10025`) and `TAGMAIL_MAILPIT_API`
+(default `127.0.0.1:10825`) point elsewhere. With a remote Docker daemon,
+run the static binary in the Dovecot container's network namespace as
+above, with `TAGMAIL_SMTP_ADDR=mailpit:1025` and
+`TAGMAIL_MAILPIT_API=mailpit:8025`; add `--log-driver k8s-file` to
+`docker create` if `docker logs` shows nothing (Podman's journald driver).
 
 ## RSS gate
 

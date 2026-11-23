@@ -164,6 +164,7 @@ pub struct Api<S> {
     pub(crate) store: Arc<S>,
     pub(crate) registry: Option<Arc<dyn AccountRegistry>>,
     pub(crate) proxy: Option<Arc<dyn ImageProxy>>,
+    pub(crate) compose: Option<Arc<dyn crate::compose::Compose>>,
     /// URL signing keys and when they were read.
     pub(crate) keys: tokio::sync::Mutex<Option<(std::time::Instant, UrlKeys)>>,
 }
@@ -176,6 +177,7 @@ impl<S: Store> Api<S> {
             store,
             registry,
             proxy: None,
+            compose: None,
             keys: tokio::sync::Mutex::new(None),
         }
     }
@@ -213,6 +215,17 @@ impl<S: Store> Api<S> {
                 RouteId::ProxyImage => self.proxy_image(params[0]).await,
                 RouteId::ImageSenders => self.image_senders().await,
                 RouteId::SetImageSender => self.set_image_sender(req.body).await,
+                RouteId::Identities => self.identities().await,
+                RouteId::CreateDraft => self.create_draft(req.body).await,
+                RouteId::Draft => self.get_draft(params[0]).await,
+                RouteId::UpdateDraft => self.update_draft(params[0], req.body).await,
+                RouteId::DeleteDraft => self.delete_draft(params[0]).await,
+                RouteId::DeleteAttachment => self.delete_attachment(params[0]).await,
+                RouteId::Send => self.send(req.body).await,
+                RouteId::Outbox => self.outbox().await,
+                RouteId::CancelOutbox => self.cancel_outbox(params[0]).await,
+                RouteId::RetryOutbox => self.retry_outbox(params[0]).await,
+                RouteId::Reply => self.reply(params[0], req.query).await,
             },
             Err(Miss::MethodNotAllowed) => Ok(Response::error(
                 405,

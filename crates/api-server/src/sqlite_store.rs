@@ -125,6 +125,7 @@ fn entity_dto(e: Entity) -> EntityDto {
         Entity::Thread => EntityDto::Thread,
         Entity::Message => EntityDto::Message,
         Entity::Label => EntityDto::Label,
+        Entity::Outbox => EntityDto::Outbox,
     }
 }
 
@@ -354,6 +355,15 @@ fn thread_rows(conn: &Connection, ids: &[ThreadId]) -> tagmail_store::Result<Vec
     }
 
     Ok(ids.iter().filter_map(|id| rows.remove(id)).collect())
+}
+
+/// `account.server_saves_sent` for providers known to file submitted mail
+/// in Sent themselves (Gmail); `None` = probe on the first send.
+fn saves_sent_preset(imap_host: &str) -> Option<bool> {
+    let host = imap_host.trim_end_matches('.').to_ascii_lowercase();
+    ["imap.gmail.com", "imap.googlemail.com"]
+        .contains(&host.as_str())
+        .then_some(true)
 }
 
 impl Store for SqliteStore {
@@ -726,10 +736,12 @@ impl Store for SqliteStore {
                         r.get(0)
                     })?;
                 let sealed = vault.seal(AccountId(id), account.password.expose())?;
+                let saves_sent = saves_sent_preset(&account.imap_host);
                 tx.execute(
                     "INSERT INTO account (id, name, imap_host, imap_port, imap_tls, smtp_host, \
-                     smtp_port, smtp_tls, username, secret_ct, secret_nonce, max_connections) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                     smtp_port, smtp_tls, username, secret_ct, secret_nonce, max_connections, \
+                     server_saves_sent) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                     params![
                         id,
                         account.name,
@@ -743,10 +755,23 @@ impl Store for SqliteStore {
                         sealed.ciphertext,
                         sealed.nonce,
                         account.max_connections,
+                        saves_sent,
                     ],
                 )?;
                 Ok(AccountId(id))
             })
             .await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gmail_saves_sent_itself() {
+        assert_eq!(saves_sent_preset("imap.gmail.com"), Some(true));
+        assert_eq!(saves_sent_preset("IMAP.googlemail.com."), Some(true));
+        assert_eq!(saves_sent_preset("imap.example.com"), None);
     }
 }

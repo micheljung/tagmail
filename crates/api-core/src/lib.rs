@@ -4,6 +4,8 @@
 
 pub mod api;
 pub mod auth_dto;
+pub mod compose;
+pub mod compose_dto;
 pub mod dto;
 pub mod events;
 pub mod id_index;

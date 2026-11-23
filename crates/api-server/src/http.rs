@@ -25,10 +25,13 @@ use tokio::time::Sleep;
 use crate::auth::{self, Auth, Principal};
 use crate::sqlite_store::SqliteStore;
 use crate::web::WebDir;
-use crate::{pairing, webauthn};
+use crate::{pairing, upload, webauthn};
 
-/// Request bodies are small JSON documents in M1.
+/// Request bodies are small JSON documents, except drafts
+/// ([`MAX_DRAFT_BODY`]) and attachment uploads (streamed, see
+/// [`crate::upload`]).
 pub const MAX_BODY: usize = 64 * 1024;
+pub use tagmail_api_core::compose::MAX_DRAFT_BODY;
 /// SSE comment interval; keeps proxies from closing idle streams.
 pub const HEARTBEAT: Duration = Duration::from_secs(25);
 
@@ -74,6 +77,7 @@ server_routes! {
     delete "/api/devices/{id}" => auth::revoke_device,
     post "/api/pairing" => pairing::create,
     post "/api/pairing/exchange" => pairing::exchange,
+    post "/api/attachments" => upload::upload,
 }
 
 /// Every `/api` route as (method, path template): the server's own and
@@ -131,16 +135,38 @@ async fn no_referrer(mut resp: HttpResponse) -> HttpResponse {
     resp
 }
 
+/// Body cap of an api-core request: drafts quote whole threads.
+fn body_limit(method: &HttpMethod, path: &str) -> usize {
+    let draft = match *method {
+        HttpMethod::POST => path == "/api/drafts",
+        HttpMethod::PUT => path
+            .strip_prefix("/api/drafts/")
+            .is_some_and(|id| !id.contains('/')),
+        _ => false,
+    };
+    if draft { MAX_DRAFT_BODY } else { MAX_BODY }
+}
+
 async fn dispatch(
     State(state): State<AppState>,
     method: HttpMethod,
     uri: Uri,
-    body: Bytes,
+    body: Body,
 ) -> HttpResponse {
     let Ok(path) = percent_encoding::percent_decode_str(uri.path()).decode_utf8() else {
         return to_http(Response::error(400, "bad_request", "path is not UTF-8"));
     };
     if auth::is_api(&path) {
+        let body: Bytes = match axum::body::to_bytes(body, body_limit(&method, &path)).await {
+            Ok(body) => body,
+            Err(_) => {
+                return to_http(Response::error(
+                    413,
+                    "too_large",
+                    "the request body is too large",
+                ));
+            }
+        };
         return api(state, method, uri.path(), uri.query().unwrap_or(""), &body).await;
     }
     match &state.web {

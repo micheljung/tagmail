@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::hash::{BuildHasher, RandomState};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -26,6 +27,7 @@ use crate::ctx::Ctx;
 use crate::error::{Error, Result};
 use crate::jobs::{JobFuture, Jobs, Priority, erase};
 use crate::raw;
+use crate::smtp::{LettreSender, SmtpSender};
 use crate::sync::{self, Progress};
 
 /// Compressed size of the raw message cache before LRU eviction.
@@ -49,6 +51,20 @@ pub struct EngineConfig {
     /// The raw cache is trimmed to this many compressed bytes after each
     /// fetch.
     pub raw_cache_bytes: u64,
+    /// A draft is saved to IMAP this long after its last edit.
+    pub draft_debounce: Duration,
+    /// How long Sent is watched after the first send of an account whose
+    /// server may file sent mail itself.
+    pub sent_probe: Duration,
+    /// Outbox and draft-save retry backoff, doubled up to the max.
+    pub outbox_retry_min: Duration,
+    pub outbox_retry_max: Duration,
+    /// SMTP attempts before an item fails for good.
+    pub max_send_attempts: u32,
+    /// Uploads not attached to a draft are removed after this long.
+    pub upload_grace: Duration,
+    /// Sent outbox items stay listed this long.
+    pub sent_keep: Duration,
 }
 
 impl Default for EngineConfig {
@@ -61,6 +77,13 @@ impl Default for EngineConfig {
             pool: PoolConfig::default(),
             raw_cap: DEFAULT_RAW_CAP,
             raw_cache_bytes: DEFAULT_RAW_CACHE_BYTES,
+            draft_debounce: Duration::from_secs(2),
+            sent_probe: Duration::from_secs(10),
+            outbox_retry_min: Duration::from_secs(30),
+            outbox_retry_max: Duration::from_secs(60 * 60),
+            max_send_attempts: 5,
+            upload_grace: Duration::from_secs(24 * 60 * 60),
+            sent_keep: Duration::from_secs(60 * 60),
         }
     }
 }
@@ -121,6 +144,9 @@ pub struct Stores {
     pub cache: Arc<CacheDb>,
     pub blobs: Arc<BlobStore>,
     pub feed: Arc<ChangeFeed>,
+    /// Attachments of drafts, `<id>` files plus `tmp/` for uploads in
+    /// progress; durable like `config.db`.
+    pub uploads: PathBuf,
 }
 
 /// Reads an account and decrypts its password.
@@ -188,30 +214,83 @@ struct Handle<S> {
     jobs: Arc<Jobs<S>>,
 }
 
-struct Inner<F: ConnectorFactory> {
-    config: EngineConfig,
+pub(crate) struct Inner<F: ConnectorFactory> {
+    pub(crate) config: EngineConfig,
     factory: F,
-    stores: Stores,
+    pub(crate) stores: Stores,
     accounts: Mutex<HashMap<AccountId, Handle<Session<F>>>>,
     runtime: tokio::runtime::Handle,
+    pub(crate) smtp: Arc<dyn SmtpSender>,
+    /// Wakes the compose runner.
+    pub(crate) outbox_wake: Notify,
+    runner: Mutex<Option<(watch::Sender<bool>, JoinHandle<()>)>>,
 }
 
 /// The sync engine: implements [`AccountRegistry`] for the API.
 pub struct Engine<F: ConnectorFactory = ImapConnectorFactory> {
-    inner: Arc<Inner<F>>,
+    pub(crate) inner: Arc<Inner<F>>,
+}
+
+impl<F: ConnectorFactory> Clone for Engine<F> {
+    fn clone(&self) -> Self {
+        Engine {
+            inner: self.inner.clone(),
+        }
+    }
 }
 
 impl<F: ConnectorFactory> Engine<F> {
     /// Must be called inside a tokio runtime, which runs the account tasks.
     pub fn new(stores: Stores, factory: F, config: EngineConfig) -> Engine<F> {
-        Engine {
+        Engine::with_smtp(stores, factory, config, Arc::new(LettreSender::default()))
+    }
+
+    /// Like [`Engine::new`], submitting mail through `smtp`. Starts the
+    /// compose runner (drafts, outbox).
+    pub fn with_smtp(
+        stores: Stores,
+        factory: F,
+        config: EngineConfig,
+        smtp: Arc<dyn SmtpSender>,
+    ) -> Engine<F> {
+        if let Err(e) = std::fs::create_dir_all(stores.uploads.join(crate::compose::UPLOAD_TMP)) {
+            tracing::error!(error = %e, dir = %stores.uploads.display(), "cannot create the upload directory");
+        }
+        let engine = Engine {
             inner: Arc::new(Inner {
                 config,
                 factory,
                 stores,
                 accounts: Mutex::new(HashMap::new()),
                 runtime: tokio::runtime::Handle::current(),
+                smtp,
+                outbox_wake: Notify::new(),
+                runner: Mutex::new(None),
             }),
+        };
+        let (stop, stopped) = watch::channel(false);
+        let task = engine
+            .inner
+            .runtime
+            .spawn(crate::outbox::run(engine.clone(), stopped));
+        *engine
+            .inner
+            .runner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some((stop, task));
+        engine
+    }
+
+    /// Syncs every mailbox of the account soon, e.g. after a Sent copy.
+    pub(crate) fn request_poll(&self, account: AccountId) {
+        let accounts = self
+            .inner
+            .accounts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(h) = accounts.get(&account) {
+            h.jobs.poll_now.store(true, Ordering::SeqCst);
+            h.jobs.wake.notify_one();
         }
     }
 
@@ -304,6 +383,20 @@ impl<F: ConnectorFactory> Engine<F> {
 
     /// Stops all accounts and waits for their tasks.
     pub async fn shutdown(&self) {
+        let runner = self
+            .inner
+            .runner
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        if let Some((stop, task)) = runner {
+            stop.send_replace(true);
+            if let Err(e) = task.await
+                && e.is_panic()
+            {
+                tracing::error!("compose runner panicked");
+            }
+        }
         let handles: Vec<Handle<Session<F>>> = self
             .inner
             .accounts
@@ -350,9 +443,7 @@ impl<F: ConnectorFactory> AccountRegistry for Engine<F> {
         account: AccountId,
         message: MessageRowId,
     ) -> BoxFuture<Result<(), FetchRawError>> {
-        let engine = Engine {
-            inner: self.inner.clone(),
-        };
+        let engine = self.clone();
         let (cap, cache_max) = (self.inner.config.raw_cap, self.inner.config.raw_cache_bytes);
         Box::pin(async move {
             let job = engine.run_job(account, Priority::Interactive, move |s, ctx| {
@@ -607,6 +698,9 @@ async fn account_loop<C: Connector>(
     let mut settled = false;
     loop {
         serve_jobs(&mut worker, ctx, jobs).await?;
+        if jobs.poll_now.swap(false, Ordering::SeqCst) {
+            next_poll = Instant::now();
+        }
         let inbox_live = rows
             .iter()
             .find(|r| r.is_inbox() && r.state == SyncState::Live)
@@ -734,6 +828,7 @@ mod tests {
             cache: cache.ctx.cache.clone(),
             blobs: cache.ctx.blobs.clone(),
             feed: cache.feed.clone(),
+            uploads: dir.path().join("uploads"),
         };
         let config = EngineConfig {
             poll_interval: poll,

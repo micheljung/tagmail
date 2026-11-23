@@ -8,6 +8,7 @@ use std::path::Path;
 use ts_rs::{Config, ExportError, TS};
 
 use crate::auth_dto::*;
+use crate::compose_dto::*;
 use crate::dto::*;
 
 /// Path of the generated bindings, relative to the workspace root.
@@ -89,6 +90,18 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<ThreadsDto>(&cfg, &mut files)?;
     file::<TlsMode>(&cfg, &mut files)?;
     file::<VersionDto>(&cfg, &mut files)?;
+    file::<AttachmentDto>(&cfg, &mut files)?;
+    file::<DraftDto>(&cfg, &mut files)?;
+    file::<DraftInputDto>(&cfg, &mut files)?;
+    file::<IdentitiesDto>(&cfg, &mut files)?;
+    file::<IdentityDto>(&cfg, &mut files)?;
+    file::<OutboxDto>(&cfg, &mut files)?;
+    file::<OutboxItemDto>(&cfg, &mut files)?;
+    file::<OutboxStateDto>(&cfg, &mut files)?;
+    file::<ReplyDraftDto>(&cfg, &mut files)?;
+    file::<ReplyMode>(&cfg, &mut files)?;
+    file::<SendDto>(&cfg, &mut files)?;
+    file::<SendStatusDto>(&cfg, &mut files)?;
     files.insert(CSP_FILE.to_owned(), csp());
     let index: String = std::iter::once(INDEX_HEADER.to_owned())
         .chain(files.keys().map(|f| {

@@ -9,7 +9,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tagmail_api_core::ChangeFeed;
 use tagmail_core::AccountId;
-use tagmail_engine::{AccountSettings, ConnectorFactory, Engine, EngineConfig, Stores};
+use tagmail_engine::{
+    AccountSettings, ConnectorFactory, Engine, EngineConfig, LettreSender, Stores,
+};
 use tagmail_imap::*;
 use tagmail_store::rusqlite::params;
 use tagmail_store::{BlobStore, CacheDb, ConfigDb, MasterKey, Vault};
@@ -28,6 +30,19 @@ pub fn addr() -> (String, u16) {
     let addr = std::env::var("TAGMAIL_IMAP_ADDR").unwrap_or_else(|_| "127.0.0.1:10143".into());
     let (host, port) = addr.rsplit_once(':').expect("host:port");
     (host.to_owned(), port.parse().expect("port"))
+}
+
+/// Mailpit's SMTP port (`TAGMAIL_SMTP_ADDR`).
+pub fn smtp_addr() -> (String, u16) {
+    let addr = std::env::var("TAGMAIL_SMTP_ADDR").unwrap_or_else(|_| "127.0.0.1:10025".into());
+    let (host, port) = addr.rsplit_once(':').expect("host:port");
+    (host.to_owned(), port.parse().expect("port"))
+}
+
+/// How the account of [`Fixture::start_sending`] is set up.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Sending {
+    pub server_saves_sent: Option<bool>,
 }
 
 pub fn server_config(
@@ -222,6 +237,7 @@ pub struct Fixture {
 
 pub struct Running {
     pub engine: Engine<DovecotFactory>,
+    pub config: Arc<ConfigDb>,
     pub cache: Arc<CacheDb>,
     pub feed: Arc<ChangeFeed>,
     pub log: Log,
@@ -248,6 +264,20 @@ impl Fixture {
         capability_override: CapabilityOverride,
         fail_after: Option<usize>,
     ) -> Running {
+        self.start_with(capability_override, fail_after, None).await
+    }
+
+    /// An engine that submits to Mailpit without TLS.
+    pub async fn start_sending(&self, sending: Sending) -> Running {
+        self.start_with(no_override(), None, Some(sending)).await
+    }
+
+    async fn start_with(
+        &self,
+        capability_override: CapabilityOverride,
+        fail_after: Option<usize>,
+        sending: Option<Sending>,
+    ) -> Running {
         let dir = self.dir.path().to_owned();
         let (user, password) = (self.user, self.password);
         let (config, cache) = tokio::task::spawn_blocking(move || {
@@ -271,13 +301,23 @@ impl Fixture {
         };
         let vault = Arc::new(Vault::unlock(&config, &master).await.unwrap());
         let sealed = vault.seal(AccountId(1), password).unwrap();
+        let (smtp_host, smtp_port) = smtp_addr();
+        let saves_sent = sending.and_then(|s| s.server_saves_sent);
         config
             .write(move |tx| {
                 tx.execute(
                     "INSERT OR IGNORE INTO account (id, name, imap_host, imap_port, imap_tls, \
-                     smtp_host, smtp_port, smtp_tls, username, secret_ct, secret_nonce) \
-                     VALUES (1, 'it', 'dovecot', 10143, 'tls', 'mailpit', 10025, 'tls', ?1, ?2, ?3)",
-                    params![user, sealed.ciphertext, sealed.nonce],
+                     smtp_host, smtp_port, smtp_tls, username, secret_ct, secret_nonce, \
+                     server_saves_sent) \
+                     VALUES (1, 'it', 'dovecot', 10143, 'tls', ?4, ?5, 'starttls', ?1, ?2, ?3, ?6)",
+                    params![
+                        user,
+                        sealed.ciphertext,
+                        sealed.nonce,
+                        smtp_host,
+                        smtp_port,
+                        saves_sent
+                    ],
                 )?;
                 Ok(())
             })
@@ -288,13 +328,14 @@ impl Fixture {
         let fetch_log = Log::default();
         log(&fetch_log).fail_after = fail_after;
         let stores = Stores {
-            config,
+            config: config.clone(),
             vault,
             cache: cache.clone(),
             blobs,
             feed: feed.clone(),
+            uploads: self.dir.path().join("uploads"),
         };
-        let engine = Engine::new(
+        let engine = Engine::with_smtp(
             stores,
             DovecotFactory {
                 capability_override,
@@ -304,12 +345,20 @@ impl Fixture {
                 poll_interval: POLL,
                 retry_min: Duration::from_millis(200),
                 retry_max: Duration::from_secs(1),
+                draft_debounce: Duration::ZERO,
+                sent_probe: Duration::from_secs(3),
+                outbox_retry_min: Duration::from_secs(1),
+                outbox_retry_max: Duration::from_secs(2),
                 ..EngineConfig::default()
             },
+            Arc::new(LettreSender {
+                insecure_plaintext: true,
+            }),
         );
         engine.start_all().await.unwrap();
         Running {
             engine,
+            config,
             cache,
             feed,
             log: fetch_log,

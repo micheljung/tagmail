@@ -96,9 +96,11 @@ jobs:
         env:
           TAGMAIL_SEED_MANIFEST: ${{ env.SEED_DIR }}/tagmail-seed.json
         run: cargo test -p tagmail-engine --features dovecot-tests --test dovecot --test dovecot_seed -- --nocapture
+      - name: Send integration tests (Dovecot and Mailpit)
+        run: cargo test -p tagmail-engine --features mailpit-tests --test send
       - name: Server logs
         if: failure()
-        run: docker compose -f test/compose.yml logs dovecot
+        run: docker compose -f test/compose.yml logs dovecot mailpit
 
   web-playwright:
     runs-on: ubuntu-latest

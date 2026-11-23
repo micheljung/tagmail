@@ -18,15 +18,18 @@ pub enum Entity {
     Thread,
     Message,
     Label,
+    /// A `config.db` outbox item; payload `{status, error?}`.
+    Outbox,
 }
 
 impl Entity {
-    const ALL: [Entity; 5] = [
+    const ALL: [Entity; 6] = [
         Entity::Account,
         Entity::Mailbox,
         Entity::Thread,
         Entity::Message,
         Entity::Label,
+        Entity::Outbox,
     ];
 
     fn as_str(self) -> &'static str {
@@ -36,6 +39,7 @@ impl Entity {
             Entity::Thread => "thread",
             Entity::Message => "message",
             Entity::Label => "label",
+            Entity::Outbox => "outbox",
         }
     }
 }

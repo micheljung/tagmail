@@ -52,12 +52,14 @@ async fn config_migrations_apply_to_fresh_db_and_reopen() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("config.db");
     let db = ConfigDb::open(&path).unwrap();
-    assert_eq!(user_version(&db).await, 2);
+    assert_eq!(user_version(&db).await, 3);
     assert_eq!(
         tables(&db).await,
         [
             "account",
             "device",
+            "draft",
+            "draft_purge",
             "identity",
             "image_sender",
             "label_job",
@@ -71,13 +73,14 @@ async fn config_migrations_apply_to_fresh_db_and_reopen() {
             "pending_op",
             "push_subscription",
             "session",
+            "upload",
         ]
     );
     integrity(&db).await;
     db.close().await.unwrap();
 
     let db = ConfigDb::open(&path).unwrap();
-    assert_eq!(user_version(&db).await, 2);
+    assert_eq!(user_version(&db).await, 3);
     db.close().await.unwrap();
 }
 
@@ -124,7 +127,7 @@ async fn newer_schema_is_refused() {
         ConfigDb::open(&path),
         Err(Error::SchemaTooNew {
             found: 99,
-            supported: 2
+            supported: 3
         })
     ));
 }
@@ -218,6 +221,7 @@ fn cache_references(conn: &Connection) -> rusqlite::Result<Vec<String>> {
         "op_id",
         "cred_id",
         "reply_to_email_id",
+        "draft_id",
     ];
     let mut found = Vec::new();
     for table in table_names(conn)? {
@@ -236,7 +240,7 @@ fn cache_references(conn: &Connection) -> rusqlite::Result<Vec<String>> {
             .query_map([&table], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
         for target in targets {
-            if !["account", "identity"].contains(&target.as_str()) {
+            if !["account", "identity", "draft"].contains(&target.as_str()) {
                 found.push(format!("{table} -> {target}"));
             }
         }

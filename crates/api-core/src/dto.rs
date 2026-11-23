@@ -105,6 +105,8 @@ pub enum EntityDto {
     Thread,
     Message,
     Label,
+    /// Payload `{status, error?}`; see `OutboxItemDto`.
+    Outbox,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]

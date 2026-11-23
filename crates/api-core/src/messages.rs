@@ -88,7 +88,7 @@ fn attachment_disposition(name: Option<&str>) -> String {
     format!("attachment; filename*=UTF-8''{encoded}")
 }
 
-async fn blocking<T: Send + 'static>(
+pub(crate) async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, StoreError> {
     tokio::task::spawn_blocking(f)
@@ -140,7 +140,10 @@ impl<S: Store> Api<S> {
         Ok(keys)
     }
 
-    async fn record(&self, id: &str) -> Result<Result<MessageRecord, Response>, StoreError> {
+    pub(crate) async fn record(
+        &self,
+        id: &str,
+    ) -> Result<Result<MessageRecord, Response>, StoreError> {
         let Some(id) = parse_id(id) else {
             return Ok(Err(not_found("message")));
         };
@@ -152,7 +155,10 @@ impl<S: Store> Api<S> {
     }
 
     /// The raw message, fetched from the server first if it is not cached.
-    async fn raw(&self, record: &MessageRecord) -> Result<Result<Vec<u8>, Response>, StoreError> {
+    pub(crate) async fn raw(
+        &self,
+        record: &MessageRecord,
+    ) -> Result<Result<Vec<u8>, Response>, StoreError> {
         if let Some(raw) = self.store.raw_message(record.id).await? {
             return Ok(Ok(raw));
         }

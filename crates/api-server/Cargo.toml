@@ -25,6 +25,7 @@ futures-util.workspace = true
 getrandom.workspace = true
 hex.workspace = true
 ipnet.workspace = true
+multer.workspace = true
 percent-encoding.workspace = true
 reqwest = { workspace = true, features = ["rustls-no-provider"] }
 rustls.workspace = true

@@ -3,13 +3,19 @@
 //! change feed.
 
 mod cache;
+mod compose;
+#[cfg(test)]
+mod compose_tests;
 mod ctx;
 mod error;
 #[cfg(test)]
 mod fake;
 mod jobs;
 mod message;
+mod outbox;
+mod outgoing;
 mod raw;
+mod smtp;
 mod supervisor;
 mod sync;
 #[cfg(test)]
@@ -20,6 +26,7 @@ mod threading;
 
 pub use error::{Error, Result};
 pub use jobs::{JobFuture, MAX_QUEUED, Priority};
+pub use smtp::{LettreSender, SMTP_TIMEOUT, SmtpError, SmtpSender, SmtpServer};
 pub use supervisor::{
     AccountSettings, ConnectorFactory, Engine, EngineConfig, ImapConnectorFactory, Stores,
     load_account,

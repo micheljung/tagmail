@@ -20,6 +20,17 @@ pub enum RouteId {
     ProxyImage,
     ImageSenders,
     SetImageSender,
+    Identities,
+    CreateDraft,
+    Draft,
+    UpdateDraft,
+    DeleteDraft,
+    DeleteAttachment,
+    Send,
+    Outbox,
+    CancelOutbox,
+    RetryOutbox,
+    Reply,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -54,6 +65,21 @@ pub const ROUTES: &[Route] = &[
     route(Method::Get, "/api/proxy/img/{token}", RouteId::ProxyImage),
     route(Method::Get, "/api/image-senders", RouteId::ImageSenders),
     route(Method::Post, "/api/image-senders", RouteId::SetImageSender),
+    route(Method::Get, "/api/identities", RouteId::Identities),
+    route(Method::Post, "/api/drafts", RouteId::CreateDraft),
+    route(Method::Get, "/api/drafts/{id}", RouteId::Draft),
+    route(Method::Put, "/api/drafts/{id}", RouteId::UpdateDraft),
+    route(Method::Delete, "/api/drafts/{id}", RouteId::DeleteDraft),
+    route(
+        Method::Delete,
+        "/api/attachments/{id}",
+        RouteId::DeleteAttachment,
+    ),
+    route(Method::Post, "/api/send", RouteId::Send),
+    route(Method::Get, "/api/outbox", RouteId::Outbox),
+    route(Method::Delete, "/api/outbox/{id}", RouteId::CancelOutbox),
+    route(Method::Post, "/api/outbox/{id}/retry", RouteId::RetryOutbox),
+    route(Method::Get, "/api/messages/{id}/reply", RouteId::Reply),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

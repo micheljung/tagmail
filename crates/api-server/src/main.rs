@@ -52,8 +52,8 @@ struct Cli {
     /// present)
     #[arg(long)]
     web_dir: Option<PathBuf>,
-    /// DEVELOPMENT ONLY: connect to IMAP servers without TLS, sending
-    /// passwords in cleartext (local test servers)
+    /// DEVELOPMENT ONLY: connect to IMAP and SMTP servers without TLS,
+    /// sending passwords in cleartext (local test servers)
     #[arg(long)]
     insecure_plain_imap: bool,
     /// Maximum concurrent event streams

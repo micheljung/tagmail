@@ -5,6 +5,7 @@ use crate::error::{Error, Result};
 pub(crate) const CONFIG: &[&str] = &[
     include_str!("../migrations/config/V1__init.sql"),
     include_str!("../migrations/config/V2__image_sender.sql"),
+    include_str!("../migrations/config/V3__compose.sql"),
 ];
 pub(crate) const CACHE: &[&str] = &[
     include_str!("../migrations/cache/V1__init.sql"),

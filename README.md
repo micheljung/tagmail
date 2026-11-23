@@ -85,8 +85,8 @@ tagmail-server --data-dir /var/lib/tagmail --public-origin https://mail.example.
 - `--web-dir` serves the built web app (`web/build`) at `/`. By default a
   `web` directory next to the binary is used if present.
 - `--insecure-plain-imap` is for local test servers only: it connects to
-  IMAP without TLS for **every** account on the server, not just one, and
-  sends their passwords in cleartext.
+  IMAP and SMTP without TLS for **every** account on the server, not just
+  one, and sends their passwords in cleartext.
 
 ### Login
 
@@ -121,6 +121,30 @@ exchanges it once for a device token, which only its Rust side sends as
 Device tokens are hashed at rest and revocable, and cannot pair devices
 or manage sessions, devices or passkeys.
 
+### Sending
+
+Drafts live in the account's IMAP Drafts mailbox: each save APPENDs the
+new version with `\Draft` and expunges the previous one, two seconds
+after the last edit. Attachments are uploaded to the server first (at
+most 25 MB each and 35 MB per message) and kept in `uploads/` in the
+data directory; uploads no draft uses are removed after a day.
+
+Sending queues the message in a durable outbox in `config.db`. Each send
+request carries a client-generated id, so a repeated request never sends
+twice. Delivery is **at least once**: the outbox marks a message as
+sending before the SMTP transaction; if the server stops after the SMTP
+server accepted the message but before the outbox recorded it, the
+message is looked up by its Message-ID in Sent on restart and sent again
+only if it is not there. A provider that does not file sent mail in Sent
+itself can therefore receive such a message twice. Failed messages stay
+in the outbox with the SMTP error until retried or cancelled.
+
+After sending, the copy in Sent comes from the provider when it files
+sent mail itself (preset for Gmail, otherwise detected on the first send
+by watching Sent for ten seconds) and is APPENDed by Tagmail otherwise,
+never twice. Replies carry `In-Reply-To` and `References`, so the Sent
+copy joins the conversation.
+
 ### Master key
 
 ```sh
@@ -137,8 +161,9 @@ The server looks for the key in this order:
 
 Without a key file it refuses to start. `--init-key` generates one with
 mode 0600. Keep the key outside the data directory: the server logs a
-warning at every start if it is inside. Back up `config.db` and the key
-together. `cache.db` needs no backup.
+warning at every start if it is inside. Back up `config.db`, `uploads/`
+(attachments of drafts not yet sent) and the key together. `cache.db` and
+`blobs/` need no backup.
 
 ## Contributing
 
