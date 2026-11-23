@@ -750,6 +750,58 @@ async fn expunge_uids_only_touches_the_given_messages() {
 }
 
 #[tokio::test]
+async fn append_stream_sends_the_literal_in_chunks() {
+    let body: Vec<u8> = (0..300_000u32).map(|i| b'a' + (i % 26) as u8).collect();
+    let steps = with(
+        login("UIDPLUS"),
+        vec![
+            cmd(
+                "APPEND \"Sent \\\"x\\\"\" (\\Seen) {300000}",
+                &["{tag} OK [APPENDUID 9 12] appended"],
+            ),
+            cmd(
+                "STATUS \"Sent \\\"x\\\"\" (MESSAGES UIDNEXT UIDVALIDITY UNSEEN)",
+                &[
+                    "* STATUS \"Sent \\\"x\\\"\" (MESSAGES 1 UIDNEXT 13 UIDVALIDITY 9 UNSEEN 0)",
+                    "{tag} OK",
+                ],
+            ),
+            cmd("APPEND \"Drafts\" () {3}", &["{tag} NO [OVERQUOTA] full"]),
+            cmd("NOOP", &["{tag} OK"]),
+        ],
+    );
+    let (mut s, server) = session(steps, &config()).await;
+    let r = s
+        .append_stream(
+            "Sent \"x\"",
+            &[Flag::Seen],
+            body.len() as u64,
+            &mut body.as_slice(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (r.uid, r.uid_validity),
+        (Some(Uid(12)), Some(UidValidity(9)))
+    );
+    let err = s
+        .append_stream("Drafts", &[], 3, &mut &b"abc"[..])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::No { .. }), "{err:?}");
+    assert!(s.is_usable());
+    s.noop().await.unwrap();
+    let seen = server.await.unwrap();
+    assert!(seen[seen.len() - 4].ends_with(std::str::from_utf8(&body).unwrap()));
+
+    let err = s
+        .append_stream("Drafts\u{e9}", &[], 1, &mut &b"x"[..])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, Error::InvalidArgument(_)), "{err:?}");
+}
+
+#[tokio::test]
 async fn append_trusts_status_uidvalidity() {
     let steps = with(
         login("UIDPLUS"),

@@ -22,6 +22,8 @@ pub(crate) trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T: AsyncRead + AsyncWrite + Unpin + Send> Io for T {}
 
 const READ_CHUNK: usize = 16 * 1024;
+/// Bytes of a streamed literal written at a time.
+const LITERAL_CHUNK: usize = 64 * 1024;
 
 /// One low-level event, with codec failures already classified.
 #[derive(Debug)]
@@ -181,6 +183,98 @@ impl Conn {
         self.write_buf
             .extend_from_slice(format!("{} {line}\r\n", tag.as_ref()).as_bytes());
         self.finish(tag.as_ref()).await
+    }
+
+    /// Sends `line` ending in a synchronizing literal of `size` bytes and,
+    /// once the server asks for it, streams the literal from `body` in
+    /// chunks, so its size does not count against memory. A literal that
+    /// fails half-way leaves the connection broken.
+    pub async fn run_with_literal(
+        &mut self,
+        line: &str,
+        size: u64,
+        body: &mut (dyn AsyncRead + Unpin + Send),
+    ) -> Result<(Collected, Done)> {
+        if line.bytes().any(|c| c == b'\r' || c == b'\n') {
+            return Err(Error::InvalidArgument(
+                "raw command contains a line break".into(),
+            ));
+        }
+        let tag = self.tag();
+        let tag = tag.as_ref().to_owned();
+        self.write_buf
+            .extend_from_slice(format!("{tag} {line} {{{size}}}\r\n").as_bytes());
+        let timeout = self.timeout;
+        let mut out = Collected::default();
+        let accepted = tokio::time::timeout(timeout, async {
+            loop {
+                match self.next_event().await? {
+                    ConnEvent::Next(Event::ContinuationRequestReceived { .. }) => {
+                        return Ok::<_, Error>(None);
+                    }
+                    event => {
+                        if let Some(done) = self.absorb(event, &tag, &mut out)? {
+                            return Ok(Some(done));
+                        }
+                    }
+                }
+            }
+        })
+        .await;
+        match accepted {
+            Ok(Ok(Some(refused))) => return Ok((out, refused)),
+            Ok(Ok(None)) => {}
+            Ok(Err(e)) => {
+                if e.is_fatal() {
+                    self.broken = true;
+                }
+                return Err(e);
+            }
+            Err(_) => {
+                self.broken = true;
+                return Err(Error::Timeout);
+            }
+        }
+        if let Err(e) = self.write_literal(size, body).await {
+            self.broken = true;
+            return Err(e);
+        }
+        let (more, done) = self.finish(&tag).await?;
+        out.data.extend(more.data);
+        out.raw_fetches.extend(more.raw_fetches);
+        out.untagged.extend(more.untagged);
+        out.too_long |= more.too_long;
+        Ok((out, done))
+    }
+
+    async fn write_literal(
+        &mut self,
+        size: u64,
+        body: &mut (dyn AsyncRead + Unpin + Send),
+    ) -> Result<()> {
+        let timeout = self.timeout;
+        let mut buf = vec![0u8; LITERAL_CHUNK];
+        let mut left = size;
+        while left > 0 {
+            let want = usize::try_from(left.min(LITERAL_CHUNK as u64)).unwrap_or(LITERAL_CHUNK);
+            let n = body.read(&mut buf[..want]).await?;
+            if n == 0 {
+                return Err(Error::InvalidArgument(format!(
+                    "literal source ended {left} bytes early"
+                )));
+            }
+            tokio::time::timeout(timeout, self.io.write_all(&buf[..n]))
+                .await
+                .map_err(|_| Error::Timeout)??;
+            left -= n as u64;
+        }
+        tokio::time::timeout(timeout, async {
+            self.io.write_all(b"\r\n").await?;
+            self.io.flush().await
+        })
+        .await
+        .map_err(|_| Error::Timeout)??;
+        Ok(())
     }
 
     async fn finish(&mut self, tag: &str) -> Result<(Collected, Done)> {

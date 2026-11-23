@@ -738,6 +738,22 @@ impl ImapSession for FakeSession {
         })
     }
 
+    async fn append_stream(
+        &mut self,
+        mailbox: &str,
+        flags: &[Flag],
+        size: u64,
+        message: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    ) -> Result<AppendResult> {
+        let mut bytes = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(
+            &mut tokio::io::AsyncReadExt::take(message, size),
+            &mut bytes,
+        )
+        .await?;
+        self.append(mailbox, flags, &bytes).await
+    }
+
     async fn expunge_uids(&mut self, uids: &UidSet) -> Result<()> {
         let name = self.selected_name()?;
         let mut server = self.server();

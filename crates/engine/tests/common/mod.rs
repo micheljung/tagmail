@@ -194,6 +194,17 @@ impl ImapSession for Counted {
     ) -> Result<AppendResult> {
         self.inner.append(mailbox, flags, message).await
     }
+    async fn append_stream(
+        &mut self,
+        mailbox: &str,
+        flags: &[Flag],
+        size: u64,
+        message: &mut (dyn tokio::io::AsyncRead + Unpin + Send),
+    ) -> Result<AppendResult> {
+        self.inner
+            .append_stream(mailbox, flags, size, message)
+            .await
+    }
     async fn expunge_uids(&mut self, uids: &UidSet) -> Result<()> {
         self.inner.expunge_uids(uids).await
     }

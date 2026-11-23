@@ -19,7 +19,7 @@ use imap_next::imap_types::secret::Secret;
 use imap_next::imap_types::sequence::SequenceSet;
 use imap_next::imap_types::status::{StatusDataItem, StatusDataItemName};
 use rustls::ClientConfig;
-use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
 use tokio_rustls::TlsConnector;
@@ -134,6 +134,17 @@ pub trait ImapSession: Send {
         mailbox: &str,
         flags: &[Flag],
         message: &[u8],
+    ) -> impl Future<Output = Result<AppendResult>> + Send;
+
+    /// APPEND of a message read from `message`, exactly `size` bytes,
+    /// streamed in chunks instead of held in memory. The mailbox name must
+    /// be ASCII (the modified UTF-7 names LIST returns are).
+    fn append_stream(
+        &mut self,
+        mailbox: &str,
+        flags: &[Flag],
+        size: u64,
+        message: &mut (dyn AsyncRead + Unpin + Send),
     ) -> impl Future<Output = Result<AppendResult>> + Send;
 
     /// The server annotation `entry` (RFC 5464), `None` when unset;
@@ -453,7 +464,7 @@ impl TokioSession {
         Ok((out, check_done(done)?))
     }
 
-    fn ensure_usable(&self) -> Result<()> {
+    pub(crate) fn ensure_usable(&self) -> Result<()> {
         if self.conn.broken {
             Err(self.conn.closed())
         } else {
@@ -564,7 +575,7 @@ fn check(done: Done) -> Result<()> {
     check_done(done).map(|_| ())
 }
 
-fn check_done(done: Done) -> Result<Done> {
+pub(crate) fn check_done(done: Done) -> Result<Done> {
     match done.kind {
         StatusKind::Ok => Ok(done),
         StatusKind::No => Err(Error::No {
@@ -921,6 +932,16 @@ impl ImapSession for TokioSession {
         message: &[u8],
     ) -> Result<AppendResult> {
         self.append_impl(mailbox, flags, message).await
+    }
+
+    async fn append_stream(
+        &mut self,
+        mailbox: &str,
+        flags: &[Flag],
+        size: u64,
+        message: &mut (dyn AsyncRead + Unpin + Send),
+    ) -> Result<AppendResult> {
+        self.append_stream_impl(mailbox, flags, size, message).await
     }
 
     async fn get_metadata(&mut self, entry: &str) -> Result<Option<Vec<u8>>> {
