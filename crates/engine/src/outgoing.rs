@@ -7,6 +7,7 @@
 //! a placeholder per attachment, and [`Outgoing::write_to`] replaces each
 //! with the file's base64, encoded chunk by chunk while it is written.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs::File;
@@ -81,10 +82,38 @@ pub fn new_message_id(from: &str) -> String {
     id
 }
 
+const DATA_URI: &str = "data:";
+const DATA_IMAGE: &str = "data:image/";
+/// The block compose inserts a signature in, kept so a reloaded draft
+/// can still swap it.
+const SIGNATURE_CLASS: &str = "tagmail-signature";
+const SIGNATURE_IDENTITY: &str = "data-identity";
+
+fn starts_with_ignore_case(value: &str, prefix: &str) -> bool {
+    value
+        .get(..prefix.len())
+        .is_some_and(|p| p.eq_ignore_ascii_case(prefix))
+}
+
+/// Inline images (e.g. in a signature) travel as `data:image/` URIs in
+/// `img src`; every other `data:` URI is dropped.
+fn data_uris<'u>(element: &str, attribute: &str, value: &'u str) -> Option<Cow<'u, str>> {
+    let trimmed = value.trim_start();
+    if !starts_with_ignore_case(trimmed, DATA_URI) {
+        return Some(Cow::Borrowed(value));
+    }
+    (element == "img" && attribute == "src" && starts_with_ignore_case(trimmed, DATA_IMAGE))
+        .then_some(Cow::Borrowed(value))
+}
+
 /// Sanitized HTML for an outgoing body.
 pub fn sanitize_html(html: &str) -> String {
     ammonia::Builder::default()
         .add_generic_attributes(["style"])
+        .add_tag_attributes("div", [SIGNATURE_IDENTITY])
+        .add_allowed_classes("div", [SIGNATURE_CLASS])
+        .add_url_schemes([DATA_URI.trim_end_matches(':')])
+        .attribute_filter(data_uris)
         .clean(html)
         .to_string()
 }
@@ -220,6 +249,30 @@ mod tests {
     use super::*;
 
     const PDF: &[u8] = b"%PDF-1.4 binary \x00\xff";
+
+    #[test]
+    fn sanitizing_keeps_inline_images_and_the_signature_block() {
+        let png = "data:image/png;base64,iVBORw0KGgo=";
+        let html = format!(
+            "<div class=\"tagmail-signature other\" data-identity=\"7\">-- <br>\
+             <img src=\"{png}\" alt=\"logo\"></div>\
+             <a href=\"data:text/html,<script>x</script>\">bad</a>\
+             <img src=\" DATA:text/html;base64,PHNjcmlwdD4=\">\
+             <img src=\"https://example.com/a.png\"><script>alert(1)</script>"
+        );
+        let clean = sanitize_html(&html);
+        assert!(
+            clean.contains(&format!("<img src=\"{png}\" alt=\"logo\">")),
+            "{clean}"
+        );
+        assert!(
+            clean.contains("<div class=\"tagmail-signature\" data-identity=\"7\">"),
+            "{clean}"
+        );
+        assert!(!clean.contains("text/html"), "{clean}");
+        assert!(!clean.contains("script"), "{clean}");
+        assert!(clean.contains("https://example.com/a.png"), "{clean}");
+    }
 
     fn build(o: &Outgoing, purpose: Purpose) -> Vec<u8> {
         let mut out = Vec::new();
