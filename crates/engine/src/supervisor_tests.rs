@@ -693,6 +693,26 @@ async fn a_restart_racing_a_removal_does_not_resurrect_the_account() {
 }
 
 #[tokio::test]
+async fn removing_an_account_drops_its_lifecycle_lock() {
+    let (a, b) = (seeded("a", 1), seeded("b", 1));
+    let f = fixture(&[account(1, 2, &a), account(2, 2, &b)], config(|_| {})).await;
+    f.engine.start_all().await.unwrap();
+    eventually("both live", || async {
+        f.all_live(1).await && f.all_live(2).await
+    })
+    .await;
+    f.engine.restart_account(AccountId(1)).await.unwrap();
+    f.engine.restart_account(AccountId(2)).await.unwrap();
+    let lifecycles = || f.engine.inner.lifecycle.lock().unwrap().len();
+    assert_eq!(lifecycles(), 2);
+
+    f.engine.remove_account(AccountId(2)).await.unwrap();
+    f.engine.remove_account(AccountId(3)).await.unwrap();
+    assert_eq!(lifecycles(), 1);
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn keyword_probe_result_is_persisted_and_shown() {
     for max_connections in [2, 1] {
         let ok = seeded("ok", 1);

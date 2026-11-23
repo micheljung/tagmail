@@ -408,7 +408,7 @@ pub(crate) struct Inner<F: ConnectorFactory> {
     /// The login each account last started with.
     logins: Mutex<HashMap<AccountId, LoginKey>>,
     /// Serializes stop, restart and remove of each account.
-    lifecycle: Mutex<HashMap<AccountId, Arc<tokio::sync::Mutex<()>>>>,
+    pub(crate) lifecycle: Mutex<HashMap<AccountId, Arc<tokio::sync::Mutex<()>>>>,
     /// Accounts being removed; never started again.
     removing: Mutex<HashSet<AccountId>>,
     /// Blob writes of each account; its stop waits for them to finish.
@@ -826,7 +826,24 @@ impl<F: ConnectorFactory> Engine<F> {
     /// per mailbox, then the account's delete.
     pub async fn remove_account(&self, id: AccountId) -> Result<()> {
         let lock = self.lifecycle(id);
-        let _serial = lock.lock().await;
+        let serial = lock.lock().await;
+        let removed = self.remove_unlocked(id).await;
+        if removed.is_ok() {
+            let mut lifecycles = self
+                .inner
+                .lifecycle
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner);
+            // Callers still waiting hold a clone and must keep serializing on it.
+            if Arc::strong_count(&lock) == 2 {
+                lifecycles.remove(&id);
+            }
+        }
+        drop(serial);
+        removed
+    }
+
+    async fn remove_unlocked(&self, id: AccountId) -> Result<()> {
         let exists = self
             .inner
             .stores
