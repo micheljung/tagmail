@@ -5,12 +5,12 @@ use std::io::Read;
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use tagmail_api_core::dto::{
+use crate::dto::{
     AccountDto, AccountStateDto, AddressDto, ChangeDto, ChangeOpDto, EntityDto, LabelDto,
     MailboxDto, SpecialUseDto, ThreadRowDto, TlsMode,
 };
-use tagmail_api_core::signing::{KEY_LEN, UrlKeys};
-use tagmail_api_core::{
+use crate::signing::{KEY_LEN, UrlKeys};
+use crate::{
     AccountPatch, AccountSummary, ChangeFeed, ChangePage, MarkDeleting, MessageRecord, NewAccount,
     Secret, Store, StoreResult, ThreadDetail, ThreadRows, View, ViewIndex,
 };
@@ -193,7 +193,7 @@ impl SqliteStore {
     }
 
     /// Decrypts an account's stored password.
-    pub async fn account_secret(&self, id: AccountId) -> StoreResult<tagmail_api_core::Secret> {
+    pub async fn account_secret(&self, id: AccountId) -> StoreResult<crate::Secret> {
         let sealed = self
             .config
             .read(move |conn| {
@@ -210,7 +210,7 @@ impl SqliteStore {
             })
             .await?;
         let plain = self.vault.open(id, &sealed)?;
-        Ok(tagmail_api_core::Secret::new(plain.as_str().to_owned()))
+        Ok(crate::Secret::new(plain.as_str().to_owned()))
     }
 
     /// Closes both databases once nothing else (the engine) holds them.

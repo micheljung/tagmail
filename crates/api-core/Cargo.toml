@@ -10,10 +10,16 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The `Store` over the server's databases; the desktop replica reads
+# through it too.
+sqlite = ["dep:hex", "dep:tagmail-store"]
+
 [dependencies]
 ammonia.workspace = true
 base64.workspace = true
 form_urlencoded.workspace = true
+hex = { workspace = true, optional = true }
 hmac.workspace = true
 mail-parser = { workspace = true, features = ["full_encoding"] }
 percent-encoding.workspace = true
@@ -21,6 +27,7 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tagmail-core.workspace = true
+tagmail-store = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing.workspace = true

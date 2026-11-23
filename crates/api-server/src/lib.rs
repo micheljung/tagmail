@@ -8,7 +8,7 @@ mod pairing;
 pub mod proxy;
 pub mod ratelimit;
 pub mod session;
-pub mod sqlite_store;
+pub use tagmail_api_core::sqlite_store;
 mod upload;
 pub mod web;
 mod webauthn;
@@ -32,8 +32,8 @@ use tagmail_store::MasterKey;
 use crate::auth::{Auth, AuthConfig};
 use crate::credentials::{KeyWarning, load_master_key};
 use crate::proxy::ImageFetcher;
-use crate::sqlite_store::SqliteStore;
 use crate::web::WebDir;
+use tagmail_api_core::sqlite_store::SqliteStore;
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:7878";
 pub const DEFAULT_MAX_SSE_CLIENTS: usize = 8;

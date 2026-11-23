@@ -25,9 +25,9 @@ use tokio::time::Sleep;
 
 use crate::auth::{self, Auth, Principal};
 use crate::ratelimit::RateLimiter;
-use crate::sqlite_store::SqliteStore;
 use crate::web::WebDir;
 use crate::{pairing, upload, webauthn};
+use tagmail_api_core::sqlite_store::SqliteStore;
 
 /// Request bodies are small JSON documents, except drafts
 /// ([`MAX_DRAFT_BODY`]) and attachment uploads (streamed, see

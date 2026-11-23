@@ -32,7 +32,7 @@ rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-tagmail-api-core.workspace = true
+tagmail-api-core = { workspace = true, features = ["sqlite"] }
 tagmail-core.workspace = true
 tagmail-engine.workspace = true
 tagmail-store.workspace = true

@@ -15,6 +15,8 @@ pub mod mime;
 pub mod ops_dto;
 pub mod routes;
 pub mod signing;
+#[cfg(feature = "sqlite")]
+pub mod sqlite_store;
 pub mod store;
 pub mod ts;
 pub mod writes;
