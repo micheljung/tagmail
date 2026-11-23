@@ -9,7 +9,9 @@ import type { AttachmentDto } from "./AttachmentDto";
  */
 export type ReplyDraftDto = { 
 /**
- * The identity the original was sent to, else the account default.
+ * The identity of the original's account it was addressed to (To,
+ * Cc, Delivered-To, X-Original-To, or own From), else the account
+ * default.
  */
 identityId: number | null, to: Array<AddressDto>, cc: Array<AddressDto>, bcc: Array<AddressDto>, subject: string, 
 /**

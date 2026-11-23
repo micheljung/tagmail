@@ -50,6 +50,10 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     let cfg = Config::new().with_large_int("number");
     let mut files = BTreeMap::new();
     file::<AccountDto>(&cfg, &mut files)?;
+    file::<AccountPatchDto>(&cfg, &mut files)?;
+    file::<AccountStateDto>(&cfg, &mut files)?;
+    file::<AccountTestDto>(&cfg, &mut files)?;
+    file::<AccountsDto>(&cfg, &mut files)?;
     file::<AccountStatusDto>(&cfg, &mut files)?;
     file::<AddressDto>(&cfg, &mut files)?;
     file::<ApiErrorDto>(&cfg, &mut files)?;
@@ -67,6 +71,10 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<ImageSenderDto>(&cfg, &mut files)?;
     file::<ImageSendersDto>(&cfg, &mut files)?;
     file::<LabelDto>(&cfg, &mut files)?;
+    file::<LabelExportDto>(&cfg, &mut files)?;
+    file::<LabelExportEntryDto>(&cfg, &mut files)?;
+    file::<LabelImportErrorDto>(&cfg, &mut files)?;
+    file::<LabelImportResultDto>(&cfg, &mut files)?;
     file::<LoginDto>(&cfg, &mut files)?;
     file::<MailboxDto>(&cfg, &mut files)?;
     file::<MessageDto>(&cfg, &mut files)?;
@@ -85,6 +93,7 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<SpecialUseDto>(&cfg, &mut files)?;
     file::<StatusDto>(&cfg, &mut files)?;
     file::<SyncPhase>(&cfg, &mut files)?;
+    file::<TestStepDto>(&cfg, &mut files)?;
     file::<ThreadDetailDto>(&cfg, &mut files)?;
     file::<ThreadMessageDto>(&cfg, &mut files)?;
     file::<ThreadRowDto>(&cfg, &mut files)?;
@@ -96,6 +105,8 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<DraftInputDto>(&cfg, &mut files)?;
     file::<IdentitiesDto>(&cfg, &mut files)?;
     file::<IdentityDto>(&cfg, &mut files)?;
+    file::<IdentityPatchDto>(&cfg, &mut files)?;
+    file::<NewIdentityDto>(&cfg, &mut files)?;
     file::<OutboxDto>(&cfg, &mut files)?;
     file::<OutboxItemDto>(&cfg, &mut files)?;
     file::<OutboxStateDto>(&cfg, &mut files)?;

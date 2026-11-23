@@ -2,9 +2,12 @@
 import type { SyncPhase } from "./SyncPhase";
 
 /**
- * `GET /api/status`, one entry per account.
+ * `GET /api/status`, one entry per account. `degraded` codes:
+ * `no_condstore`, `no_qresync`, `no_idle`, `no_modseq:<mailbox>`,
+ * `no_keywords:<mailbox>`, `labels_degraded` (the server drops custom
+ * keywords) and `no_sender_address` (the account has no `email`).
  */
-export type AccountStatusDto = { id: number, name: string, status: string, phase: SyncPhase, mailboxesTotal: number, mailboxesLive: number, 
+export type AccountStatusDto = { id: number, name: string, email: string | null, status: string, phase: SyncPhase, mailboxesTotal: number, mailboxesLive: number, 
 /**
  * Messages whose text is not fetched (and searchable) yet.
  */

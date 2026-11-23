@@ -52,7 +52,7 @@ async fn config_migrations_apply_to_fresh_db_and_reopen() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("config.db");
     let db = ConfigDb::open(&path).unwrap();
-    assert_eq!(user_version(&db).await, 4);
+    assert_eq!(user_version(&db).await, 5);
     assert_eq!(
         tables(&db).await,
         [
@@ -80,7 +80,7 @@ async fn config_migrations_apply_to_fresh_db_and_reopen() {
     db.close().await.unwrap();
 
     let db = ConfigDb::open(&path).unwrap();
-    assert_eq!(user_version(&db).await, 4);
+    assert_eq!(user_version(&db).await, 5);
     db.close().await.unwrap();
 }
 
@@ -127,7 +127,7 @@ async fn newer_schema_is_refused() {
         ConfigDb::open(&path),
         Err(Error::SchemaTooNew {
             found: 99,
-            supported: 4
+            supported: 5
         })
     ));
 }
@@ -335,7 +335,7 @@ async fn config_v3_upgrades_to_outbox_files() {
         .unwrap();
     }
     let db = ConfigDb::open(&path).unwrap();
-    assert_eq!(user_version(&db).await, 4);
+    assert_eq!(user_version(&db).await, 5);
     let row = db
         .read(|c| {
             Ok(c.query_row(
@@ -370,6 +370,64 @@ async fn config_v3_upgrades_to_outbox_files() {
         .await
         .unwrap();
     assert_eq!(blob_gone, 0);
+    integrity(&db).await;
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn config_v4_upgrades_with_duplicate_identities() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("config.db");
+    {
+        let conn = open_raw(&path);
+        for sql in [
+            include_str!("../migrations/config/V1__init.sql"),
+            include_str!("../migrations/config/V2__image_sender.sql"),
+            include_str!("../migrations/config/V3__compose.sql"),
+            include_str!("../migrations/config/V4__outbox_file.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 4).unwrap();
+        conn.execute_batch(
+            "INSERT INTO account (id, name, imap_host, imap_port, imap_tls, smtp_host, \
+             smtp_port, smtp_tls, username, secret_ct, secret_nonce) VALUES \
+             (1, 'a', 'i', 993, 'tls', 's', 465, 'tls', 'Me@Example.com', x'00', x'00'), \
+             (2, 'b', 'i', 993, 'tls', 's', 465, 'tls', 'bare', x'00', x'00'); \
+             INSERT INTO identity (id, account_id, address, is_default) VALUES \
+             (1, 1, 'me@example.com', 0), (2, 1, 'ME@example.com', 1), \
+             (3, 1, 'alias@example.com', 0), (4, 2, 'bare@i', 1), (5, 2, 'bare@i', 0);",
+        )
+        .unwrap();
+    }
+    let db = ConfigDb::open(&path).unwrap();
+    assert_eq!(user_version(&db).await, 5);
+    let (identities, emails) = db
+        .read(|c| {
+            let mut stmt =
+                c.prepare("SELECT id, account_id, is_default FROM identity ORDER BY id")?;
+            let identities = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<rusqlite::Result<Vec<(i64, i64, i64)>>>()?;
+            let mut stmt = c.prepare("SELECT email FROM account ORDER BY id")?;
+            let emails = stmt
+                .query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<Vec<Option<String>>>>()?;
+            Ok((identities, emails))
+        })
+        .await
+        .unwrap();
+    assert_eq!(identities, [(1, 1, 1), (3, 1, 0), (4, 2, 1)]);
+    assert_eq!(emails, [Some("me@example.com".to_owned()), None]);
+    let duplicate = db
+        .write(|c| {
+            Ok(c.execute(
+                "INSERT INTO identity (account_id, address) VALUES (1, 'Alias@Example.com')",
+                [],
+            )?)
+        })
+        .await;
+    assert!(duplicate.is_err(), "duplicate address accepted");
     integrity(&db).await;
     db.close().await.unwrap();
 }

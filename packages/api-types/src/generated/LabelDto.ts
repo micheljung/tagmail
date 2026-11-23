@@ -8,4 +8,8 @@ export type LabelDto = {
 /**
  * Casefolded identity.
  */
-key: string, name: string, color: string | null, };
+key: string, name: string, color: string | null, 
+/**
+ * Accounts whose registry or cache has the key, ascending.
+ */
+accountIds: Array<number>, };

@@ -67,7 +67,7 @@ impl Store for MemStore {
     async fn view_index(&self, view: View) -> StoreResult<ViewIndex> {
         let ids = match view {
             View::Inbox => self.inbox.clone(),
-            View::Label(_) | View::Search(_) => {
+            View::Label(_) | View::Search(_) | View::Account(..) => {
                 self.queried.lock().unwrap().push(view);
                 self.inbox.clone()
             }
@@ -99,6 +99,7 @@ impl Store for MemStore {
             key: "work".to_owned(),
             name: "Work".to_owned(),
             color: None,
+            account_ids: vec![1],
         }])
     }
 
@@ -150,6 +151,7 @@ impl Store for MemStore {
             AccountSummary {
                 id,
                 name: account.name.clone(),
+                email: Some(account.email.clone()),
                 status: "active".to_owned(),
                 mailboxes_initial: 0,
                 mailboxes_catchup: 0,
@@ -278,7 +280,8 @@ async fn unknown_routes_and_methods() {
     assert_eq!(get(&api, "/api/nope").await.status, 404);
     assert_eq!(get(&api, "/other").await.status, 404);
     assert_eq!(get(&api, "/api/views/spam/index").await.status, 404);
-    assert_eq!(get(&api, "/api/accounts").await.status, 405);
+    assert_eq!(get(&api, "/api/status/x").await.status, 404);
+    assert_eq!(post(&api, "/api/accounts/1", &json!({})).await.status, 405);
     assert_eq!(post(&api, "/api/version", &json!({})).await.status, 405);
 }
 
@@ -350,7 +353,7 @@ async fn mailboxes_and_labels() {
     let resp = get(&api, "/api/labels").await;
     assert_eq!(
         json_body(&resp),
-        json!([{ "key": "work", "name": "Work", "color": null }])
+        json!([{ "key": "work", "name": "Work", "color": null, "accountIds": [1] }])
     );
     assert_eq!(post(&api, "/api/mailboxes", &json!({})).await.status, 405);
 }
@@ -653,6 +656,7 @@ impl WriteService for Writes {
                 key: LabelKey::of(&label.name).to_string(),
                 name: label.name,
                 color: label.color,
+                account_ids: vec![1],
             })
         })
     }
@@ -667,6 +671,7 @@ impl WriteService for Writes {
                     key,
                     name: "x".into(),
                     color: None,
+                    account_ids: vec![1],
                 }),
                 job_id: Some(7),
                 job_ids: vec![7],

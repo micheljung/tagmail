@@ -13,7 +13,7 @@
 use rusqlite::types::Value;
 use rusqlite::{Connection, params_from_iter};
 use tagmail_core::query::{Location, Query, Status, Term, Text, day_start};
-use tagmail_core::{LabelKey, SpecialUse, ThreadId, decode_mailbox_name};
+use tagmail_core::{AccountId, LabelKey, SpecialUse, ThreadId, decode_mailbox_name};
 
 use crate::error::Result;
 
@@ -59,13 +59,30 @@ pub struct SearchResult {
     pub strategy: Strategy,
 }
 
-pub fn search_threads(conn: &Connection, query: &Query, limit: usize) -> Result<SearchResult> {
-    search_threads_with(conn, query, limit, Thresholds::default())
+/// Threads matching `query`, newest first; with `account`, only that
+/// account's.
+pub fn search_threads(
+    conn: &Connection,
+    query: &Query,
+    account: Option<AccountId>,
+    limit: usize,
+) -> Result<SearchResult> {
+    search_in(conn, query, account, limit, Thresholds::default())
 }
 
 pub fn search_threads_with(
     conn: &Connection,
     query: &Query,
+    limit: usize,
+    thresholds: Thresholds,
+) -> Result<SearchResult> {
+    search_in(conn, query, None, limit, thresholds)
+}
+
+fn search_in(
+    conn: &Connection,
+    query: &Query,
+    account: Option<AccountId>,
     limit: usize,
     thresholds: Thresholds,
 ) -> Result<SearchResult> {
@@ -156,10 +173,14 @@ pub fn search_threads_with(
     };
 
     let mut q = Sql::default();
-    q.text.push_str(
-        "SELECT t.id FROM thread t WHERE t.merged_into IS NULL AND t.id IN \
-         (SELECT m.thread_id FROM message m WHERE m.tombstoned_at IS NULL",
-    );
+    q.text
+        .push_str("SELECT t.id FROM thread t WHERE t.merged_into IS NULL");
+    if let Some(account) = account {
+        q.text.push_str(" AND t.account_id = ?");
+        q.params.push(Value::Integer(account.0));
+    }
+    q.text
+        .push_str(" AND t.id IN (SELECT m.thread_id FROM message m WHERE m.tombstoned_at IS NULL");
     if !driver.text.is_empty() {
         q.text.push_str(" AND m.id IN (");
         q.append(driver);

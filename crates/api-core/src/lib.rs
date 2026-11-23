@@ -9,6 +9,7 @@ pub mod compose_dto;
 pub mod dto;
 pub mod events;
 pub mod id_index;
+pub mod identities;
 pub mod messages;
 pub mod mime;
 pub mod ops_dto;
@@ -21,8 +22,8 @@ pub mod writes;
 pub use api::{API_VERSION, Api, Method, Request, Response};
 pub use events::{ChangeFeed, Event, EventSession, EventSource, OpenError};
 pub use store::{
-    AccountRegistry, AccountSummary, BoxFuture, ChangePage, FetchRawError, ImageProxy,
-    MessageRecord, NewAccount, ProxiedImage, ProxyError, RuntimeStatus, Secret, Store, StoreError,
-    StoreResult, ThreadDetail, ThreadRows, View, ViewError, ViewIndex,
+    AccountPatch, AccountRegistry, AccountSummary, BoxFuture, ChangePage, FetchRawError,
+    ImageProxy, MessageRecord, NewAccount, ProxiedImage, ProxyError, RuntimeStatus, Secret, Store,
+    StoreError, StoreResult, ThreadDetail, ThreadRows, View, ViewError, ViewIndex,
 };
 pub use writes::{OpRequest, Submitted, WriteError, WriteResult, WriteService};

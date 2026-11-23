@@ -34,12 +34,16 @@ pub enum SyncPhase {
     Stopped,
 }
 
-/// `GET /api/status`, one entry per account.
+/// `GET /api/status`, one entry per account. `degraded` codes:
+/// `no_condstore`, `no_qresync`, `no_idle`, `no_modseq:<mailbox>`,
+/// `no_keywords:<mailbox>`, `labels_degraded` (the server drops custom
+/// keywords) and `no_sender_address` (the account has no `email`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountStatusDto {
     pub id: i64,
     pub name: String,
+    pub email: Option<String>,
     pub status: String,
     pub phase: SyncPhase,
     pub mailboxes_total: u32,
@@ -103,6 +107,8 @@ pub struct ThreadsDto {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum EntityDto {
+    /// `upsert` carries an `AccountDto`; `delete` (no payload) once the
+    /// account's data is purged.
     Account,
     Mailbox,
     Thread,
@@ -110,6 +116,8 @@ pub enum EntityDto {
     Label,
     /// Payload `{status, error?}`; see `OutboxItemDto`.
     Outbox,
+    /// `upsert` carries an `IdentityDto`, `delete` none.
+    Identity,
     /// A write's status: `upsert` carries an `OpDto`, `delete` (discarded)
     /// carries `{ opId }`; `id` is 0.
     Op,
@@ -171,7 +179,38 @@ impl TlsMode {
     }
 }
 
-/// `POST /api/accounts` body.
+/// `account.status`. Only `active` accounts sync; `deleting` is set by
+/// `DELETE /api/accounts/{id}` until the purge finishes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountStateDto {
+    Active,
+    Disabled,
+    Deleting,
+}
+
+impl AccountStateDto {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AccountStateDto::Active => "active",
+            AccountStateDto::Disabled => "disabled",
+            AccountStateDto::Deleting => "deleting",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<AccountStateDto> {
+        [
+            AccountStateDto::Active,
+            AccountStateDto::Disabled,
+            AccountStateDto::Deleting,
+        ]
+        .into_iter()
+        .find(|state| state.as_str() == s)
+    }
+}
+
+/// `POST /api/accounts` and `POST /api/accounts/test` body. `email` is the
+/// address to send from; without it the username must be one.
 #[derive(Clone, PartialEq, Eq, Deserialize, TS)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NewAccountDto {
@@ -187,12 +226,20 @@ pub struct NewAccountDto {
     #[serde(default)]
     #[ts(optional)]
     pub max_connections: Option<u8>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub email: Option<String>,
+    /// Display name of the default identity.
+    #[serde(default)]
+    #[ts(optional)]
+    pub display_name: Option<String>,
 }
 
 impl std::fmt::Debug for NewAccountDto {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NewAccountDto")
             .field("name", &self.name)
+            .field("email", &self.email)
             .field("imap_host", &self.imap_host)
             .field("smtp_host", &self.smtp_host)
             .field("username", &self.username)
@@ -215,6 +262,74 @@ pub struct AccountDto {
     pub smtp_tls: TlsMode,
     pub username: String,
     pub max_connections: u8,
+    /// Primary sender address; `null` until the owner enters one.
+    pub email: Option<String>,
+    pub status: AccountStateDto,
+}
+
+/// `GET /api/accounts`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountsDto {
+    pub accounts: Vec<AccountDto>,
+}
+
+/// `PATCH /api/accounts/{id}` and `POST /api/accounts/{id}/test` body:
+/// the fields to change; a test merges them over the stored account.
+/// `status` may only be `active` or `disabled`.
+#[derive(Clone, Default, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(optional_fields)]
+pub struct AccountPatchDto {
+    pub name: Option<String>,
+    pub email: Option<String>,
+    pub imap_host: Option<String>,
+    pub imap_port: Option<u16>,
+    pub imap_tls: Option<TlsMode>,
+    pub smtp_host: Option<String>,
+    pub smtp_port: Option<u16>,
+    pub smtp_tls: Option<TlsMode>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    pub max_connections: Option<u8>,
+    pub status: Option<AccountStateDto>,
+}
+
+impl std::fmt::Debug for AccountPatchDto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AccountPatchDto")
+            .field("name", &self.name)
+            .field("email", &self.email)
+            .field("imap_host", &self.imap_host)
+            .field("smtp_host", &self.smtp_host)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("status", &self.status)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One step of an account test.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TestStepDto {
+    pub ok: bool,
+    /// Never contains the password.
+    pub error: Option<String>,
+    pub ms: u64,
+}
+
+/// `POST /api/accounts/test` and `POST /api/accounts/{id}/test`: an IMAP
+/// login with CAPABILITY and LIST, and an SMTP login, without saving
+/// anything.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountTestDto {
+    pub imap: TestStepDto,
+    pub smtp: TestStepDto,
+    pub capabilities: Vec<String>,
+    /// Mailboxes the IMAP server listed; `null` if the login failed.
+    pub mailboxes: Option<u32>,
 }
 
 /// Body of every error response and of the SSE `reset` event.
@@ -265,6 +380,46 @@ pub struct LabelDto {
     pub key: String,
     pub name: String,
     pub color: Option<String>,
+    /// Accounts whose registry or cache has the key, ascending.
+    pub account_ids: Vec<i64>,
+}
+
+/// One label of a [`LabelExportDto`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LabelExportEntryDto {
+    pub name: String,
+    pub color: Option<String>,
+    pub sort: i64,
+}
+
+/// `GET /api/labels/export` and the body of `POST /api/labels/import`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LabelExportDto {
+    /// Always `tagmail-labels`.
+    pub format: String,
+    /// Always 1.
+    pub version: u32,
+    pub labels: Vec<LabelExportEntryDto>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelImportErrorDto {
+    pub name: String,
+    pub message: String,
+}
+
+/// `POST /api/labels/import`: labels missing everywhere are created, the
+/// colour of existing ones updated; nothing is renamed or deleted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct LabelImportResultDto {
+    pub created: u32,
+    pub updated: u32,
+    pub unchanged: u32,
+    pub errors: Vec<LabelImportErrorDto>,
 }
 
 /// What a message body was written as.

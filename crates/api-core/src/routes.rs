@@ -12,7 +12,12 @@ pub enum RouteId {
     Changes,
     Mailboxes,
     Labels,
+    Accounts,
     CreateAccount,
+    TestNewAccount,
+    TestAccount,
+    UpdateAccount,
+    DeleteAccount,
     Thread,
     Message,
     RenderMessage,
@@ -21,6 +26,9 @@ pub enum RouteId {
     ImageSenders,
     SetImageSender,
     Identities,
+    CreateIdentity,
+    UpdateIdentity,
+    DeleteIdentity,
     CreateDraft,
     Draft,
     UpdateDraft,
@@ -40,6 +48,8 @@ pub enum RouteId {
     UpdateLabel,
     DeleteLabel,
     LabelJobs,
+    ExportLabels,
+    ImportLabels,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -62,7 +72,16 @@ pub const ROUTES: &[Route] = &[
     route(Method::Get, "/api/changes", RouteId::Changes),
     route(Method::Get, "/api/mailboxes", RouteId::Mailboxes),
     route(Method::Get, "/api/labels", RouteId::Labels),
+    route(Method::Get, "/api/accounts", RouteId::Accounts),
     route(Method::Post, "/api/accounts", RouteId::CreateAccount),
+    route(Method::Post, "/api/accounts/test", RouteId::TestNewAccount),
+    route(
+        Method::Post,
+        "/api/accounts/{id}/test",
+        RouteId::TestAccount,
+    ),
+    route(Method::Patch, "/api/accounts/{id}", RouteId::UpdateAccount),
+    route(Method::Delete, "/api/accounts/{id}", RouteId::DeleteAccount),
     route(Method::Get, "/api/threads/{id}", RouteId::Thread),
     route(Method::Get, "/api/messages/{id}", RouteId::Message),
     route(
@@ -75,6 +94,17 @@ pub const ROUTES: &[Route] = &[
     route(Method::Get, "/api/image-senders", RouteId::ImageSenders),
     route(Method::Post, "/api/image-senders", RouteId::SetImageSender),
     route(Method::Get, "/api/identities", RouteId::Identities),
+    route(Method::Post, "/api/identities", RouteId::CreateIdentity),
+    route(
+        Method::Patch,
+        "/api/identities/{id}",
+        RouteId::UpdateIdentity,
+    ),
+    route(
+        Method::Delete,
+        "/api/identities/{id}",
+        RouteId::DeleteIdentity,
+    ),
     route(Method::Post, "/api/drafts", RouteId::CreateDraft),
     route(Method::Get, "/api/drafts/{id}", RouteId::Draft),
     route(Method::Put, "/api/drafts/{id}", RouteId::UpdateDraft),
@@ -98,6 +128,8 @@ pub const ROUTES: &[Route] = &[
     route(Method::Patch, "/api/labels/{key}", RouteId::UpdateLabel),
     route(Method::Delete, "/api/labels/{key}", RouteId::DeleteLabel),
     route(Method::Get, "/api/label-jobs", RouteId::LabelJobs),
+    route(Method::Get, "/api/labels/export", RouteId::ExportLabels),
+    route(Method::Post, "/api/labels/import", RouteId::ImportLabels),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +201,22 @@ mod tests {
             Err(Miss::NotFound)
         );
         assert_eq!(resolve(Method::Get, &[""]), Err(Miss::NotFound));
+        assert_eq!(
+            resolve(Method::Get, &["labels", "export"]),
+            Ok((RouteId::ExportLabels, vec![]))
+        );
+        assert_eq!(
+            resolve(Method::Patch, &["labels", "export"]),
+            Ok((RouteId::UpdateLabel, vec!["export"]))
+        );
+        assert_eq!(
+            resolve(Method::Post, &["accounts", "test"]),
+            Ok((RouteId::TestNewAccount, vec![]))
+        );
+        assert_eq!(
+            resolve(Method::Post, &["accounts", "3", "test"]),
+            Ok((RouteId::TestAccount, vec!["3"]))
+        );
     }
 
     #[test]

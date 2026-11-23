@@ -1,6 +1,6 @@
 //! [`Store`] over the server's `config.db` and `cache.db`.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::Read;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -420,6 +420,10 @@ impl Store for SqliteStore {
 
     async fn view_index(&self, view: View) -> StoreResult<ViewIndex> {
         let epoch = self.cache.epoch();
+        let (account, view) = match view {
+            View::Account(id, inner) => (Some(id), *inner),
+            view => (None, view),
+        };
         let renamed_from: Vec<String> = match &view {
             View::Label(key) => self
                 .label_jobs()
@@ -441,9 +445,10 @@ impl Store for SqliteStore {
                                 "SELECT tm.thread_id FROM thread_mailbox tm \
                                  JOIN mailbox mb ON mb.id = tm.mailbox_id \
                                  WHERE mb.name = 'INBOX' COLLATE NOCASE \
+                                 AND (?1 IS NULL OR mb.account_id = ?1) \
                                  ORDER BY tm.last_date DESC, tm.thread_id",
                             )?;
-                            stmt.query_map([], |r| r.get(0).map(ThreadId))?
+                            stmt.query_map([account.map(|a| a.0)], |r| r.get(0).map(ThreadId))?
                                 .collect::<rusqlite::Result<Vec<_>>>()?
                         }
                         View::Label(key) => {
@@ -456,10 +461,10 @@ impl Store for SqliteStore {
                             } else {
                                 Query::Or(label)
                             };
-                            search::search_threads(conn, &label, search::MAX_HITS)?.threads
+                            search::search_threads(conn, &label, account, search::MAX_HITS)?.threads
                         }
                         View::Search(query) => {
-                            search::search_threads(conn, &query, search::MAX_HITS)?.threads
+                            search::search_threads(conn, &query, account, search::MAX_HITS)?.threads
                         }
                         View::Mailbox(mailbox) => {
                             let mut stmt = conn.prepare_cached(
@@ -469,6 +474,7 @@ impl Store for SqliteStore {
                             stmt.query_map([mailbox.0], |r| r.get(0).map(ThreadId))?
                                 .collect::<rusqlite::Result<Vec<_>>>()?
                         }
+                        View::Account(..) => Vec::new(),
                     };
                     Ok(ViewIndex { cursor, ids })
                 })
@@ -506,7 +512,7 @@ impl Store for SqliteStore {
             .cache
             .read(|conn| {
                 let mut stmt = conn.prepare_cached(
-                    "SELECT l.label_key, l.keyword, m.name FROM label l \
+                    "SELECT l.label_key, l.keyword, m.name, l.account_id FROM label l \
                      LEFT JOIN mailbox m ON m.id = l.mailbox_id",
                 )?;
                 let rows = stmt.query_map([], |r| {
@@ -514,6 +520,7 @@ impl Store for SqliteStore {
                         r.get::<_, String>(0)?,
                         r.get::<_, Option<String>>(1)?,
                         r.get::<_, Option<String>>(2)?,
+                        r.get::<_, i64>(3)?,
                     ))
                 })?;
                 Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -523,7 +530,7 @@ impl Store for SqliteStore {
             .config
             .read(|conn| {
                 let mut stmt = conn.prepare_cached(
-                    "SELECT label_key, display_name, color FROM label_registry \
+                    "SELECT label_key, display_name, color, account_id FROM label_registry \
                      ORDER BY account_id",
                 )?;
                 let rows = stmt.query_map([], |r| {
@@ -531,13 +538,15 @@ impl Store for SqliteStore {
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, Option<String>>(2)?,
+                        r.get::<_, i64>(3)?,
                     ))
                 })?;
                 Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
             })
             .await?;
         let mut labels: BTreeMap<String, LabelDto> = BTreeMap::new();
-        for (key, keyword, mailbox) in derived {
+        let mut accounts: HashMap<String, BTreeSet<i64>> = HashMap::new();
+        for (key, keyword, mailbox, account) in derived {
             let name = match (keyword, mailbox) {
                 (Some(keyword), _) => match tagmail_core::Keyword::new(keyword.clone()) {
                     Ok(kw) => match classify_keyword(&kw) {
@@ -549,16 +558,32 @@ impl Store for SqliteStore {
                 (None, Some(mailbox)) => decode_mailbox_name(&mailbox),
                 (None, None) => key.clone(),
             };
+            accounts.entry(key.clone()).or_default().insert(account);
             labels.entry(key.clone()).or_insert(LabelDto {
                 key,
                 name,
                 color: None,
+                account_ids: Vec::new(),
             });
         }
         let mut registered = HashSet::new();
-        for (key, name, color) in registry {
+        for (key, name, color, account) in registry {
+            accounts.entry(key.clone()).or_default().insert(account);
             if registered.insert(key.clone()) {
-                labels.insert(key.clone(), LabelDto { key, name, color });
+                labels.insert(
+                    key.clone(),
+                    LabelDto {
+                        key,
+                        name,
+                        color,
+                        account_ids: Vec::new(),
+                    },
+                );
+            }
+        }
+        for label in labels.values_mut() {
+            if let Some(ids) = accounts.remove(&label.key) {
+                label.account_ids = ids.into_iter().collect();
             }
         }
         for (from, _) in self.label_jobs().await? {
@@ -607,12 +632,13 @@ impl Store for SqliteStore {
             .config
             .read(|conn| {
                 let mut stmt =
-                    conn.prepare_cached("SELECT id, name, status FROM account ORDER BY id")?;
+                    conn.prepare_cached("SELECT id, name, status, email FROM account ORDER BY id")?;
                 let rows = stmt.query_map([], |r| {
                     Ok(AccountSummary {
                         id: AccountId(r.get(0)?),
                         name: r.get(1)?,
                         status: r.get(2)?,
+                        email: r.get(3)?,
                         mailboxes_initial: 0,
                         mailboxes_catchup: 0,
                         mailboxes_live: 0,
@@ -810,8 +836,8 @@ impl Store for SqliteStore {
                 tx.execute(
                     "INSERT INTO account (id, name, imap_host, imap_port, imap_tls, smtp_host, \
                      smtp_port, smtp_tls, username, secret_ct, secret_nonce, max_connections, \
-                     server_saves_sent) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                     server_saves_sent, email) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                     params![
                         id,
                         account.name,
@@ -826,7 +852,13 @@ impl Store for SqliteStore {
                         sealed.nonce,
                         account.max_connections,
                         saves_sent,
+                        account.email,
                     ],
+                )?;
+                tx.execute(
+                    "INSERT INTO identity (account_id, address, display_name, is_default) \
+                     VALUES (?1, ?2, ?3, 1)",
+                    params![id, account.email, account.display_name],
                 )?;
                 Ok(AccountId(id))
             })

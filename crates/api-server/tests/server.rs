@@ -503,8 +503,8 @@ async fn search_label_views_mailboxes_and_labels() {
     assert_eq!(
         labels,
         json!([
-            { "key": "travel", "name": "Travel", "color": "#0a0" },
-            { "key": "work", "name": "Work", "color": null },
+            { "key": "travel", "name": "Travel", "color": "#0a0", "accountIds": [1] },
+            { "key": "work", "name": "Work", "color": null, "accountIds": [1] },
         ])
     );
     server.shutdown().await.unwrap();

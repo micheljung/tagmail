@@ -579,10 +579,13 @@ impl<F: ConnectorFactory> Engine<F> {
             })
             .await
             .map_err(WriteError::internal)?;
+        let mut account_ids: Vec<i64> = accounts.iter().map(|a| a.0).collect();
+        account_ids.sort_unstable();
         let label = LabelDto {
             key: key.to_string(),
             name,
             color,
+            account_ids,
         };
         self.label_event(ChangeOp::Upsert, json!(label))
             .await
@@ -678,6 +681,7 @@ impl<F: ConnectorFactory> Engine<F> {
             key: new_key.to_string(),
             name,
             color,
+            account_ids: accounts.iter().copied().collect(),
         };
         self.label_event(ChangeOp::Upsert, json!(label))
             .await

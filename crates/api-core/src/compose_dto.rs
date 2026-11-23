@@ -6,8 +6,8 @@ use ts_rs::TS;
 
 use crate::dto::AddressDto;
 
-/// A From identity. M3 has one default identity per account, derived from
-/// the account's address.
+/// A From identity. Every account has at least one and exactly one
+/// default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct IdentityDto {
@@ -25,6 +25,37 @@ pub struct IdentityDto {
 #[serde(rename_all = "camelCase")]
 pub struct IdentitiesDto {
     pub identities: Vec<IdentityDto>,
+}
+
+/// `POST /api/identities` body. `signature` is HTML, sanitized on save
+/// (at most 16 KiB; images only as `data:` URIs).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NewIdentityDto {
+    pub account_id: i64,
+    pub address: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub name: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub signature: Option<String>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub is_default: Option<bool>,
+}
+
+/// `PATCH /api/identities/{id}` body: the fields to change. An empty
+/// `name` or `signature` clears it; `isDefault: false` is refused (make
+/// another identity the default instead).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[ts(optional_fields)]
+pub struct IdentityPatchDto {
+    pub address: Option<String>,
+    pub name: Option<String>,
+    pub signature: Option<String>,
+    pub is_default: Option<bool>,
 }
 
 /// An uploaded attachment: `POST /api/attachments` as
@@ -174,7 +205,9 @@ pub enum ReplyMode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct ReplyDraftDto {
-    /// The identity the original was sent to, else the account default.
+    /// The identity of the original's account it was addressed to (To,
+    /// Cc, Delivered-To, X-Original-To, or own From), else the account
+    /// default.
     pub identity_id: Option<i64>,
     pub to: Vec<AddressDto>,
     pub cc: Vec<AddressDto>,

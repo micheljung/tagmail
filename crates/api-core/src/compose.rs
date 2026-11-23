@@ -17,6 +17,7 @@ use crate::compose_dto::{
     ReplyDraftDto, ReplyMode, SendDto, SendStatusDto,
 };
 use crate::dto::{AddressDto, ApiErrorDto};
+use crate::identities::{IdentityPatch, NewIdentity};
 use crate::mime;
 use crate::store::{BoxFuture, MessageRecord, Store, StoreError};
 
@@ -127,7 +128,27 @@ pub struct SendOutcome {
 /// Drafts, attachments, the outbox and identities; the server implements
 /// it with the engine.
 pub trait Compose: Send + Sync + 'static {
+    /// Ordered by account, each account's default first.
     fn identities(&self) -> BoxFuture<ComposeResult<Vec<IdentityDto>>>;
+    /// `Conflict` if the address exists in the account.
+    fn create_identity(&self, identity: NewIdentity) -> BoxFuture<ComposeResult<IdentityDto>> {
+        let _ = identity;
+        unavailable_identities()
+    }
+    fn update_identity(
+        &self,
+        id: i64,
+        patch: IdentityPatch,
+    ) -> BoxFuture<ComposeResult<IdentityDto>> {
+        let _ = (id, patch);
+        unavailable_identities()
+    }
+    /// `Conflict` for the account's last identity; deleting the default
+    /// promotes the lowest remaining id.
+    fn delete_identity(&self, id: i64) -> BoxFuture<ComposeResult<()>> {
+        let _ = id;
+        unavailable_identities()
+    }
     fn create_draft(&self, input: DraftInput) -> BoxFuture<ComposeResult<DraftDto>>;
     fn update_draft(&self, id: i64, input: DraftInput) -> BoxFuture<ComposeResult<DraftDto>>;
     fn draft(&self, id: i64) -> BoxFuture<ComposeResult<DraftDto>>;
@@ -147,6 +168,14 @@ pub trait Compose: Send + Sync + 'static {
     fn retry(&self, id: i64) -> BoxFuture<ComposeResult<()>>;
     /// Stores parts as unattached uploads (a forward's attachments).
     fn add_parts(&self, parts: Vec<ForwardedPart>) -> BoxFuture<ComposeResult<Vec<AttachmentDto>>>;
+}
+
+fn unavailable_identities<T: Send + 'static>() -> BoxFuture<ComposeResult<T>> {
+    Box::pin(async {
+        Err(ComposeError::Unavailable(
+            "identities cannot be edited here".to_owned(),
+        ))
+    })
 }
 
 fn respond<T: serde::Serialize>(status: u16, result: ComposeResult<T>) -> Response {

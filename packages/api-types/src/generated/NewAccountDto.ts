@@ -2,6 +2,11 @@
 import type { TlsMode } from "./TlsMode";
 
 /**
- * `POST /api/accounts` body.
+ * `POST /api/accounts` and `POST /api/accounts/test` body. `email` is the
+ * address to send from; without it the username must be one.
  */
-export type NewAccountDto = { name: string, imapHost: string, imapPort: number, imapTls: TlsMode, smtpHost: string, smtpPort: number, smtpTls: TlsMode, username: string, password: string, maxConnections?: number, };
+export type NewAccountDto = { name: string, imapHost: string, imapPort: number, imapTls: TlsMode, smtpHost: string, smtpPort: number, smtpTls: TlsMode, username: string, password: string, maxConnections?: number, email?: string, 
+/**
+ * Display name of the default identity.
+ */
+displayName?: string, };

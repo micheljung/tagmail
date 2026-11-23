@@ -8,9 +8,10 @@ use std::sync::Arc;
 use serde::Serialize;
 use tagmail_core::{ChangeCursor, ThreadId};
 
+use crate::compose::valid_address;
 use crate::dto::{
-    AccountDto, AccountStatusDto, ApiErrorDto, ApiVersion, ChangeDto, ChangesDto, NewAccountDto,
-    StatusDto, SyncPhase, ThreadsDto, VersionDto,
+    AccountDto, AccountStateDto, AccountStatusDto, ApiErrorDto, ApiVersion, ChangeDto, ChangesDto,
+    NewAccountDto, StatusDto, SyncPhase, ThreadsDto, VersionDto,
 };
 use crate::id_index;
 use crate::routes::{self, Miss, RouteId};
@@ -217,6 +218,20 @@ impl<S: Store> Api<S> {
                 RouteId::Changes => self.changes(req.query).await,
                 RouteId::Mailboxes => self.mailboxes().await,
                 RouteId::Labels => self.labels().await,
+                RouteId::Accounts
+                | RouteId::TestNewAccount
+                | RouteId::TestAccount
+                | RouteId::UpdateAccount
+                | RouteId::DeleteAccount
+                | RouteId::CreateIdentity
+                | RouteId::UpdateIdentity
+                | RouteId::DeleteIdentity
+                | RouteId::ExportLabels
+                | RouteId::ImportLabels => Ok(Response::error(
+                    501,
+                    "not_implemented",
+                    "not implemented yet",
+                )),
                 RouteId::CreateAccount => self.create_account(req.body).await,
                 RouteId::Thread => self.thread(params[0]).await,
                 RouteId::Message => self.message(params[0]).await,
@@ -284,6 +299,7 @@ impl<S: Store> Api<S> {
                     mailboxes_live: a.mailboxes_live,
                     text_pending: a.text_pending,
                     name: a.name,
+                    email: a.email,
                     status: a.status,
                     last_error: runtime.last_error,
                     capabilities: runtime.capabilities,
@@ -302,6 +318,11 @@ impl<S: Store> Api<S> {
             }
             Err(ViewError::Query(e)) => {
                 return Ok(Response::error(400, "invalid_query", e.to_string()));
+            }
+            Err(ViewError::Scope) => {
+                return Ok(bad_request(
+                    "only inbox, label and search views can be scoped to an account",
+                ));
             }
         };
         let index = self.store.view_index(view).await?;
@@ -399,6 +420,8 @@ impl<S: Store> Api<S> {
             smtp_tls: account.smtp_tls,
             username: account.username.clone(),
             max_connections: account.max_connections,
+            email: Some(account.email.clone()),
+            status: AccountStateDto::Active,
         };
         let id = self.store.create_account(account).await?;
         tracing::info!(account = id.0, "account added");
@@ -480,6 +503,34 @@ fn validate(dto: NewAccountDto) -> Result<NewAccount, Response> {
             format!("1 to {MAX_PASSWORD_LEN} bytes"),
         ));
     }
+    let email = match dto
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+    {
+        Some(email) if valid_address(email) => email.to_owned(),
+        Some(_) => return Err(invalid("email", "not an email address")),
+        None if valid_address(&dto.username) => dto.username.clone(),
+        None => {
+            return Err(invalid(
+                "email",
+                "the IMAP username is not an email address; enter the address to send from",
+            ));
+        }
+    };
+    let display_name = match dto.display_name.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(n) if n.chars().count() <= MAX_NAME_LEN && !n.chars().any(char::is_control) => {
+            Some(n.to_owned())
+        }
+        Some(_) => {
+            return Err(invalid(
+                "displayName",
+                format!("at most {MAX_NAME_LEN} printable characters"),
+            ));
+        }
+    };
     let max_connections = dto.max_connections.unwrap_or(DEFAULT_MAX_CONNECTIONS);
     if !MAX_CONNECTIONS.contains(&max_connections) {
         return Err(invalid(
@@ -498,6 +549,8 @@ fn validate(dto: NewAccountDto) -> Result<NewAccount, Response> {
         username: dto.username,
         password,
         max_connections,
+        email,
+        display_name,
     })
 }
 
