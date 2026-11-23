@@ -9,10 +9,25 @@ use tagmail_api_core::ChangeFeed;
 use tagmail_core::AccountId;
 use tagmail_store::rusqlite::Connection;
 use tagmail_store::{BlobStore, CacheDb, changes};
+use tokio::sync::Semaphore;
 
 use crate::cache::W;
 use crate::error::Result;
 use crate::overlay::Overlays;
+
+/// Blob writes in flight at once, over all accounts.
+pub const MAX_BLOB_WRITES: usize = 1024;
+
+/// A semaphore for [`Ctx::with_blob_writes`].
+pub fn blob_writes() -> Arc<Semaphore> {
+    Arc::new(Semaphore::new(MAX_BLOB_WRITES))
+}
+
+/// Waits until no blob write counted in `writes` runs.
+pub async fn drain_blob_writes(writes: &Semaphore) {
+    let all = u32::try_from(MAX_BLOB_WRITES).unwrap_or(u32::MAX);
+    drop(writes.acquire_many(all).await);
+}
 
 #[derive(Clone)]
 pub struct Ctx {
@@ -21,6 +36,7 @@ pub struct Ctx {
     pub feed: Arc<ChangeFeed>,
     pub account: AccountId,
     pub overlays: Arc<Overlays>,
+    blob_writes: Arc<Semaphore>,
     clock: Arc<AtomicI64>,
 }
 
@@ -43,8 +59,37 @@ impl Ctx {
             feed,
             account,
             overlays: Arc::default(),
+            blob_writes: Arc::new(Semaphore::new(MAX_BLOB_WRITES)),
             clock: Arc::new(AtomicI64::new(0)),
         }
+    }
+
+    /// Counts blob writes in `writes`, so a stop can wait for them.
+    pub fn with_blob_writes(mut self, writes: Arc<Semaphore>) -> Ctx {
+        self.blob_writes = writes;
+        self
+    }
+
+    /// Runs a blocking blob write to the end even when the awaiting sync
+    /// step is cancelled; [`drain_blob_writes`] waits for it.
+    pub async fn write_blobs<T, F>(&self, f: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> tagmail_store::Result<T> + Send + 'static,
+    {
+        let permit = self
+            .blob_writes
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| tagmail_store::Error::Closed)?;
+        Ok(tokio::task::spawn_blocking(move || {
+            let out = f();
+            drop(permit);
+            out
+        })
+        .await
+        .map_err(|_| tagmail_store::Error::Closed)??)
     }
 
     /// Projects the pending ops in `overlays` over every write.
@@ -106,5 +151,42 @@ impl Ctx {
         F: FnOnce(&Connection) -> tagmail_store::Result<T> + Send + 'static,
     {
         Ok(self.cache.read(f).await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    use super::*;
+    use crate::testutil::open;
+
+    #[tokio::test]
+    async fn drain_waits_for_a_blob_write_whose_caller_was_cancelled() {
+        let t = open();
+        let writes = blob_writes();
+        let ctx = t.ctx.clone().with_blob_writes(writes.clone());
+        let done = Arc::new(AtomicBool::new(false));
+        let (started, running) = std::sync::mpsc::channel();
+        let flag = done.clone();
+        let write = tokio::spawn(async move {
+            ctx.write_blobs(move || {
+                let _ = started.send(());
+                std::thread::sleep(Duration::from_millis(200));
+                flag.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+        });
+        tokio::task::spawn_blocking(move || running.recv().unwrap())
+            .await
+            .unwrap();
+        write.abort();
+        drain_blob_writes(&writes).await;
+        assert!(
+            done.load(Ordering::SeqCst),
+            "drained before the write ended"
+        );
     }
 }

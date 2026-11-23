@@ -328,6 +328,7 @@ impl<F: ConnectorFactory> Engine<F> {
             account,
         )
         .with_overlays(self.inner.overlays.clone())
+        .with_blob_writes(self.inner.blob_writes.clone())
     }
 
     pub(crate) fn wake(&self, account: AccountId) -> std::sync::Arc<Notify> {

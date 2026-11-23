@@ -457,9 +457,7 @@ pub async fn text_pass<S: ImapSession>(
             {
                 let key = key.clone();
                 let text = text.clone();
-                tokio::task::spawn_blocking(move || blobs.put_text(&key, &text))
-                    .await
-                    .map_err(|_| tagmail_store::Error::Closed)??;
+                ctx.write_blobs(move || blobs.put_text(&key, &text)).await?;
             }
             let kept = text[..text.floor_char_boundary(tagmail_store::TEXT_CAP)].to_owned();
             let snippet = message::snippet_of(&kept);
@@ -486,7 +484,7 @@ pub(crate) async fn delete_blobs(ctx: &Ctx, email_ids: Vec<String>) -> Result<()
     }
     let blobs = ctx.blobs.clone();
     let account = ctx.account;
-    tokio::task::spawn_blocking(move || {
+    ctx.write_blobs(move || {
         for email_id in email_ids {
             if let Ok(id) = tagmail_core::EmailId::parse(&email_id) {
                 let key = BlobKey::for_message(account, &id);
@@ -494,9 +492,7 @@ pub(crate) async fn delete_blobs(ctx: &Ctx, email_ids: Vec<String>) -> Result<()
                 blobs.delete_raw(&key)?;
             }
         }
-        Ok::<_, tagmail_store::Error>(())
+        Ok(())
     })
     .await
-    .map_err(|_| tagmail_store::Error::Closed)??;
-    Ok(())
 }

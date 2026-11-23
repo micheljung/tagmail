@@ -117,7 +117,7 @@ pub async fn fetch_raw<S: ImapSession>(
         let mut temp = file.into_std().await;
         let blobs = ctx.blobs.clone();
         let key = key.clone();
-        tokio::task::spawn_blocking(move || {
+        ctx.write_blobs(move || {
             temp.rewind()?;
             let mut writer = blobs.raw_writer(key, cap)?;
             let mut buf = vec![0; COPY_CHUNK];
@@ -130,10 +130,9 @@ pub async fn fetch_raw<S: ImapSession>(
             }
             writer.finish()?;
             blobs.evict_raw(cache_max)?;
-            Ok::<_, tagmail_store::Error>(())
+            Ok(())
         })
-        .await
-        .map_err(|_| tagmail_store::Error::Closed)??;
+        .await?;
         return Ok(Ok(()));
     }
     Ok(Err(last))

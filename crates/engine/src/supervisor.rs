@@ -370,6 +370,8 @@ pub(crate) struct Inner<F: ConnectorFactory> {
     /// Accounts whose server answered OK to a label but did not keep its
     /// keyword; cleared by the next label it keeps.
     labels_dropped: Mutex<HashSet<AccountId>>,
+    /// Blob writes of every account; stops wait for them to finish.
+    pub(crate) blob_writes: Arc<Semaphore>,
 }
 
 /// The sync engine: implements [`AccountRegistry`] and [`WriteService`]
@@ -426,6 +428,7 @@ impl<F: ConnectorFactory> Engine<F> {
                 }),
                 bulk: Semaphore::new(config.bulk_permits.max(1)),
                 labels_dropped: Mutex::new(HashSet::new()),
+                blob_writes: crate::ctx::blob_writes(),
                 config,
             }),
         };
@@ -621,6 +624,7 @@ impl<F: ConnectorFactory> Engine<F> {
         for h in handles {
             join(h).await;
         }
+        crate::ctx::drain_blob_writes(&self.inner.blob_writes).await;
     }
 
     #[cfg(test)]
@@ -648,6 +652,7 @@ impl<F: ConnectorFactory> Engine<F> {
             h.stop.send_replace(true);
             join(h).await;
         }
+        crate::ctx::drain_blob_writes(&self.inner.blob_writes).await;
         self.inner
             .wakes
             .lock()
@@ -1123,7 +1128,8 @@ async fn run_account<F: ConnectorFactory>(
         stores.feed.clone(),
         id,
     )
-    .with_overlays(inner.overlays.clone());
+    .with_overlays(inner.overlays.clone())
+    .with_blob_writes(inner.blob_writes.clone());
     let account = AccountRun {
         id,
         config: &inner.config,
