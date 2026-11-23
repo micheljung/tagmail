@@ -169,6 +169,11 @@ pub struct FakeServer {
     pub drop_keywords: bool,
     /// SELECT reports whether keywords can be stored.
     pub keyword_capable: bool,
+    /// Flags-only FETCHes fail: with NO, or like a dropped connection.
+    pub fail_flag_fetches: Option<FetchFailure>,
+    /// A STORE adding a keyword expunges its messages, as if another
+    /// client deleted them right after.
+    pub expunge_after_keyword_store: bool,
     /// UIDs another client changes just before the next STORE, so an
     /// `UNCHANGEDSINCE` guard reports them MODIFIED; consumed by that STORE.
     pub change_before_store: Vec<u32>,
@@ -186,6 +191,12 @@ pub struct FakeServer {
     pub password: Option<String>,
     pub logins: usize,
     changed: Arc<Notify>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FetchFailure {
+    No,
+    Closed,
 }
 
 pub type Shared = Arc<Mutex<FakeServer>>;
@@ -247,6 +258,8 @@ pub fn server(caps: &[&str]) -> Shared {
         fail_stores: false,
         drop_keywords: false,
         keyword_capable: true,
+        fail_flag_fetches: None,
+        expunge_after_keyword_store: false,
         change_before_store: Vec::new(),
         header_search_empty: false,
         stores: Vec::new(),
@@ -400,6 +413,22 @@ impl FakeSession {
         let name = self.selected_name()?;
 
         let mut server = self.server();
+        if *spec == FetchSpec::flags() {
+            match server.fail_flag_fetches {
+                Some(FetchFailure::No) => {
+                    return Err(Error::No {
+                        code: None,
+                        text: "fetch refused".into(),
+                    });
+                }
+                Some(FetchFailure::Closed) => {
+                    drop(server);
+                    self.broken = true;
+                    return Err(closed());
+                }
+                None => {}
+            }
+        }
         if spec.envelope {
             let full = server.fetches.iter().filter(|f| f.full).count();
             if server.fail_after_full_fetches.is_some_and(|n| full >= n) {
@@ -736,6 +765,21 @@ impl ImapSession for FakeSession {
         }
         if touched {
             server.notify(&name);
+        }
+        if server.expunge_after_keyword_store
+            && op == StoreOp::Add
+            && flags.iter().any(|f| matches!(f, Flag::Keyword(_)))
+        {
+            let gone: Vec<u32> = server
+                .mailbox(&name)
+                .msgs
+                .keys()
+                .copied()
+                .filter(|u| uids.contains(Uid(*u)))
+                .collect();
+            for uid in gone {
+                server.expunge(&name, uid);
+            }
         }
         Ok(StoreResult {
             modified,

@@ -74,7 +74,8 @@ async fn mark<S: ImapSession>(s: &mut S) -> Result<Result<Uid, ProbeState>> {
     Ok(Ok(newest))
 }
 
-async fn has_keyword<S: ImapSession>(s: &mut S, uid: Uid) -> Result<bool> {
+/// Whether the message kept the keyword; `None` when it is gone.
+async fn has_keyword<S: ImapSession>(s: &mut S, uid: Uid) -> Result<Option<bool>> {
     let read_only = SelectOptions {
         read_only: true,
         qresync: None,
@@ -83,11 +84,16 @@ async fn has_keyword<S: ImapSession>(s: &mut S, uid: Uid) -> Result<bool> {
     let mut uids = UidSet::new();
     uids.insert(uid);
     let metas = s.fetch(&uids, &FetchSpec::flags()).await?;
-    Ok(metas
+    let Some(flags) = metas
         .iter()
-        .filter_map(|m| m.flags.as_ref())
-        .flatten()
-        .any(|f| matches!(f, Flag::Keyword(k) if k.eq_ignore_ascii_case(PROBE_KEYWORD))))
+        .find(|m| m.uid == Some(uid))
+        .and_then(|m| m.flags.as_ref())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(flags.iter().any(
+        |f| matches!(f, Flag::Keyword(k) if k.eq_ignore_ascii_case(PROBE_KEYWORD)),
+    )))
 }
 
 async fn unmark<S: ImapSession>(s: &mut S, uid: Uid) -> Result<()> {
@@ -97,6 +103,28 @@ async fn unmark<S: ImapSession>(s: &mut S, uid: Uid) -> Result<()> {
     s.store_flags(&uids, StoreOp::Remove, &probe_flag(), None)
         .await?;
     Ok(())
+}
+
+/// Clears the probe keyword on a fresh connection when dropped armed, so a
+/// probe that failed or was cancelled after marking does not leave it.
+struct Unmark<C: Connector> {
+    pool: Pool<C>,
+    uid: Option<Uid>,
+}
+
+impl<C: Connector> Drop for Unmark<C> {
+    fn drop(&mut self) {
+        let Some(uid) = self.uid.take() else {
+            return;
+        };
+        let pool = self.pool.clone();
+        tokio::spawn(async move {
+            let cleared = async { unmark(&mut *pool.acquire().await?, uid).await }.await;
+            if let Err(e) = cleared {
+                tracing::warn!(error = %e, "cannot clear the probe keyword");
+            }
+        });
+    }
 }
 
 /// A non-fatal failure ends the probe without a result; the next start
@@ -124,6 +152,10 @@ pub(crate) async fn run<C: Connector>(
         Some(Err(state)) => return Ok((worker, Some(state))),
         None => return Ok((worker, None)),
     };
+    let mut armed = Unmark {
+        pool: pool.clone(),
+        uid: Some(uid),
+    };
     let kept = if pool.max_connections() >= 2 {
         let mut reader = pool.acquire().await?;
         has_keyword(&mut *reader, uid).await
@@ -132,14 +164,94 @@ pub(crate) async fn run<C: Connector>(
         worker = pool.acquire().await?;
         has_keyword(&mut *worker, uid).await
     };
-    let Some(kept) = inconclusive(kept)? else {
-        return Ok((worker, None));
-    };
-    inconclusive(unmark(&mut *worker, uid).await)?;
-    let state = if kept {
-        ProbeState::Ok
-    } else {
-        ProbeState::Dropped
-    };
-    Ok((worker, Some(state)))
+    let kept = inconclusive(kept)?.flatten();
+    let cleared = unmark(&mut *worker, uid).await;
+    if cleared.is_ok() {
+        armed.uid = None;
+    }
+    inconclusive(cleared)?;
+    let state = kept.map(|kept| {
+        if kept {
+            ProbeState::Ok
+        } else {
+            ProbeState::Dropped
+        }
+    });
+    Ok((worker, state))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tagmail_imap::PoolConfig;
+    use tokio::time::Instant;
+
+    use super::*;
+    use crate::fake::{FakeConnector, FakeMsg, FetchFailure, Shared, lock, server};
+
+    const CAPS: &[&str] = &["IMAP4rev1", "CONDSTORE"];
+
+    fn seeded() -> Shared {
+        let srv = server(CAPS);
+        lock(&srv).append("INBOX", FakeMsg::new("p@x", "Hi", "a@x", "b@x", 1));
+        srv
+    }
+
+    fn pool(srv: &Shared, max_connections: usize) -> Pool<FakeConnector> {
+        Pool::new(
+            FakeConnector(srv.clone()),
+            PoolConfig {
+                max_connections,
+                ..PoolConfig::default()
+            },
+        )
+    }
+
+    async fn probe(srv: &Shared, max_connections: usize) -> Result<Option<ProbeState>> {
+        let pool = pool(srv, max_connections);
+        let worker = pool.acquire().await?;
+        run(&pool, worker).await.map(|(_, state)| state)
+    }
+
+    async fn cleared(srv: &Shared) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !lock(srv).flags_of("INBOX", 1).is_empty() {
+            assert!(Instant::now() < deadline, "probe keyword left behind");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_message_gone_before_the_read_back_is_inconclusive() {
+        for max_connections in [2, 1] {
+            let srv = seeded();
+            lock(&srv).expunge_after_keyword_store = true;
+            assert_eq!(probe(&srv, max_connections).await.unwrap(), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_read_back_still_clears_the_keyword() {
+        for max_connections in [2, 1] {
+            let srv = seeded();
+            lock(&srv).fail_flag_fetches = Some(FetchFailure::No);
+            assert_eq!(probe(&srv, max_connections).await.unwrap(), None);
+            cleared(&srv).await;
+
+            let srv = seeded();
+            lock(&srv).fail_flag_fetches = Some(FetchFailure::Closed);
+            assert!(probe(&srv, max_connections).await.is_err());
+            cleared(&srv).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn kept_and_dropped_keywords_are_told_apart() {
+        let srv = seeded();
+        assert_eq!(probe(&srv, 2).await.unwrap(), Some(ProbeState::Ok));
+        cleared(&srv).await;
+        lock(&srv).drop_keywords = true;
+        assert_eq!(probe(&srv, 1).await.unwrap(), Some(ProbeState::Dropped));
+    }
 }

@@ -48,10 +48,12 @@ Consequences for Tagmail:
   sent copies, which land at the tail; an op that has to find older mail
   again after a UIDVALIDITY change can still miss it on Stalwart, which
   advertises OBJECTID, so this only matters for messages without one.
-- The engine probes each account once on its first connection: it sets the
-  hidden keyword `$tagmail_probe` on the newest INBOX message, reads it back
-  on another connection and clears it (`account.keyword_probe`: `ok`,
-  `dropped`, `unsupported`, or `skipped` while INBOX is empty). One keyword
+- The engine probes each account on its first connection after a start
+  until it has a result: it sets the hidden keyword `$tagmail_probe` on the
+  newest INBOX message, reads it back on another connection and clears it
+  (`account.keyword_probe`: `ok`, `dropped`, `unsupported`, or `skipped`
+  while INBOX is empty). A read-back that fails or finds the message gone
+  gives no result, and the keyword is cleared all the same. One keyword
   cannot reveal Stalwart's limit; a label op whose keyword the server did not
   keep marks the account `labels_degraded` until a later label is kept.
 

@@ -18,7 +18,7 @@ use tagmail_store::{ChangeOp, Changes, ConfigDb, Entity, MasterKey, Vault};
 use tempfile::TempDir;
 use tokio::time::Instant;
 
-use crate::fake::{FakeAccounts, FakeMsg, Gauge, Shared, lock, server};
+use crate::fake::{FakeAccounts, FakeMsg, FetchFailure, Gauge, Shared, lock, server};
 use crate::smtp::{SmtpError, SmtpSender, SmtpServer};
 use crate::supervisor::{Engine, EngineConfig, Stores};
 use crate::testutil::{TestCache, open};
@@ -692,6 +692,20 @@ async fn keyword_probe_result_is_persisted_and_shown() {
         );
         again.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn an_inconclusive_probe_is_not_repeated_on_reconnects() {
+    const PROBE_STORES: usize = 2;
+    let srv = seeded("a", 1);
+    lock(&srv).fail_flag_fetches = Some(FetchFailure::No);
+    lock(&srv).fail_after_full_fetches = Some(0);
+    let f = fixture(&[account(1, 2, &srv)], config(|_| {})).await;
+    f.engine.start_all().await.unwrap();
+    eventually("several reconnects", || async { lock(&srv).logins > 4 }).await;
+    assert_eq!(lock(&srv).stores.len(), PROBE_STORES, "mark and clear once");
+    assert_eq!(f.probe(1).await, None);
+    f.engine.shutdown().await;
 }
 
 #[tokio::test]

@@ -1231,9 +1231,10 @@ async fn run_account<F: ConnectorFactory>(
         turns: &inner.loop_turns,
     };
     let mut retry = inner.config.retry_min;
+    let mut probed = false;
     loop {
         let result = tokio::select! {
-            r = account_loop(&account, &mut retry, &mut backoff) => r,
+            r = account_loop(&account, &mut retry, &mut backoff, &mut probed) => r,
             _ = stop.wait_for(|s| *s) => return,
         };
         let wait = match result {
@@ -1452,6 +1453,7 @@ async fn account_loop<C: Connector>(
     run: &AccountRun<'_, C>,
     retry: &mut Duration,
     backoff: &mut PersistedBackoff,
+    probed: &mut bool,
 ) -> Result<()> {
     let AccountRun {
         config,
@@ -1464,9 +1466,10 @@ async fn account_loop<C: Connector>(
     } = *run;
     let mut worker = pool.acquire().await?;
     backoff.clear().await;
-    if ProbeState::needed(probe_state(run.facts)) {
-        let (probed, state) = probe::run(pool, worker).await?;
-        worker = probed;
+    if !*probed && ProbeState::needed(probe_state(run.facts)) {
+        *probed = true;
+        let (after, state) = probe::run(pool, worker).await?;
+        worker = after;
         if let Some(state) = state {
             record_probe(run, state).await?;
         }
