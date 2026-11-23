@@ -110,7 +110,7 @@ const IDENTITIES: IdentityDto[] = [
 export function resetWrites(): void {
 	overrides.clear();
 	ops.clear();
-	labels = LABELS.map((l) => ({ ...l, color: null }));
+	labels = LABELS.map((l) => ({ ...l, color: null, accountIds: [1] }));
 	renamed.clear();
 	deletedLabels.clear();
 	labelJobs.clear();
@@ -455,7 +455,7 @@ export async function writeApi(
 		if (!trimmed) return fail(422, 'invalid', 'a label needs a name');
 		const key = trimmed.toLowerCase();
 		if (labels.some((l) => l.key === key)) return fail(409, 'label_exists', 'that label exists');
-		const label: LabelDto = { key, name: trimmed, color: color ?? null };
+		const label: LabelDto = { key, name: trimmed, color: color ?? null, accountIds: [1] };
 		labels.push(label);
 		deletedLabels.delete(key);
 		labelEvent(ctx, label);
