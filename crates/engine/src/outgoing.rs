@@ -89,20 +89,26 @@ const DATA_IMAGE: &str = "data:image/";
 const SIGNATURE_CLASS: &str = "tagmail-signature";
 const SIGNATURE_IDENTITY: &str = "data-identity";
 
-fn starts_with_ignore_case(value: &str, prefix: &str) -> bool {
+/// The URL as a browser's parser sees its scheme: leading C0 controls and
+/// spaces stripped, tabs and newlines removed anywhere, ASCII lowercase.
+fn scheme_view(value: &str) -> String {
     value
-        .get(..prefix.len())
-        .is_some_and(|p| p.eq_ignore_ascii_case(prefix))
+        .trim_start_matches(|c: char| c <= ' ')
+        .chars()
+        .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+        .take(DATA_IMAGE.len())
+        .collect::<String>()
+        .to_ascii_lowercase()
 }
 
-/// Inline images (e.g. in a signature) travel as `data:image/` URIs in
-/// `img src`; every other `data:` URI is dropped.
-fn data_uris<'u>(element: &str, attribute: &str, value: &'u str) -> Option<Cow<'u, str>> {
-    let trimmed = value.trim_start();
-    if !starts_with_ignore_case(trimmed, DATA_URI) {
+/// Ammonia attribute filter: inline images (e.g. in a signature) travel as
+/// `data:image/` URIs in `img src`; every other `data:` URI is dropped.
+pub fn data_uri_filter<'u>(element: &str, attribute: &str, value: &'u str) -> Option<Cow<'u, str>> {
+    let scheme = scheme_view(value);
+    if !scheme.starts_with(DATA_URI) {
         return Some(Cow::Borrowed(value));
     }
-    (element == "img" && attribute == "src" && starts_with_ignore_case(trimmed, DATA_IMAGE))
+    (element == "img" && attribute == "src" && scheme.starts_with(DATA_IMAGE))
         .then_some(Cow::Borrowed(value))
 }
 
@@ -113,7 +119,7 @@ pub fn sanitize_html(html: &str) -> String {
         .add_tag_attributes("div", [SIGNATURE_IDENTITY])
         .add_allowed_classes("div", [SIGNATURE_CLASS])
         .add_url_schemes([DATA_URI.trim_end_matches(':')])
-        .attribute_filter(data_uris)
+        .attribute_filter(data_uri_filter)
         .clean(html)
         .to_string()
 }
@@ -272,6 +278,20 @@ mod tests {
         assert!(!clean.contains("text/html"), "{clean}");
         assert!(!clean.contains("script"), "{clean}");
         assert!(clean.contains("https://example.com/a.png"), "{clean}");
+    }
+
+    #[test]
+    fn obfuscated_data_uris_are_dropped() {
+        for href in [
+            "&#1;data:text/html,x",
+            "da&#9;ta:text/html,x",
+            " DATA:text/html,x",
+        ] {
+            let clean = sanitize_html(&format!("<a href=\"{href}\">x</a>"));
+            assert!(!clean.contains("text/html"), "{href}: {clean}");
+        }
+        let img = sanitize_html("<img src=\"&#1;da&#10;ta:image/png;base64,AA==\">");
+        assert!(img.contains("image/png"), "{img}");
     }
 
     fn build(o: &Outgoing, purpose: Purpose) -> Vec<u8> {
