@@ -9,7 +9,7 @@ use crate::fetch::sequence_set;
 use crate::session::TokioSession;
 use crate::types::{CopyUid, Flag, MoveResult, SearchCriteria, StoreOp, Uid, UidSet, UidValidity};
 
-fn copy_uid<'a>(codes: impl Iterator<Item = &'a Code<'static>>) -> Option<CopyUid> {
+pub(crate) fn copy_uid<'a>(codes: impl Iterator<Item = &'a Code<'static>>) -> Option<CopyUid> {
     codes.into_iter().find_map(|code| match code {
         Code::CopyUid {
             uid_validity,
@@ -88,6 +88,27 @@ impl TokioSession {
         let copy_uid = copy_uid(out.codes().chain(done.code.as_ref()));
         self.split_events(out, |_| false);
         self.expunge_checked(uids, uidplus).await?;
+        Ok(MoveResult { copy_uid })
+    }
+
+    pub(crate) async fn copy_impl(
+        &mut self,
+        uids: &UidSet,
+        destination: &str,
+    ) -> Result<MoveResult> {
+        self.selected_state()?;
+        if uids.is_empty() {
+            return Ok(MoveResult::default());
+        }
+        let (out, done) = self
+            .run(CommandBody::Copy {
+                sequence_set: sequence_set(uids)?,
+                mailbox: Self::mailbox(destination)?,
+                uid: true,
+            })
+            .await?;
+        let copy_uid = copy_uid(out.codes().chain(done.code.as_ref()));
+        self.split_events(out, |_| false);
         Ok(MoveResult { copy_uid })
     }
 

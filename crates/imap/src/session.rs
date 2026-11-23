@@ -122,12 +122,31 @@ pub trait ImapSession: Send {
         destination: &str,
     ) -> impl Future<Output = Result<MoveResult>> + Send;
 
+    /// `UID COPY` into `destination`, keeping the source messages.
+    fn copy_messages(
+        &mut self,
+        uids: &UidSet,
+        destination: &str,
+    ) -> impl Future<Output = Result<MoveResult>> + Send;
+
     fn append(
         &mut self,
         mailbox: &str,
         flags: &[Flag],
         message: &[u8],
     ) -> impl Future<Output = Result<AppendResult>> + Send;
+
+    /// The server annotation `entry` (RFC 5464), `None` when unset;
+    /// requires METADATA.
+    fn get_metadata(&mut self, entry: &str)
+    -> impl Future<Output = Result<Option<Vec<u8>>>> + Send;
+
+    /// Sets the server annotation `entry`; `None` removes it.
+    fn set_metadata(
+        &mut self,
+        entry: &str,
+        value: Option<&[u8]>,
+    ) -> impl Future<Output = Result<()>> + Send;
 
     /// Removes `uids` from the selected mailbox: `\Deleted` + `UID EXPUNGE`
     /// (UIDPLUS), else plain EXPUNGE, which is refused with
@@ -891,6 +910,10 @@ impl ImapSession for TokioSession {
         self.move_impl(uids, destination).await
     }
 
+    async fn copy_messages(&mut self, uids: &UidSet, destination: &str) -> Result<MoveResult> {
+        self.copy_impl(uids, destination).await
+    }
+
     async fn append(
         &mut self,
         mailbox: &str,
@@ -898,6 +921,14 @@ impl ImapSession for TokioSession {
         message: &[u8],
     ) -> Result<AppendResult> {
         self.append_impl(mailbox, flags, message).await
+    }
+
+    async fn get_metadata(&mut self, entry: &str) -> Result<Option<Vec<u8>>> {
+        self.get_metadata_impl(entry).await
+    }
+
+    async fn set_metadata(&mut self, entry: &str, value: Option<&[u8]>) -> Result<()> {
+        self.set_metadata_impl(entry, value).await
     }
 
     async fn expunge_uids(&mut self, uids: &UidSet) -> Result<()> {

@@ -153,6 +153,15 @@ impl ImapSession for Counted {
     async fn expunge_uids(&mut self, uids: &UidSet) -> Result<()> {
         self.inner.expunge_uids(uids).await
     }
+    async fn copy_messages(&mut self, uids: &UidSet, destination: &str) -> Result<MoveResult> {
+        self.inner.copy_messages(uids, destination).await
+    }
+    async fn get_metadata(&mut self, entry: &str) -> Result<Option<Vec<u8>>> {
+        self.inner.get_metadata(entry).await
+    }
+    async fn set_metadata(&mut self, entry: &str, value: Option<&[u8]>) -> Result<()> {
+        self.inner.set_metadata(entry, value).await
+    }
     async fn idle(&mut self, wake: &Notify) -> Result<IdleResult> {
         self.inner.idle(wake).await
     }

@@ -160,6 +160,10 @@ pub struct FakeServer {
     pub reject_login: bool,
     /// APPENDs fail with NO.
     pub fail_appends: bool,
+    /// STOREs fail with NO.
+    pub fail_stores: bool,
+    /// Server annotations; `Some` when METADATA is advertised.
+    pub metadata: BTreeMap<String, Vec<u8>>,
     pub logins: usize,
     changed: Arc<Notify>,
 }
@@ -193,6 +197,8 @@ pub fn server(caps: &[&str]) -> Shared {
         fail_after_full_fetches: None,
         reject_login: false,
         fail_appends: false,
+        fail_stores: false,
+        metadata: BTreeMap::new(),
         logins: 0,
         changed: Arc::new(Notify::new()),
     }))
@@ -239,6 +245,12 @@ impl FakeServer {
         mb.msgs.insert(uid, msg);
         self.notify(name);
         uid
+    }
+
+    /// Copies `uid` of `from` into `to`, returning the new UID.
+    pub fn copy_msg(&mut self, from: &str, uid: u32, to: &str) -> u32 {
+        let msg = self.mailbox(from).msgs.get(&uid).expect("uid").clone();
+        self.append(to, msg)
     }
 
     pub fn set_flags(&mut self, name: &str, uid: u32, flags: &[Flag]) {
@@ -386,8 +398,17 @@ impl ImapSession for FakeSession {
             .collect())
     }
 
-    async fn create_mailbox(&mut self, _name: &str) -> Result<()> {
-        Err(Error::Unsupported("CREATE"))
+    async fn create_mailbox(&mut self, name: &str) -> Result<()> {
+        let mut server = self.server();
+        if server.mailboxes.iter().any(|m| m.name == name) {
+            return Err(Error::No {
+                code: Some("ALREADYEXISTS".into()),
+                text: name.into(),
+            });
+        }
+        let uidvalidity = 1000 + u32::try_from(server.mailboxes.len()).unwrap_or(0);
+        server.add_mailbox(name, None, uidvalidity);
+        Ok(())
     }
 
     async fn select(&mut self, name: &str, options: SelectOptions) -> Result<SelectedMailbox> {
@@ -553,16 +574,127 @@ impl ImapSession for FakeSession {
 
     async fn store_flags(
         &mut self,
-        _uids: &UidSet,
-        _op: StoreOp,
-        _flags: &[Flag],
-        _unchanged_since: Option<ModSeq>,
+        uids: &UidSet,
+        op: StoreOp,
+        flags: &[Flag],
+        unchanged_since: Option<ModSeq>,
     ) -> Result<StoreResult> {
-        Err(Error::Unsupported("STORE"))
+        let name = self.selected_name()?;
+        let condstore = self.caps.condstore();
+        let mut server = self.server();
+        if server.fail_stores {
+            return Err(Error::No {
+                code: None,
+                text: "store refused".into(),
+            });
+        }
+        let targets: Vec<u32> = server
+            .mailbox(&name)
+            .msgs
+            .keys()
+            .copied()
+            .filter(|u| uids.contains(Uid(*u)))
+            .collect();
+        let mut modified = UidSet::new();
+        let mut touched = false;
+        for uid in targets {
+            let msg_modseq = server.mailbox(&name).msgs[&uid].modseq;
+            if let Some(since) = unchanged_since.filter(|_| condstore)
+                && msg_modseq > since.0
+            {
+                modified.insert(Uid(uid));
+                continue;
+            }
+            let mut new = server.mailbox(&name).msgs[&uid].flags.clone();
+            match op {
+                StoreOp::Add => {
+                    for f in flags {
+                        if !new.contains(f) {
+                            new.push(f.clone());
+                        }
+                    }
+                }
+                StoreOp::Remove => new.retain(|f| !flags.contains(f)),
+                StoreOp::Replace => new = flags.to_vec(),
+            }
+            if new != server.mailbox(&name).msgs[&uid].flags {
+                let modseq = server.bump(&name);
+                let msg = server.mailbox(&name).msgs.get_mut(&uid).expect("uid");
+                msg.flags = new;
+                msg.modseq = modseq;
+                touched = true;
+            }
+        }
+        if touched {
+            server.notify(&name);
+        }
+        Ok(StoreResult {
+            modified,
+            updates: Vec::new(),
+        })
     }
 
-    async fn move_messages(&mut self, _uids: &UidSet, _destination: &str) -> Result<MoveResult> {
-        Err(Error::Unsupported("MOVE"))
+    async fn move_messages(&mut self, uids: &UidSet, destination: &str) -> Result<MoveResult> {
+        let name = self.selected_name()?;
+        let mut server = self.server();
+        if !server.mailboxes.iter().any(|m| m.name == destination) {
+            return Err(Error::No {
+                code: Some("TRYCREATE".into()),
+                text: destination.into(),
+            });
+        }
+        let targets: Vec<u32> = server
+            .mailbox(&name)
+            .msgs
+            .keys()
+            .copied()
+            .filter(|u| uids.contains(Uid(*u)))
+            .collect();
+        for uid in targets {
+            server.move_msg(&name, uid, destination);
+        }
+        Ok(MoveResult::default())
+    }
+
+    async fn copy_messages(&mut self, uids: &UidSet, destination: &str) -> Result<MoveResult> {
+        let name = self.selected_name()?;
+        let mut server = self.server();
+        if !server.mailboxes.iter().any(|m| m.name == destination) {
+            return Err(Error::No {
+                code: Some("TRYCREATE".into()),
+                text: destination.into(),
+            });
+        }
+        let targets: Vec<u32> = server
+            .mailbox(&name)
+            .msgs
+            .keys()
+            .copied()
+            .filter(|u| uids.contains(Uid(*u)))
+            .collect();
+        for uid in targets {
+            server.copy_msg(&name, uid, destination);
+        }
+        Ok(MoveResult::default())
+    }
+
+    async fn get_metadata(&mut self, entry: &str) -> Result<Option<Vec<u8>>> {
+        if !self.caps.metadata() {
+            return Err(Error::Unsupported("METADATA"));
+        }
+        Ok(self.server().metadata.get(entry).cloned())
+    }
+
+    async fn set_metadata(&mut self, entry: &str, value: Option<&[u8]>) -> Result<()> {
+        if !self.caps.metadata() {
+            return Err(Error::Unsupported("METADATA"));
+        }
+        let mut server = self.server();
+        match value {
+            Some(v) => server.metadata.insert(entry.to_owned(), v.to_vec()),
+            None => server.metadata.remove(entry),
+        };
+        Ok(())
     }
 
     async fn append(

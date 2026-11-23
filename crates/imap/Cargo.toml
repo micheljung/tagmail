@@ -12,8 +12,8 @@ publish.workspace = true
 dovecot-tests = []
 
 [dependencies]
-imap-codec = { version = "=2.0.0-alpha.10", features = ["ext_condstore_qresync", "starttls"] }
-imap-next = { version = "=0.3.4", default-features = false, features = ["ext_condstore_qresync", "starttls"] }
+imap-codec = { version = "=2.0.0-alpha.10", features = ["ext_condstore_qresync", "ext_metadata", "starttls"] }
+imap-next = { version = "=0.3.4", default-features = false, features = ["ext_condstore_qresync", "ext_metadata", "starttls"] }
 rustls.workspace = true
 tagmail-core.workspace = true
 thiserror.workspace = true

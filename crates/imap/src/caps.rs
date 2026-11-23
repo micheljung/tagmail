@@ -54,6 +54,11 @@ impl Capabilities {
         self.has("OBJECTID")
     }
 
+    /// RFC 5464 server annotations (`METADATA` or `METADATA-SERVER`).
+    pub fn metadata(&self) -> bool {
+        self.has("METADATA") || self.has("METADATA-SERVER")
+    }
+
     pub fn gmail(&self) -> bool {
         self.has("X-GM-EXT-1")
     }

@@ -1035,3 +1035,73 @@ mod tls {
         assert!(matches!(err, Error::Protocol(_)), "{err}");
     }
 }
+
+#[tokio::test]
+async fn copy_keeps_the_source_and_reports_copyuid() {
+    let steps = with(
+        login("UIDPLUS"),
+        vec![
+            cmd("SELECT Archive", &select_ok(&[])),
+            cmd(
+                "UID COPY 7 INBOX",
+                &["{tag} OK [COPYUID 1700000000 7 31] copied"],
+            ),
+        ],
+    );
+    let (mut s, server) = session(steps, &config()).await;
+    s.select("Archive", SelectOptions::default()).await.unwrap();
+    let r = s.copy_messages(&uids(&[(7, 7)]), "INBOX").await.unwrap();
+    s.copy_messages(&UidSet::new(), "INBOX").await.unwrap();
+    server.await.unwrap();
+    let copy = r.copy_uid.unwrap();
+    assert_eq!(copy.destination, vec![Uid(31)]);
+}
+
+#[tokio::test]
+async fn server_metadata_round_trip() {
+    let steps = with(
+        login("METADATA"),
+        vec![
+            cmd(
+                "GETMETADATA \"\" /private/vendor/tagmail/labels",
+                &[
+                    "* METADATA \"\" (/private/vendor/tagmail/labels {7}",
+                    "{\"a\":1})",
+                    "{tag} OK done",
+                ],
+            ),
+            cmd(
+                "GETMETADATA \"\" /private/vendor/tagmail/labels",
+                &[
+                    "* METADATA \"\" (/private/vendor/tagmail/labels NIL)",
+                    "{tag} OK done",
+                ],
+            ),
+            cmd(
+                "SETMETADATA \"\" (/private/vendor/tagmail/labels \"x\")",
+                &["{tag} OK set"],
+            ),
+            cmd(
+                "SETMETADATA \"\" (/private/vendor/tagmail/labels NIL)",
+                &["{tag} OK set"],
+            ),
+        ],
+    );
+    let (mut s, server) = session(steps, &config()).await;
+    let entry = "/private/vendor/tagmail/labels";
+    assert_eq!(
+        s.get_metadata(entry).await.unwrap().as_deref(),
+        Some(&b"{\"a\":1}"[..])
+    );
+    assert_eq!(s.get_metadata(entry).await.unwrap(), None);
+    s.set_metadata(entry, Some(b"x")).await.unwrap();
+    s.set_metadata(entry, None).await.unwrap();
+    server.await.unwrap();
+
+    let (mut s, server) = session(login(""), &config()).await;
+    assert!(matches!(
+        s.get_metadata(entry).await,
+        Err(Error::Unsupported("METADATA"))
+    ));
+    server.await.unwrap();
+}

@@ -22,6 +22,7 @@ mod conn;
 mod error;
 mod fetch;
 mod idle;
+mod metadata;
 mod r#move;
 mod pool;
 mod qresync;
