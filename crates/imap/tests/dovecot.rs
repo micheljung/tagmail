@@ -1,6 +1,9 @@
 //! Integration tests against the Dovecot test server (`cargo xtask dovecot
 //! up`). Run with `cargo test -p tagmail-imap --features dovecot-tests`;
-//! `TAGMAIL_IMAP_ADDR` overrides the default `127.0.0.1:10143`.
+//! `TAGMAIL_IMAP_ADDR` overrides the default `127.0.0.1:10143`. With
+//! `TAGMAIL_IMAP_SERVER=stalwart` the same tests run against Stalwart
+//! (`cargo xtask stalwart up`, `TAGMAIL_IMAP_ADDR=127.0.0.1:10145`), which
+//! advertises OBJECTID and names its special-use mailboxes differently.
 #![cfg(feature = "dovecot-tests")]
 
 use std::pin::Pin;
@@ -20,6 +23,20 @@ fn addr() -> (String, u16) {
     let addr = std::env::var("TAGMAIL_IMAP_ADDR").unwrap_or_else(|_| "127.0.0.1:10143".into());
     let (host, port) = addr.rsplit_once(':').expect("host:port");
     (host.to_owned(), port.parse().expect("port"))
+}
+
+fn stalwart() -> bool {
+    std::env::var("TAGMAIL_IMAP_SERVER").is_ok_and(|s| s == "stalwart")
+}
+
+/// The mailbox carrying `role`, whatever the server calls it.
+async fn role_mailbox(s: &mut TokioSession, role: SpecialUse) -> String {
+    let boxes = s.list().await.expect("list");
+    boxes
+        .into_iter()
+        .find(|b| b.special_use == Some(role))
+        .unwrap_or_else(|| panic!("no {role:?} mailbox"))
+        .name
 }
 
 fn config() -> ServerConfig {
@@ -62,15 +79,25 @@ async fn capabilities_and_special_use() {
     let mut s = connect().await;
     let caps = s.capabilities().clone();
     assert!(caps.qresync() && caps.idle() && caps.r#move() && caps.uidplus());
-    assert!(!caps.objectid(), "Dovecot 2.4 does not advertise OBJECTID");
+    assert_eq!(
+        caps.objectid(),
+        stalwart(),
+        "only Stalwart advertises OBJECTID"
+    );
     assert!(s.qresync_enabled());
     let boxes = s.list().await.unwrap();
-    let sent = boxes.iter().find(|b| b.name == "Sent").unwrap();
-    assert_eq!(sent.special_use, Some(SpecialUse::Sent));
-    assert!(
+    for role in [SpecialUse::Sent, SpecialUse::Drafts, SpecialUse::Trash] {
+        assert!(
+            boxes.iter().any(|b| b.special_use == Some(role)),
+            "{role:?}"
+        );
+    }
+    assert_eq!(
         boxes
             .iter()
-            .any(|b| b.special_use == Some(SpecialUse::Archive))
+            .any(|b| b.special_use == Some(SpecialUse::Archive)),
+        !stalwart(),
+        "Stalwart has no archive mailbox"
     );
 }
 
@@ -98,7 +125,8 @@ async fn qresync_reconnect_yields_vanished_earlier() {
     a.store_flags(&one(uids[1]), StoreOp::Add, &[Flag::Deleted], None)
         .await
         .unwrap();
-    a.move_messages(&one(uids[0]), "Trash").await.unwrap();
+    let trash = role_mailbox(&mut a, SpecialUse::Trash).await;
+    a.move_messages(&one(uids[0]), &trash).await.unwrap();
     a.logout().await.unwrap();
 
     let mut b = connect().await;
@@ -242,7 +270,8 @@ async fn sync_window_fetch_and_uid_search() {
         Some(&b"msg 4"[..])
     );
     assert!(m.snippet.as_ref().unwrap().starts_with(b"body 4"));
-    assert!(m.modseq.is_some() && m.email_id.is_none() && !m.degraded);
+    assert!(m.modseq.is_some() && !m.degraded);
+    assert_eq!(m.email_id.is_some(), s.capabilities().objectid());
     assert_eq!(m.body.as_ref().unwrap().parts[0].mime_type, "text/plain");
     let found = s
         .uid_search(SearchCriteria::Header {
@@ -251,8 +280,42 @@ async fn sync_window_fetch_and_uid_search() {
         })
         .await
         .unwrap();
-    assert_eq!(found.len(), 1);
+    if stalwart() {
+        // Stalwart 0.15.3 answers HEADER searches in a mailbox of two or
+        // more messages with an empty result (docs/servers.md). Pinned so
+        // the day it works this fails and the workaround can go.
+        assert!(found.is_empty());
+    } else {
+        assert_eq!(found.len(), 1);
+    }
     assert!(sel.uid_next.is_some());
+}
+
+#[tokio::test]
+async fn copy_shares_the_email_id_when_the_server_has_object_ids() {
+    let mut s = connect().await;
+    let from = fresh_mailbox(&mut s, "copy-from").await;
+    let to = fresh_mailbox(&mut s, "copy-to").await;
+    let uid = s
+        .append(&from, &[], &message(1))
+        .await
+        .unwrap()
+        .uid
+        .unwrap();
+    s.select(&from, SelectOptions::default()).await.unwrap();
+    let copied = s.copy_messages(&one(uid), &to).await.unwrap();
+    let copy_uid = copied.copy_uid.expect("COPYUID").destination[0];
+    let spec = FetchSpec {
+        size: true,
+        identity: true,
+        ..FetchSpec::default()
+    };
+    let original = s.fetch(&one(uid), &spec).await.unwrap().remove(0);
+    s.select(&to, SelectOptions::default()).await.unwrap();
+    let copy = s.fetch(&one(copy_uid), &spec).await.unwrap().remove(0);
+    assert_eq!(original.size, copy.size, "COPY keeps RFC822.SIZE");
+    assert_eq!(original.email_id.is_some(), s.capabilities().objectid());
+    assert_eq!(original.email_id, copy.email_id, "COPY keeps EMAILID");
 }
 
 #[tokio::test]
@@ -303,7 +366,8 @@ async fn condstore_without_qresync_reports_expunge_events() {
     let u2 = s.append(&mb, &[], &message(2)).await.unwrap().uid.unwrap();
     let sel = s.select(&mb, SelectOptions::default()).await.unwrap();
     let since = sel.highest_modseq.unwrap();
-    s.move_messages(&one(u1), "Trash").await.unwrap();
+    let trash = role_mailbox(&mut s, SpecialUse::Trash).await;
+    s.move_messages(&one(u1), &trash).await.unwrap();
     assert!(s.take_events().contains(&MailboxEvent::Expunge(1)));
     s.store_flags(&one(u2), StoreOp::Add, &[Flag::Flagged], None)
         .await

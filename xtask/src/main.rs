@@ -1,6 +1,7 @@
 mod bench_rss;
 mod bench_search;
 mod harness;
+mod probe_server;
 mod seed;
 
 use std::net::SocketAddr;
@@ -102,12 +103,36 @@ enum Command {
         #[arg(long)]
         in_dovecot_network: bool,
     },
+    /// Report how an IMAP server behaves where Tagmail depends on it:
+    /// capabilities, keyword persistence and limits, object ids, COPY sizes.
+    /// Works in scratch mailboxes it deletes afterwards. The password comes
+    /// from $TAGMAIL_PROBE_PASSWORD or a prompt.
+    ProbeServer {
+        #[arg(long)]
+        host: String,
+        #[arg(long)]
+        port: u16,
+        #[arg(long, value_enum)]
+        security: ProbeSecurity,
+        #[arg(long)]
+        user: String,
+        /// Print JSON instead of text
+        #[arg(long)]
+        json: bool,
+    },
     /// Regenerate the TypeScript API types in packages/api-types
     GenTsTypes {
         /// Fail if the committed bindings are stale instead of writing
         #[arg(long)]
         check: bool,
     },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ProbeSecurity {
+    Tls,
+    Starttls,
+    Plain,
 }
 
 #[derive(Subcommand)]
@@ -251,6 +276,30 @@ fn main() -> Result<()> {
             } else {
                 bench_search::run_local(&opts)?;
             }
+        }
+        Command::ProbeServer {
+            host,
+            port,
+            security,
+            user,
+            json,
+        } => {
+            let password = match std::env::var("TAGMAIL_PROBE_PASSWORD") {
+                Ok(p) => p,
+                Err(_) => rpassword::prompt_password(format!("IMAP password for {user}: "))?,
+            };
+            probe_server::run(&probe_server::Options {
+                host,
+                port,
+                security: match security {
+                    ProbeSecurity::Tls => tagmail_imap::Security::Tls,
+                    ProbeSecurity::Starttls => tagmail_imap::Security::StartTls,
+                    ProbeSecurity::Plain => tagmail_imap::Security::Plain,
+                },
+                user,
+                password,
+                json,
+            })?;
         }
         Command::GenTsTypes { check } => {
             let dir = Path::new(env!("CARGO_MANIFEST_DIR"))

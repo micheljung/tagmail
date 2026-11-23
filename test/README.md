@@ -72,6 +72,15 @@ docker cp <test binary> $c:/it && docker start $c && docker wait $c
 docker logs $c; docker rm $c
 ```
 
+The same file runs against Stalwart, which advertises OBJECTID, with
+`TAGMAIL_IMAP_SERVER=stalwart TAGMAIL_IMAP_ADDR=127.0.0.1:10145` after
+`cargo xtask stalwart up` (the `imap-stalwart` job in `e2e.yml`). The tests
+derive what they expect from the server's capabilities.
+`cargo xtask probe-server` reports how a server handles keywords, object ids
+and COPY; see [`docs/servers.md`](../docs/servers.md). It consumes
+Stalwart's per-account keyword budget, so run it as `user1` there (the tests
+use `user2`).
+
 ## Engine integration tests
 
 `crates/engine/tests/dovecot.rs` runs the sync engine against the

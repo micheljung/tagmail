@@ -15,6 +15,7 @@
 //!   responses over [`MAX_RESPONSE_SIZE`] are refused, so memory stays
 //!   bounded for any message size.
 
+mod admin;
 mod append;
 mod caps;
 mod chunked;
