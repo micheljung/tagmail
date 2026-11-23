@@ -1,0 +1,46 @@
+[package]
+name = "tagmail-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "tagmail_desktop"
+
+[[bin]]
+name = "tagmail-desktop"
+path = "src/main.rs"
+required-features = ["app"]
+
+[features]
+# The Tauri shell needs WebKitGTK dev libs on Linux; the lib does not, so the
+# main CI job builds and tests it without them.
+app = ["dep:tauri", "dep:tauri-build", "dep:tracing-subscriber"]
+# Self-test page, fixture data and env overrides; never in release builds.
+test-hooks = []
+
+[dependencies]
+form_urlencoded.workspace = true
+http = "1"
+serde.workspace = true
+serde_json.workspace = true
+tagmail-api-core = { workspace = true, features = ["sqlite"] }
+tagmail-core.workspace = true
+tagmail-store.workspace = true
+tauri = { version = "2.12", optional = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+tracing.workspace = true
+tracing-subscriber = { workspace = true, optional = true }
+zeroize.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2.7", optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
