@@ -56,8 +56,8 @@ pub struct Outgoing {
     pub attachments: Vec<OutgoingFile>,
 }
 
-/// Whether the Bcc header is written: kept in a draft so it survives a
-/// reload, never in what is sent.
+/// Whether the Bcc header and the signature's identity are written: kept
+/// in a draft so they survive a reload, never in what is sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Purpose {
     Draft,
@@ -89,15 +89,17 @@ const SIGNATURE_CLASS: &str = "tagmail-signature";
 const SIGNATURE_IDENTITY: &str = "data-identity";
 
 /// Sanitized HTML for an outgoing body.
-pub fn sanitize_html(html: &str) -> String {
-    ammonia::Builder::default()
+pub fn sanitize_html(html: &str, purpose: Purpose) -> String {
+    let mut builder = ammonia::Builder::default();
+    builder
         .add_generic_attributes(["style"])
-        .add_tag_attributes("div", [SIGNATURE_IDENTITY])
         .add_allowed_classes("div", [SIGNATURE_CLASS])
         .add_url_schemes([DATA_URI.trim_end_matches(':')])
-        .attribute_filter(data_uri_filter)
-        .clean(html)
-        .to_string()
+        .attribute_filter(data_uri_filter);
+    if purpose == Purpose::Draft {
+        builder.add_tag_attributes("div", [SIGNATURE_IDENTITY]);
+    }
+    builder.clean(html).to_string()
 }
 
 fn address(a: &AddressDto) -> Address<'_> {
@@ -123,7 +125,7 @@ impl Outgoing {
 
     /// Writes the message to `out`, attachments streamed from their files.
     pub fn write_to(&self, purpose: Purpose, out: &mut impl Write) -> io::Result<()> {
-        let html = self.html.as_deref().map(sanitize_html);
+        let html = self.html.as_deref().map(|h| sanitize_html(h, purpose));
         let text = match (&self.text, &html) {
             (Some(text), _) => text.clone(),
             (None, Some(html)) => mail_parser::html_to_text(html),
@@ -242,7 +244,7 @@ mod tests {
              <img src=\" DATA:text/html;base64,PHNjcmlwdD4=\">\
              <img src=\"https://example.com/a.png\"><script>alert(1)</script>"
         );
-        let clean = sanitize_html(&html);
+        let clean = sanitize_html(&html, Purpose::Draft);
         assert!(
             clean.contains(&format!("<img src=\"{png}\" alt=\"logo\">")),
             "{clean}"
@@ -251,6 +253,12 @@ mod tests {
             clean.contains("<div class=\"tagmail-signature\" data-identity=\"7\">"),
             "{clean}"
         );
+        let sent = sanitize_html(&html, Purpose::Send);
+        assert!(
+            sent.contains("<div class=\"tagmail-signature\">-- "),
+            "{sent}"
+        );
+        assert!(!sent.contains("data-identity"), "{sent}");
         assert!(!clean.contains("text/html"), "{clean}");
         assert!(!clean.contains("script"), "{clean}");
         assert!(clean.contains("https://example.com/a.png"), "{clean}");
@@ -263,10 +271,13 @@ mod tests {
             "da&#9;ta:text/html,x",
             " DATA:text/html,x",
         ] {
-            let clean = sanitize_html(&format!("<a href=\"{href}\">x</a>"));
+            let clean = sanitize_html(&format!("<a href=\"{href}\">x</a>"), Purpose::Send);
             assert!(!clean.contains("text/html"), "{href}: {clean}");
         }
-        let img = sanitize_html("<img src=\"&#1;da&#10;ta:image/png;base64,AA==\">");
+        let img = sanitize_html(
+            "<img src=\"&#1;da&#10;ta:image/png;base64,AA==\">",
+            Purpose::Send,
+        );
         assert!(img.contains("image/png"), "{img}");
     }
 
