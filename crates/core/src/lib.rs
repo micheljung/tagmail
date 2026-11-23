@@ -6,6 +6,7 @@ pub mod flags;
 pub mod ids;
 pub mod label;
 pub mod mailbox_name;
+pub mod ops;
 pub mod query;
 
 pub use email_id::{EmailId, EmailIdSource, HeaderIdentity};

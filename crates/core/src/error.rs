@@ -22,6 +22,12 @@ pub enum Error {
     UnknownSpecialUse(String),
     #[error("invalid change cursor {0:?}")]
     InvalidCursor(String),
+    #[error("unknown op kind {0:?}")]
+    UnknownOpKind(String),
+    #[error("unknown op state {0:?}")]
+    UnknownOpState(String),
+    #[error("unknown archive mode {0:?}")]
+    UnknownArchiveMode(String),
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
