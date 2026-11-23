@@ -52,7 +52,7 @@ async fn config_migrations_apply_to_fresh_db_and_reopen() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("config.db");
     let db = ConfigDb::open(&path).unwrap();
-    assert_eq!(user_version(&db).await, 3);
+    assert_eq!(user_version(&db).await, 4);
     assert_eq!(
         tables(&db).await,
         [
@@ -80,7 +80,7 @@ async fn config_migrations_apply_to_fresh_db_and_reopen() {
     db.close().await.unwrap();
 
     let db = ConfigDb::open(&path).unwrap();
-    assert_eq!(user_version(&db).await, 3);
+    assert_eq!(user_version(&db).await, 4);
     db.close().await.unwrap();
 }
 
@@ -127,7 +127,7 @@ async fn newer_schema_is_refused() {
         ConfigDb::open(&path),
         Err(Error::SchemaTooNew {
             found: 99,
-            supported: 3
+            supported: 4
         })
     ));
 }
@@ -309,4 +309,67 @@ async fn pending_op_mailbox_reference_is_complete_or_absent() {
         .await
         .unwrap();
     assert_eq!(count, 0, "failed write transaction rolled back");
+}
+
+#[tokio::test]
+async fn config_v3_upgrades_to_outbox_files() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("config.db");
+    {
+        let conn = open_raw(&path);
+        for sql in [
+            include_str!("../migrations/config/V1__init.sql"),
+            include_str!("../migrations/config/V2__image_sender.sql"),
+            include_str!("../migrations/config/V3__compose.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        conn.execute_batch(
+            "INSERT INTO account (id, name, imap_host, imap_port, imap_tls, smtp_host, \
+             smtp_port, smtp_tls, username, secret_ct, secret_nonce) \
+             VALUES (1, 'a', 'i', 993, 'tls', 's', 465, 'tls', 'u', x'00', x'00'); \
+             INSERT INTO outbox (op_id, account_id, mime_blob, msgid_hdr, sender, \
+             recipients, subject) VALUES ('op', 1, x'0102', 'm@x', 'u@x', '[]', 'Hi');",
+        )
+        .unwrap();
+    }
+    let db = ConfigDb::open(&path).unwrap();
+    assert_eq!(user_version(&db).await, 4);
+    let row = db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT op_id, state, mime_file, mime_size, flag_msgid, flag_kind FROM outbox",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, Option<String>>(5)?,
+                    ))
+                },
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        row,
+        ("op".to_owned(), "queued".to_owned(), None, 0, None, None)
+    );
+    let blob_gone = db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT count(*) FROM pragma_table_info('outbox') WHERE name = 'mime_blob'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(blob_gone, 0);
+    integrity(&db).await;
+    db.close().await.unwrap();
 }

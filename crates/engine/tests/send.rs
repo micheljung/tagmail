@@ -89,6 +89,8 @@ fn draft(identity: i64, subject: &str, reply: Option<&str>) -> DraftInput {
             in_reply_to: id.to_owned(),
             references: vec![id.to_owned()],
         }),
+        forward_of: None,
+        save_now: false,
         forwarded: vec![],
     }
 }
@@ -105,6 +107,19 @@ async fn uids(user: &str, mailbox: &str, msgid: &str) -> Vec<u32> {
         .await
         .unwrap();
     found.iter().map(|u| u.0).collect()
+}
+
+async fn flags(user: &str, mailbox: &str, msgid: &str) -> Vec<Flag> {
+    let found = uids(user, mailbox, msgid).await;
+    let mut s = second(user).await;
+    s.select(mailbox, SelectOptions::default()).await.unwrap();
+    let set: UidSet = found.into_iter().map(Uid).collect();
+    s.fetch(&set, &FetchSpec::flags())
+        .await
+        .unwrap()
+        .into_iter()
+        .flat_map(|m| m.flags.unwrap_or_default())
+        .collect()
 }
 
 async fn raw(user: &str, mailbox: &str, uid: u32) -> Vec<u8> {
@@ -257,6 +272,16 @@ async fn drafts_replace_and_send_threads_with_the_conversation() {
     )
     .await;
     eventually(
+        "the original is flagged \\Answered",
+        SEND_BUDGET,
+        || async {
+            flags(USER, "INBOX", &original)
+                .await
+                .contains(&Flag::Answered)
+        },
+    )
+    .await;
+    eventually(
         "the cache holds only the Sent copy",
         SEND_BUDGET,
         || async {
@@ -327,14 +352,17 @@ async fn sent_copies_are_never_duplicated() {
         .await
         .unwrap();
     let (op, id) = (format!("c-{run_id}"), crashed.clone());
+    let file = format!("{op}.eml");
+    std::fs::write(fixture.outbox_dir().join(&file), &mime).unwrap();
+    let size = i64::try_from(mime.len()).unwrap();
     run.config
         .write(move |tx| {
             tx.execute(
-                "INSERT INTO outbox (op_id, account_id, mime_blob, msgid_hdr, sender, \
-                 recipients, subject, state, attempts) \
-                 VALUES (?1, 1, ?2, ?3, 'ann@example.com', '[{\"email\":\"me@example.com\"}]', \
-                 'Crashed', 'sending', 1)",
-                params![op, mime, id],
+                "INSERT INTO outbox (op_id, account_id, mime_file, mime_size, msgid_hdr, \
+                 sender, recipients, subject, state, attempts) \
+                 VALUES (?1, 1, ?2, ?3, ?4, 'ann@example.com', \
+                 '[{\"email\":\"me@example.com\"}]', 'Crashed', 'sending', 1)",
+                params![op, file, size, id],
             )?;
             Ok(())
         })

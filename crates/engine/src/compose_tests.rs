@@ -2,6 +2,7 @@
 //! a recording SMTP sender.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -53,8 +54,9 @@ impl SmtpSender for FakeSmtp {
         _server: SmtpServer,
         from: String,
         recipients: Vec<String>,
-        message: Arc<Vec<u8>>,
+        message: PathBuf,
     ) -> BoxFuture<Result<(), SmtpError>> {
+        let message = std::fs::read(message).expect("queued message file");
         let failure = {
             let mut failures = self.failures.lock().unwrap_or_else(PoisonError::into_inner);
             (!failures.is_empty()).then(|| failures.remove(0))
@@ -68,7 +70,7 @@ impl SmtpSender for FakeSmtp {
                 self.sent
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
-                    .push((from, recipients, message.to_vec()));
+                    .push((from, recipients, message));
                 Ok(())
             }
         };
@@ -86,6 +88,10 @@ struct Fixture {
 }
 
 async fn fixture(saves_sent: Option<bool>, smtp: FakeSmtp) -> Fixture {
+    fixture_with(saves_sent, smtp, Duration::ZERO).await
+}
+
+async fn fixture_with(saves_sent: Option<bool>, smtp: FakeSmtp, debounce: Duration) -> Fixture {
     let srv = smtp.saves_into.clone().unwrap_or_else(|| server(CAPS));
     lock(&srv).add_mailbox("Drafts", Some(SpecialUse::Drafts), 400);
     let dir = TempDir::new().unwrap();
@@ -113,6 +119,7 @@ async fn fixture(saves_sent: Option<bool>, smtp: FakeSmtp) -> Fixture {
         blobs: cache.ctx.blobs.clone(),
         feed: cache.feed.clone(),
         uploads: dir.path().join("uploads"),
+        outbox: dir.path().join("outbox"),
     };
     let smtp = Arc::new(smtp);
     let engine = Engine::with_smtp(
@@ -122,7 +129,7 @@ async fn fixture(saves_sent: Option<bool>, smtp: FakeSmtp) -> Fixture {
             poll_interval: Duration::from_secs(3600),
             retry_min: Duration::from_millis(50),
             retry_max: Duration::from_millis(200),
-            draft_debounce: Duration::ZERO,
+            draft_debounce: debounce,
             sent_probe: Duration::from_millis(300),
             outbox_retry_min: Duration::from_secs(1),
             outbox_retry_max: Duration::from_secs(2),
@@ -172,6 +179,8 @@ fn input(identity: i64, subject: &str) -> DraftInput {
         html: None,
         attachment_ids: vec![],
         reply: None,
+        forward_of: None,
+        save_now: false,
         forwarded: vec![],
     }
 }
@@ -229,6 +238,26 @@ impl Fixture {
         let mut items = self.engine.outbox().await.unwrap();
         assert_eq!(items.len(), 1, "{items:?}");
         items.remove(0)
+    }
+
+    async fn cached(&self, msgid: &'static str) -> bool {
+        self.cache
+            .query("SELECT msgid_hdr FROM message", |r| {
+                r.get::<_, Option<String>>(0)
+            })
+            .await
+            .iter()
+            .any(|m| m.as_deref() == Some(msgid))
+    }
+
+    fn flags(&self, mailbox: &str, msgid: &str) -> Vec<Flag> {
+        lock(&self.srv)
+            .mailbox(mailbox)
+            .msgs
+            .values()
+            .find(|m| m.id == msgid)
+            .map(|m| m.flags.clone())
+            .unwrap_or_default()
     }
 
     async fn saves_sent(&self) -> Option<bool> {
@@ -330,6 +359,7 @@ async fn send_strips_bcc_copies_to_sent_once_and_learns_the_server() {
         content_type: "application/pdf".to_owned(),
         bytes: b"%PDF".to_vec(),
     }];
+    eventually("original cached", || f.cached("orig@x.example")).await;
     let draft = f.engine.create_draft(reply).await.unwrap();
     assert_eq!(
         draft.in_reply_to_message_id.as_deref(),
@@ -345,6 +375,10 @@ async fn send_strips_bcc_copies_to_sent_once_and_learns_the_server() {
         Err(ComposeError::Conflict(_))
     ));
     eventually("sent and completed", || f.settled()).await;
+    eventually("original flagged \\Answered", || async {
+        f.flags("INBOX", "orig@x.example").contains(&Flag::Answered)
+    })
+    .await;
 
     let sent = f.smtp.sent();
     assert_eq!(sent.len(), 1);
@@ -414,14 +448,16 @@ async fn server_that_saves_sent_gets_no_second_copy() {
 }
 
 async fn insert_sending(f: &Fixture, op: &'static str, msgid: &'static str, mime: Vec<u8>) {
+    let name = format!("{op}.eml");
+    std::fs::write(f.dir.path().join("outbox").join(&name), &mime).unwrap();
     f.config
         .write(move |tx| {
             tx.execute(
-                "INSERT INTO outbox (op_id, account_id, mime_blob, msgid_hdr, sender, \
+                "INSERT INTO outbox (op_id, account_id, mime_file, mime_size, msgid_hdr, sender, \
                  recipients, subject, state, attempts) \
-                 VALUES (?1, 1, ?2, ?3, ?4, '[{\"email\":\"ann@x.example\"}]', 'Crash', \
+                 VALUES (?1, 1, ?2, ?3, ?4, ?5, '[{\"email\":\"ann@x.example\"}]', 'Crash', \
                  'sending', 1)",
-                params![op, mime, msgid, ME],
+                params![op, name, i64::try_from(mime.len()).unwrap(), msgid, ME],
             )?;
             Ok(())
         })
@@ -595,5 +631,79 @@ async fn attachment_caps_are_enforced_and_orphans_cleaned() {
     );
     f.engine.delete_upload(b).await.unwrap();
     assert!(!uploads.join(b.to_string()).exists());
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn forwarding_flags_the_original() {
+    let f = fixture(Some(true), FakeSmtp::default()).await;
+    let identity = f.identity().await;
+    lock(&f.srv).append(
+        "Archive",
+        FakeMsg::new("fw@x.example", "Report", "ann@x.example", ME, 1_790_000_000),
+    );
+    eventually("original cached", || f.cached("fw@x.example")).await;
+    let mut forward = input(identity, "Fwd: Report");
+    forward.forward_of = Some("fw@x.example".to_owned());
+    let draft = f.engine.create_draft(forward).await.unwrap();
+    f.engine.send("op-fw".to_owned(), draft.id).await.unwrap();
+    eventually("original flagged $Forwarded", || async {
+        f.flags("Archive", "fw@x.example")
+            .contains(&Flag::Keyword("$Forwarded".to_owned()))
+    })
+    .await;
+    assert!(!f.flags("Archive", "fw@x.example").contains(&Flag::Answered));
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn text_edits_wait_for_idle_but_attachments_and_closing_save_at_once() {
+    let f = fixture_with(None, FakeSmtp::default(), Duration::from_secs(3600)).await;
+    let identity = f.identity().await;
+    let draft = f
+        .engine
+        .create_draft(input(identity, "Typing"))
+        .await
+        .unwrap();
+    let edited = f
+        .engine
+        .update_draft(draft.id, input(identity, "Typing more"))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(f.messages("Drafts").is_empty(), "text edits wait for idle");
+    assert!(!edited.saved);
+
+    let file = f.upload("a.txt", b"attached", 8).await;
+    let mut attached = input(identity, "With attachment");
+    attached.attachment_ids = vec![file];
+    f.engine
+        .update_draft(draft.id, attached.clone())
+        .await
+        .unwrap();
+    eventually("saved after the attachment change", || async {
+        f.messages("Drafts")
+            .iter()
+            .any(|m| m.0 == "With attachment")
+    })
+    .await;
+
+    attached.subject = "Closed".to_owned();
+    f.engine
+        .update_draft(draft.id, attached.clone())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        f.messages("Drafts").iter().all(|m| m.0 != "Closed"),
+        "same attachments: no new APPEND"
+    );
+    attached.save_now = true;
+    f.engine.update_draft(draft.id, attached).await.unwrap();
+    eventually("saved when compose closes", || async {
+        let msgs = f.messages("Drafts");
+        msgs.len() == 1 && msgs[0].0 == "Closed"
+    })
+    .await;
     f.engine.shutdown().await;
 }

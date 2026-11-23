@@ -88,6 +88,7 @@ async fn fixture(srv: &Shared) -> Fixture {
         blobs,
         feed,
         uploads: dir.path().join("uploads"),
+        outbox: dir.path().join("outbox"),
     };
     Fixture {
         engine: engine(srv, stores.clone()),

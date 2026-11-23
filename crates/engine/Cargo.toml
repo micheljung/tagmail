@@ -18,6 +18,7 @@ workspace = true
 
 [dependencies]
 ammonia.workspace = true
+base64.workspace = true
 getrandom.workspace = true
 lettre.workspace = true
 mail-builder.workspace = true

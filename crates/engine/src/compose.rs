@@ -25,6 +25,8 @@ use crate::supervisor::{ConnectorFactory, Engine, Stores};
 
 /// Unfinished uploads, under the upload directory.
 pub const UPLOAD_TMP: &str = "tmp";
+/// Messages being built, under the outbox directory.
+pub const OUTBOX_TMP: &str = "tmp";
 
 pub(crate) fn now() -> i64 {
     SystemTime::now()
@@ -43,6 +45,9 @@ pub(crate) struct DraftContent {
     pub html: Option<String>,
     pub in_reply_to: Option<String>,
     pub references: Vec<String>,
+    /// Message-ID of the forwarded message.
+    #[serde(default)]
+    pub forward_of: Option<String>,
 }
 
 pub(crate) fn upload_path(dir: &Path, id: i64) -> PathBuf {
@@ -304,6 +309,10 @@ fn content_of(input: &DraftInput, previous: Option<&DraftContent>) -> DraftConte
         (None, Some(p)) => (p.in_reply_to.clone(), p.references.clone()),
         (None, None) => (None, Vec::new()),
     };
+    let forward_of = input
+        .forward_of
+        .clone()
+        .or_else(|| previous.and_then(|p| p.forward_of.clone()));
     DraftContent {
         to: input.to.clone(),
         cc: input.cc.clone(),
@@ -313,6 +322,7 @@ fn content_of(input: &DraftInput, previous: Option<&DraftContent>) -> DraftConte
         html: input.html.clone(),
         in_reply_to,
         references,
+        forward_of,
     }
 }
 
@@ -327,19 +337,17 @@ pub(crate) fn outgoing(
     row: &DraftRow,
     files: &[AttachmentDto],
     date: i64,
-) -> std::io::Result<Outgoing> {
+) -> Outgoing {
     let attachments = files
         .iter()
-        .map(|a| {
-            Ok(OutgoingFile {
-                name: a.name.clone(),
-                content_type: a.content_type.clone(),
-                bytes: fs::read(uploads.join(&a.id))?,
-            })
+        .map(|a| OutgoingFile {
+            name: a.name.clone(),
+            content_type: a.content_type.clone(),
+            path: uploads.join(&a.id),
         })
-        .collect::<std::io::Result<_>>()?;
+        .collect();
     let c = &row.content;
-    Ok(Outgoing {
+    Outgoing {
         from,
         to: c.to.clone(),
         cc: c.cc.clone(),
@@ -352,7 +360,29 @@ pub(crate) fn outgoing(
         references: c.references.clone(),
         date,
         attachments,
-    })
+    }
+}
+
+/// Writes `message` to a new file in `<outbox>/tmp`; returns its path and
+/// size. Blocking.
+pub(crate) fn write_message(
+    outbox: &Path,
+    message: &Outgoing,
+    purpose: Purpose,
+) -> std::io::Result<(PathBuf, u64)> {
+    let file = tempfile::NamedTempFile::new_in(outbox.join(OUTBOX_TMP))?;
+    let mut out = std::io::BufWriter::new(file);
+    message.write_to(purpose, &mut out)?;
+    let file = out.into_inner().map_err(|e| e.into_error())?;
+    file.as_file().sync_all()?;
+    let size = file.as_file().metadata()?.len();
+    let (_, path) = file.keep().map_err(|e| e.error)?;
+    Ok((path, size))
+}
+
+/// File name of a queued message in the outbox directory.
+pub(crate) fn outbox_file(id: i64) -> String {
+    format!("{id}.eml")
 }
 
 /// A draft with what building its message needs.
@@ -487,10 +517,18 @@ impl<F: ConnectorFactory> Engine<F> {
             let content = content_of(&input, None);
             let msgid = new_message_id(&identity.address);
             let now = now();
+            let save_now = input.save_now || !input.attachment_ids.is_empty() || !staged.is_empty();
             tx.execute(
                 "INSERT INTO draft (account_id, identity_id, msgid_hdr, content, created_at, \
-                 updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-                params![identity.account_id, identity.id, msgid, json(&content), now],
+                 updated_at, next_save_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+                params![
+                    identity.account_id,
+                    identity.id,
+                    msgid,
+                    json(&content),
+                    now,
+                    save_now.then_some(now)
+                ],
             )
             .map_err(sql)?;
             let id = tx.last_insert_rowid();
@@ -525,7 +563,12 @@ impl<F: ConnectorFactory> Engine<F> {
                 ));
             }
             let identity = identity(tx, input.identity_id)?;
+            let before: Vec<i64> = attachments(tx, id)?
+                .iter()
+                .filter_map(|a| a.id.parse().ok())
+                .collect();
             link_uploads(tx, id, &input.attachment_ids, 0)?;
+            let save_now = input.save_now || before != input.attachment_ids;
             if identity.account_id != row.account_id
                 && let Some(saved) = &row.saved
             {
@@ -540,9 +583,16 @@ impl<F: ConnectorFactory> Engine<F> {
             let content = content_of(&input, Some(&row.content));
             tx.execute(
                 "UPDATE draft SET account_id = ?2, identity_id = ?3, content = ?4, \
-                 version = version + 1, updated_at = ?5, save_attempts = 0, next_save_at = NULL \
+                 version = version + 1, updated_at = ?5, save_attempts = 0, next_save_at = ?6 \
                  WHERE id = ?1",
-                params![id, identity.account_id, identity.id, json(&content), now()],
+                params![
+                    id,
+                    identity.account_id,
+                    identity.id,
+                    json(&content),
+                    now(),
+                    save_now.then(now)
+                ],
             )
             .map_err(sql)?;
             draft_dto(tx, id)
@@ -619,8 +669,8 @@ impl<F: ConnectorFactory> Engine<F> {
                 )),
                 Some(false) => {
                     tx.execute(
-                        "UPDATE draft SET version = version + 1, updated_at = ?2 \
-                                WHERE id = (SELECT draft_id FROM upload WHERE id = ?1)",
+                        "UPDATE draft SET version = version + 1, updated_at = ?2, \
+                         next_save_at = ?2 WHERE id = (SELECT draft_id FROM upload WHERE id = ?1)",
                         params![id, now()],
                     )
                     .map_err(sql)?;
@@ -687,18 +737,29 @@ impl<F: ConnectorFactory> Engine<F> {
         {
             return Err(invalid("to", "the draft has no recipients"));
         }
-        let dir = self.uploads();
-        let (build, message) = blocking(move || {
-            let message = outgoing(&dir, build.from.clone(), &build.row, &build.files, now())?;
-            Ok::<_, std::io::Error>((build, message))
+        let message = outgoing(
+            &self.uploads(),
+            build.from.clone(),
+            &build.row,
+            &build.files,
+            now(),
+        );
+        let outbox = self.inner.stores.outbox.clone();
+        let (tmp, size) = blocking({
+            let (outbox, message) = (outbox.clone(), message.clone());
+            move || write_message(&outbox, &message, Purpose::Send)
         })
         .await?
         .map_err(store_err)?;
-        let mime = blocking({
-            let message = message.clone();
-            move || message.build(Purpose::Send)
-        })
-        .await?;
+        let built = tmp.clone();
+        let (flag_msgid, flag_kind) = match (
+            &build.row.content.forward_of,
+            &build.row.content.in_reply_to,
+        ) {
+            (Some(original), _) => (Some(original.clone()), Some("forwarded")),
+            (None, Some(parent)) => (Some(parent.clone()), Some("answered")),
+            (None, None) => (None, None),
+        };
         let recipients =
             serde_json::to_string(&message.recipient_list()).expect("addresses serialize");
         let version = build.row.version;
@@ -711,19 +772,21 @@ impl<F: ConnectorFactory> Engine<F> {
             }
             let inserted = tx
                 .execute(
-                    "INSERT OR IGNORE INTO outbox (op_id, account_id, identity_id, mime_blob, \
-                     msgid_hdr, sender, recipients, subject, draft_id) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    "INSERT OR IGNORE INTO outbox (op_id, account_id, identity_id, mime_size, \
+                     msgid_hdr, sender, recipients, subject, draft_id, flag_msgid, flag_kind) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     params![
                         op_id,
                         row.account_id,
                         row.identity_id,
-                        mime,
+                        i64::try_from(size).unwrap_or(i64::MAX),
                         row.msgid_hdr,
                         message.from.email,
                         recipients,
                         message.subject,
-                        draft_id
+                        draft_id,
+                        flag_msgid,
+                        flag_kind
                     ],
                 )
                 .map_err(sql)?;
@@ -745,6 +808,13 @@ impl<F: ConnectorFactory> Engine<F> {
                 ));
             }
             let id = tx.last_insert_rowid();
+            let name = outbox_file(id);
+            fs::rename(&tmp, outbox.join(&name)).map_err(store_err)?;
+            tx.execute(
+                "UPDATE outbox SET mime_file = ?2 WHERE id = ?1",
+                params![id, name],
+            )
+            .map_err(sql)?;
             tx.execute(
                 "INSERT OR IGNORE INTO op_seen (op_id, account_id) VALUES (?1, ?2)",
                 params![op_id, row.account_id],
@@ -763,8 +833,9 @@ impl<F: ConnectorFactory> Engine<F> {
                 },
             ))
         })
-        .await?;
-        let (id, outcome) = outcome;
+        .await;
+        let _ = fs::remove_file(&built);
+        let (id, outcome) = outcome?;
         if let Some(id) = id {
             self.emit_outbox(id, Some((OutboxStateDto::Queued, None)))
                 .await;
@@ -808,16 +879,16 @@ impl<F: ConnectorFactory> Engine<F> {
     }
 
     async fn cancel_impl(&self, id: i64) -> ComposeResult<()> {
-        write(self.stores(), move |tx| {
-            let row: Option<(String, String, Option<i64>)> = tx
+        let file = write(self.stores(), move |tx| {
+            let row: Option<(String, String, Option<i64>, Option<String>)> = tx
                 .query_row(
-                    "SELECT op_id, state, draft_id FROM outbox WHERE id = ?1",
+                    "SELECT op_id, state, draft_id, mime_file FROM outbox WHERE id = ?1",
                     [id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
                 )
                 .optional()
                 .map_err(sql)?;
-            let Some((op_id, state, draft)) = row else {
+            let Some((op_id, state, draft, file)) = row else {
                 return Err(ComposeError::NotFound("outbox item"));
             };
             if !matches!(state.as_str(), "queued" | "failed") {
@@ -833,9 +904,13 @@ impl<F: ConnectorFactory> Engine<F> {
                 tx.execute("UPDATE draft SET queued = 0 WHERE id = ?1", [draft])
                     .map_err(sql)?;
             }
-            Ok(())
+            Ok(file)
         })
-        .await?;
+        .await?
+        .map(|name| self.inner.stores.outbox.join(name));
+        if let Some(path) = file {
+            let _ = fs::remove_file(path);
+        }
         self.emit_outbox(id, None).await;
         Ok(())
     }

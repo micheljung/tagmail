@@ -123,13 +123,19 @@ or manage sessions, devices or passkeys.
 
 ### Sending
 
-Drafts live in the account's IMAP Drafts mailbox: each save APPENDs the
-new version with `\Draft` and expunges the previous one, two seconds
-after the last edit. Attachments are uploaded to the server first (at
-most 25 MB each and 35 MB per message) and kept in `uploads/` in the
-data directory; uploads no draft uses are removed after a day.
+Drafts live in the account's IMAP Drafts mailbox: a save APPENDs the
+new version with `\Draft` and expunges the previous one. The server keeps
+every edit at once but saves to IMAP only after 30 seconds without
+edits, when the attachments change, or when the client asks (`saveNow`,
+e.g. on closing the compose window), so typing does not re-upload large
+attachments. Attachments are uploaded to the server first (at most 25 MB
+each and 35 MB per message) and kept in `uploads/` in the data
+directory; uploads no draft uses are removed after a day. Messages are
+written to files and streamed to SMTP and IMAP, never held in memory
+whole.
 
-Sending queues the message in a durable outbox in `config.db`. Each send
+Sending queues the message in a durable outbox: the item in `config.db`,
+the message in `outbox/` in the data directory. Each send
 request carries a client-generated id, so a repeated request never sends
 twice. Delivery is **at least once**: the outbox marks a message as
 sending before the SMTP transaction; if the server stops after the SMTP
@@ -143,7 +149,8 @@ After sending, the copy in Sent comes from the provider when it files
 sent mail itself (preset for Gmail, otherwise detected on the first send
 by watching Sent for ten seconds) and is APPENDed by Tagmail otherwise,
 never twice. Replies carry `In-Reply-To` and `References`, so the Sent
-copy joins the conversation.
+copy joins the conversation; once sent, the original is flagged
+`\Answered` (reply) or `$Forwarded` (forward), on a best-effort basis.
 
 ### Master key
 
@@ -162,7 +169,8 @@ The server looks for the key in this order:
 Without a key file it refuses to start. `--init-key` generates one with
 mode 0600. Keep the key outside the data directory: the server logs a
 warning at every start if it is inside. Back up `config.db`, `uploads/`
-(attachments of drafts not yet sent) and the key together. `cache.db` and
+(attachments of drafts not yet sent), `outbox/` (messages not yet sent)
+and the key together. `cache.db` and
 `blobs/` need no backup.
 
 ## Contributing

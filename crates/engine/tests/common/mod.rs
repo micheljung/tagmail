@@ -319,6 +319,11 @@ impl Fixture {
         self.start_with(capability_override, fail_after, None).await
     }
 
+    /// Where the engine keeps queued messages.
+    pub fn outbox_dir(&self) -> std::path::PathBuf {
+        self.dir.path().join("outbox")
+    }
+
     /// An engine that submits to Mailpit without TLS.
     pub async fn start_sending(&self, sending: Sending) -> Running {
         self.start_with(no_override(), None, Some(sending)).await
@@ -417,6 +422,7 @@ impl Fixture {
             blobs,
             feed: feed.clone(),
             uploads: self.dir.path().join("uploads"),
+            outbox: self.dir.path().join("outbox"),
         };
         let engine = Engine::with_smtp(
             stores,

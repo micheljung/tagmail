@@ -71,6 +71,11 @@ pub struct DraftInputDto {
     pub forward_of: Option<i64>,
     #[serde(default)]
     pub attachment_ids: Vec<String>,
+    /// Save to the IMAP Drafts mailbox now (compose closed) rather than
+    /// after 30 s without edits.
+    #[serde(default)]
+    #[ts(optional)]
+    pub save_now: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]

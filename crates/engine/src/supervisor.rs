@@ -60,7 +60,8 @@ pub struct EngineConfig {
     /// The raw cache is trimmed to this many compressed bytes after each
     /// fetch.
     pub raw_cache_bytes: u64,
-    /// A draft is saved to IMAP this long after its last edit.
+    /// A draft is saved to IMAP once it has not been edited for this long;
+    /// a changed attachment list or an explicit save saves it at once.
     pub draft_debounce: Duration,
     /// How long Sent is watched after the first send of an account whose
     /// server may file sent mail itself.
@@ -86,7 +87,7 @@ impl Default for EngineConfig {
             pool: PoolConfig::default(),
             raw_cap: DEFAULT_RAW_CAP,
             raw_cache_bytes: DEFAULT_RAW_CACHE_BYTES,
-            draft_debounce: Duration::from_secs(2),
+            draft_debounce: Duration::from_secs(30),
             sent_probe: Duration::from_secs(10),
             outbox_retry_min: Duration::from_secs(30),
             outbox_retry_max: Duration::from_secs(60 * 60),
@@ -156,6 +157,9 @@ pub struct Stores {
     /// Attachments of drafts, `<id>` files plus `tmp/` for uploads in
     /// progress; durable like `config.db`.
     pub uploads: PathBuf,
+    /// Queued outgoing messages, `<id>.eml` plus `tmp/` for messages being
+    /// built; durable like `config.db`.
+    pub outbox: PathBuf,
 }
 
 /// Reads an account and decrypts its password.
@@ -270,8 +274,13 @@ impl<F: ConnectorFactory> Engine<F> {
         config: EngineConfig,
         smtp: Arc<dyn SmtpSender>,
     ) -> Engine<F> {
-        if let Err(e) = std::fs::create_dir_all(stores.uploads.join(crate::compose::UPLOAD_TMP)) {
-            tracing::error!(error = %e, dir = %stores.uploads.display(), "cannot create the upload directory");
+        for dir in [
+            stores.uploads.join(crate::compose::UPLOAD_TMP),
+            stores.outbox.join(crate::compose::OUTBOX_TMP),
+        ] {
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                tracing::error!(error = %e, dir = %dir.display(), "cannot create a data directory");
+            }
         }
         let engine = Engine {
             inner: Arc::new(Inner {
@@ -915,6 +924,7 @@ mod tests {
             blobs: cache.ctx.blobs.clone(),
             feed: cache.feed.clone(),
             uploads: dir.path().join("uploads"),
+            outbox: dir.path().join("outbox"),
         };
         let config = EngineConfig {
             poll_interval: poll,

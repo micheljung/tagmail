@@ -43,6 +43,8 @@ pub const CACHE_DB: &str = "cache.db";
 pub const BLOBS_DIR: &str = "blobs";
 /// Draft attachments; durable, back up with `config.db`.
 pub const UPLOADS_DIR: &str = "uploads";
+/// Queued outgoing messages; durable, back up with `config.db`.
+pub const OUTBOX_DIR: &str = "outbox";
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -125,6 +127,7 @@ impl Server {
                     blobs: store.blobs().clone(),
                     feed: feed.clone(),
                     uploads: config.data_dir.join(UPLOADS_DIR),
+                    outbox: config.data_dir.join(OUTBOX_DIR),
                 };
                 if config.insecure_plain_imap {
                     tracing::warn!(

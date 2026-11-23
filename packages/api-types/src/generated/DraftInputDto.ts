@@ -12,4 +12,9 @@ export type DraftInputDto = { identityId: number, to: Array<AddressDto>, cc: Arr
 /**
  * Sanitized again when the draft is saved or sent.
  */
-html?: string, inReplyTo?: number, forwardOf?: number, attachmentIds: Array<string>, };
+html?: string, inReplyTo?: number, forwardOf?: number, attachmentIds: Array<string>, 
+/**
+ * Save to the IMAP Drafts mailbox now (compose closed) rather than
+ * after 30 s without edits.
+ */
+saveNow?: boolean, };

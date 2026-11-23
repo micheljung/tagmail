@@ -100,6 +100,10 @@ pub struct DraftInput {
     pub attachment_ids: Vec<i64>,
     /// Create only.
     pub reply: Option<ReplyRefs>,
+    /// Message-ID of the forwarded message; create only.
+    pub forward_of: Option<String>,
+    /// Save to IMAP Drafts now instead of after the idle debounce.
+    pub save_now: bool,
     /// Create only.
     pub forwarded: Vec<ForwardedPart>,
 }
@@ -264,6 +268,8 @@ pub fn validate_draft(dto: DraftInputDto) -> ComposeResult<DraftInput> {
         html: dto.html,
         attachment_ids,
         reply: None,
+        forward_of: None,
+        save_now: dto.save_now.unwrap_or(false),
         forwarded: Vec::new(),
     })
 }
@@ -558,10 +564,21 @@ impl<S: Store> Api<S> {
                 Err(resp) => return Ok(Err(resp)),
             };
             if forward {
-                if input.attachment_ids.is_empty() {
-                    input.forwarded =
-                        crate::messages::blocking(move || forwarded_parts(&raw)).await?;
-                }
+                let copy = input.attachment_ids.is_empty();
+                let (id, parts) = crate::messages::blocking(move || {
+                    let id = mime::parse(&raw).and_then(|m| m.message_id().map(str::to_owned));
+                    (
+                        id,
+                        if copy {
+                            forwarded_parts(&raw)
+                        } else {
+                            Vec::new()
+                        },
+                    )
+                })
+                .await?;
+                input.forward_of = id;
+                input.forwarded = parts;
             } else {
                 input.reply = crate::messages::blocking(move || references_of(&raw)).await?;
             }
@@ -909,6 +926,7 @@ mod tests {
             in_reply_to: None,
             forward_of: None,
             attachment_ids: vec!["3".into(), "1".into(), "3".into()],
+            save_now: None,
         };
         let ok = validate_draft(dto(" ann@x.example ", " Hi ")).unwrap();
         assert_eq!(ok.to[0].email, "ann@x.example");
