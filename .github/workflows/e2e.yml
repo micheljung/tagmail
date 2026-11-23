@@ -91,6 +91,11 @@ jobs:
           cargo xtask probe-server --host 127.0.0.1 --port 10145 --security plain --user user1 --json > probe.json
           { echo '```json'; cat probe.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           jq -e '.features.objectid and .keyword_persistence.persisted_after_reconnect and .copy.email_id_equal and (.copy.size_differs | not)' probe.json
+      - name: Engine label and draft smoke against Stalwart
+        env:
+          TAGMAIL_IMAP_ADDR: 127.0.0.1:10145
+          TAGMAIL_IMAP_SERVER: stalwart
+        run: cargo test -p tagmail-engine --features dovecot-tests --test labels
       - name: Server logs
         if: failure()
         run: docker compose -f test/compose.yml logs stalwart
@@ -124,6 +129,8 @@ jobs:
         run: cargo test -p tagmail-engine --features dovecot-tests --test dovecot --test dovecot_seed --test labels --test rebuild -- --nocapture
       - name: Send integration tests (Dovecot and Mailpit)
         run: cargo test -p tagmail-engine --features mailpit-tests --test send
+      - name: Multi-account integration tests (Dovecot and Mailpit)
+        run: cargo test -p tagmail-engine --features mailpit-tests --test multi_account
       - name: Server logs
         if: failure()
         run: docker compose -f test/compose.yml logs dovecot dovecot-gmail mailpit
