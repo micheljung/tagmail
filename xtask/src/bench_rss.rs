@@ -16,6 +16,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
+use crate::bench_replica;
 use crate::bench_search::{self, ms};
 use crate::harness::{self, output, run};
 use crate::seed::HUGE_SUBJECT;
@@ -389,9 +390,17 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
     let sse_connected = !sse.reader.is_finished();
     let pass =
         sse_connected && window_max_kib * BYTES_PER_KIB <= opts.limit_mb * BYTES_PER_MB as u64;
+    let replica = bench_replica::measure(&running, pid, work);
     stop(&mut running);
+    let (replica_json, replica_row) = match replica {
+        Ok(cost) => (cost.json(), cost.summary()),
+        Err(e) => (
+            json!({ "error": format!("{e:#}") }),
+            format!("failed: {e:#}"),
+        ),
+    };
+    println!("replica bootstrap (not gated): {replica_row}");
     let sse_bytes = sse.reader.join().unwrap_or(0);
-
     let result = json!({
         "scenario": SCENARIO,
         "pass": pass,
@@ -416,6 +425,7 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
         "renderedHtmlBytes": render.html_bytes,
         "renderPeakMib": round(mib(render.peak_kib)),
         "renderPeakDeltaMib": round(mib(render.peak_kib.saturating_sub(render.before_kib))),
+        "replicaBootstrap": replica_json,
         "idleRssKib": samples.iter().map(|(_, kib)| kib).collect::<Vec<_>>(),
     });
     if let Some(dir) = opts.out.parent() {
@@ -449,7 +459,8 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
          | Search `{SEARCH_QUERY}` | {:.1} ms |\n\
          | Open + render {HUGE_SUBJECT} | {:.1} ms |\n\
          | Peak RSS during render (not gated) | {:.1} MiB (+{:.1} MiB) |\n\
-         | SSE connected through idle | {sse_connected} |\n",
+         | SSE connected through idle | {sse_connected} |\n\
+         | Replica bootstrap (not gated) | {replica_row} |\n",
         opts.window.as_secs(),
         mb(window_max_kib),
         mib(window_max_kib),
@@ -607,9 +618,7 @@ fn render_huge(running: &Running, pid: u32) -> Result<Render> {
         .and_then(|m| m.iter().find(|m| m["subject"] == HUGE_SUBJECT))
         .and_then(|m| m["id"].as_i64())
         .with_context(|| format!("no {HUGE_SUBJECT} message in {thread}"))?;
-    let reset_peak_rss = "5";
-    fs::write(format!("/proc/{pid}/clear_refs"), reset_peak_rss)
-        .context("resetting VmHWM before the render")?;
+    reset_peak_rss(pid)?;
     let before_kib = proc_status_kib(pid, "VmRSS")?;
     let started = Instant::now();
     get_json(running, &format!("/api/messages/{message}"))?;
@@ -684,6 +693,13 @@ pub(crate) fn sleep_until_next(tick: Instant) -> Instant {
 }
 
 /// A `kB` field of `/proc/<pid>/status`.
+/// Resets VmHWM of `pid` to its current RSS.
+pub(crate) fn reset_peak_rss(pid: u32) -> Result<()> {
+    let reset_peak = "5";
+    fs::write(format!("/proc/{pid}/clear_refs"), reset_peak)
+        .with_context(|| format!("resetting VmHWM of {pid}"))
+}
+
 pub(crate) fn proc_status_kib(pid: u32, field: &str) -> Result<u64> {
     let status = fs::read_to_string(format!("/proc/{pid}/status"))?;
     status

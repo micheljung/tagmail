@@ -1,3 +1,4 @@
+mod bench_replica;
 mod bench_rss;
 mod bench_search;
 mod harness;

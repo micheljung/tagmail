@@ -16,9 +16,11 @@ rpassword = "7"
 serde_json.workspace = true
 tagmail-api-core.workspace = true
 tagmail-imap.workspace = true
+tagmail-replica = { path = "../crates/replica" }
 tar.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["rt"] }
+url.workspace = true
 
 [dev-dependencies]
 mail-parser.workspace = true
