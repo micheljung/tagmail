@@ -19,6 +19,22 @@ import type {
 	ThreadDetailDto,
 	ThreadsDto
 } from '@tagmail/api-types';
+import { CSRF_HEADER, CSRF_VALUE } from './http';
+import type {
+	AttachmentDto,
+	DraftDto,
+	DraftInput,
+	IdentityDto,
+	LabelJobDto,
+	LabelUpdateDto,
+	OpAckDto,
+	OpDto,
+	OpRequest,
+	OutboxItemDto,
+	ReplyDraftDto,
+	ReplyMode,
+	SendAckDto
+} from './write';
 
 export const CURSOR_HEADER = 'x-tagmail-cursor';
 
@@ -186,6 +202,116 @@ export class Api {
 
 	startPairing(): Promise<PairingCodeDto> {
 		return this.#post<PairingCodeDto>('/api/pairing');
+	}
+
+	postOp(op: OpRequest): Promise<OpAckDto> {
+		return this.#post<OpAckDto>('/api/ops', op);
+	}
+
+	async ops(status: 'pending' | 'failed'): Promise<OpDto[]> {
+		return (await this.#json<{ ops: OpDto[] }>(`/api/ops?status=${status}`)).ops;
+	}
+
+	retryOp(opId: string): Promise<OpAckDto> {
+		return this.#post<OpAckDto>(`/api/ops/${encodeURIComponent(opId)}/retry`);
+	}
+
+	discardOp(opId: string): Promise<void> {
+		return this.#empty(`/api/ops/${encodeURIComponent(opId)}`, 'DELETE');
+	}
+
+	createLabel(name: string, color?: string | null): Promise<LabelDto> {
+		return this.#post<LabelDto>('/api/labels', color ? { name, color } : { name });
+	}
+
+	updateLabel(
+		key: string,
+		change: { name?: string; color?: string | null }
+	): Promise<LabelUpdateDto> {
+		return this.#post<LabelUpdateDto>(`/api/labels/${encodeURIComponent(key)}`, change, 'PATCH');
+	}
+
+	deleteLabel(key: string): Promise<void> {
+		return this.#empty(`/api/labels/${encodeURIComponent(key)}`, 'DELETE');
+	}
+
+	async labelJobs(): Promise<LabelJobDto[]> {
+		const body = await this.#json<LabelJobDto[] | { jobs: LabelJobDto[] }>('/api/label-jobs');
+		return Array.isArray(body) ? body : body.jobs;
+	}
+
+	async identities(): Promise<IdentityDto[]> {
+		const body = await this.#json<IdentityDto[] | { identities: IdentityDto[] }>('/api/identities');
+		return Array.isArray(body) ? body : body.identities;
+	}
+
+	/** Multipart upload with progress; `fetch` cannot report upload progress. */
+	uploadAttachment(
+		file: File,
+		onProgress: (loaded: number, total: number) => void,
+		signal?: AbortSignal
+	): Promise<AttachmentDto> {
+		return new Promise((resolve, reject) => {
+			const xhr = new XMLHttpRequest();
+			xhr.open('POST', '/api/attachments');
+			xhr.setRequestHeader(CSRF_HEADER, CSRF_VALUE);
+			xhr.responseType = 'json';
+			xhr.upload.onprogress = (e) => onProgress(e.loaded, e.lengthComputable ? e.total : file.size);
+			xhr.onload = () => {
+				const body = xhr.response as AttachmentDto | ApiErrorDto | null;
+				if (xhr.status >= 200 && xhr.status < 300 && body) return resolve(body as AttachmentDto);
+				const error =
+					body && 'error' in body
+						? body
+						: { error: 'http_' + xhr.status, message: xhr.statusText || `HTTP ${xhr.status}` };
+				const err = new ApiError(xhr.status, error);
+				if (xhr.status === 401) this.onUnauthorized(err);
+				reject(err);
+			};
+			xhr.onerror = () => reject(new TypeError('network error'));
+			xhr.onabort = () => reject(new DOMException('aborted', 'AbortError'));
+			signal?.addEventListener('abort', () => xhr.abort(), { once: true });
+			const form = new FormData();
+			form.append('file', file, file.name);
+			xhr.send(form);
+		});
+	}
+
+	removeAttachment(id: string): Promise<void> {
+		return this.#empty(`/api/attachments/${encodeURIComponent(id)}`, 'DELETE');
+	}
+
+	createDraft(draft: DraftInput): Promise<{ id: number }> {
+		return this.#post<{ id: number }>('/api/drafts', draft);
+	}
+
+	updateDraft(id: number, draft: DraftInput): Promise<void> {
+		return this.#empty(`/api/drafts/${id}`, 'PUT', draft);
+	}
+
+	draft(id: number): Promise<DraftDto> {
+		return this.#json<DraftDto>(`/api/drafts/${id}`);
+	}
+
+	deleteDraft(id: number): Promise<void> {
+		return this.#empty(`/api/drafts/${id}`, 'DELETE');
+	}
+
+	send(opId: string, draftId: number): Promise<SendAckDto> {
+		return this.#post<SendAckDto>('/api/send', { opId, draftId });
+	}
+
+	async outbox(): Promise<OutboxItemDto[]> {
+		const body = await this.#json<OutboxItemDto[] | { items: OutboxItemDto[] }>('/api/outbox');
+		return Array.isArray(body) ? body : body.items;
+	}
+
+	cancelOutbox(id: number): Promise<void> {
+		return this.#empty(`/api/outbox/${id}`, 'DELETE');
+	}
+
+	replyDraft(messageId: number, mode: ReplyMode): Promise<ReplyDraftDto> {
+		return this.#json<ReplyDraftDto>(`/api/messages/${messageId}/reply?mode=${mode}`);
 	}
 }
 

@@ -1,10 +1,22 @@
 <script lang="ts">
 	import { labelHue } from '../format';
 
-	let { labelKey, name }: { labelKey: string; name: string } = $props();
+	let {
+		labelKey,
+		name,
+		color = null
+	}: { labelKey: string; name: string; color?: string | null } = $props();
 </script>
 
-<span class="chip" style:--h={labelHue(labelKey)} title={name}>{name}</span>
+<span
+	class="chip"
+	class:custom={color !== null}
+	style:--h={labelHue(labelKey)}
+	style:--c={color}
+	title={name}
+>
+	{name}
+</span>
 
 <style>
 	.chip {
@@ -27,6 +39,11 @@
 		line-height: 1;
 		white-space: nowrap;
 		text-overflow: ellipsis;
+	}
+
+	.chip.custom {
+		background: color-mix(in oklab, var(--c) 22%, var(--surface));
+		color: color-mix(in oklab, var(--c) 62%, var(--ink));
 	}
 
 	.chip::before {

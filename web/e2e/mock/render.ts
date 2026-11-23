@@ -32,6 +32,12 @@ function escape(s: string): string {
 	);
 }
 
+/** The body as the reply helper quotes it: the hostile sample stays hostile. */
+export function quotedBody(row: Row, m: Message): string {
+	if (positionOf(row.id) === XSS_INDEX) return XSS_BODY;
+	return `<p>${escape(m.snippet)}.</p>`;
+}
+
 export function renderMessage(row: Row, m: Message, images: boolean): string {
 	if (positionOf(row.id) === XSS_INDEX) return page(XSS_BODY);
 	const greeting = m.from === ME ? 'Hi,' : `Hi ${ME.name?.split(' ')[0]},`;

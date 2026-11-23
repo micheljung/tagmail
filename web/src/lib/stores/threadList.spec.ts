@@ -158,6 +158,34 @@ describe('ThreadList', () => {
 		expect(f.ids()).toEqual([50, 45, 40, 30, 20, 10]);
 	});
 
+	it('keeps the selection on a thread that changed in place', async () => {
+		const f = await ready();
+		f.list.select(1);
+		f.send([upsert(40, 400, [INBOX])]);
+		expect(f.ids()).toEqual([50, 40, 30, 20, 10]);
+		expect(f.list.selectedId).toBe(40);
+		expect(f.list.rows.peek(40)).toBeDefined();
+	});
+
+	it('takes threads out, puts them back and ticks ranges', async () => {
+		const f = await ready();
+		f.list.select(1);
+		f.list.toggleChecked(1);
+		f.list.toggleChecked(3, true);
+		expect(f.list.targets()).toEqual([40, 30, 20]);
+		const removed = f.list.takeOut([40, 20]);
+		expect(removed).toEqual([
+			{ id: 40, at: 1 },
+			{ id: 20, at: 3 }
+		]);
+		expect(f.ids()).toEqual([50, 30, 10]);
+		expect(f.list.selectedId).toBe(30);
+		expect(f.list.targets()).toEqual([30]);
+		f.list.putBack(removed);
+		expect(f.ids()).toEqual([50, 40, 30, 20, 10]);
+		expect(f.list.selectedId).toBe(40);
+	});
+
 	it('refetches after bulk changes', async () => {
 		const f = await ready();
 		f.send([{ entity: 'mailbox', id: INBOX, op: { kind: 'bulk', mailbox: INBOX }, payload: null }]);

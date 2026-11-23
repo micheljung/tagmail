@@ -2,8 +2,11 @@
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import VirtualList from '../list/VirtualList.svelte';
-	import { shortcuts } from '../shortcuts';
-	import { nav, type ThreadList } from '../stores';
+	import { act, type ActionTarget } from '../ops/actions.svelte';
+	import { shortcuts, type ShortcutAction } from '../shortcuts';
+	import { nav, ops, type ThreadList } from '../stores';
+	import type { ThreadRowDto } from '../transport';
+	import Icon, { type IconName } from './Icon.svelte';
 	import ThreadRow from './ThreadRow.svelte';
 
 	let {
@@ -26,6 +29,37 @@
 
 	let compact = $state(false);
 
+	const TOOLBAR: { action: ShortcutAction; icon: IconName; label: string; key: string }[] = [
+		{ action: 'archive', icon: 'archive', label: 'Archive', key: 'e' },
+		{ action: 'delete', icon: 'trash', label: 'Delete', key: '#' },
+		{ action: 'markRead', icon: 'read', label: 'Mark as read', key: 'Shift+I' },
+		{ action: 'markUnread', icon: 'unread', label: 'Mark as unread', key: 'Shift+U' },
+		{ action: 'star', icon: 'star', label: 'Star', key: 's' },
+		{ action: 'label', icon: 'tag', label: 'Label as', key: 'l' },
+		{ action: 'move', icon: 'folder', label: 'Move to', key: 'v' }
+	];
+
+	const checkedCount = $derived(list.checked.size);
+	const allState = $derived(
+		checkedCount === 0 ? 'false' : checkedCount >= visibleCount() ? 'true' : 'mixed'
+	);
+
+	function visibleCount(): number {
+		return Math.max(1, list.window.last - list.window.first + 1);
+	}
+
+	function target(): ActionTarget {
+		const threadIds = list.targets();
+		const rows = threadIds
+			.map((id) => ops.project(list.rows.peek(id)))
+			.filter((r): r is ThreadRowDto => r !== undefined);
+		return { threadIds, rows, view: list.view };
+	}
+
+	function run(action: ShortcutAction): boolean {
+		return act(action, target());
+	}
+
 	onMount(() => {
 		const mq = matchMedia(COMPACT_QUERY);
 		compact = mq.matches;
@@ -45,8 +79,12 @@
 					open(list.selectedId);
 					return true;
 				}
+				case 'select':
+					if (list.activeIndex === -1) return false;
+					list.toggleChecked(list.activeIndex);
+					return true;
 				default:
-					return false;
+					return run(action);
 			}
 		});
 		return () => {
@@ -80,10 +118,41 @@
 			<span class="muted">{emptyHint}</span>
 		</div>
 	{:else}
-		<div class="bar">
-			<span class="total" aria-live="polite">
-				{list.count.toLocaleString()} conversation{list.count === 1 ? '' : 's'}
-			</span>
+		<div class="bar" role="toolbar" aria-label="Conversation actions">
+			<button
+				class="all"
+				role="checkbox"
+				aria-checked={allState}
+				aria-label="Select all conversations on screen"
+				title="Select (x)"
+				onclick={() => list.setAllChecked(checkedCount === 0)}
+			>
+				<span class="box {allState}" aria-hidden="true">
+					{#if allState === 'true'}<Icon
+							name="check"
+							size={13}
+						/>{:else if allState === 'mixed'}<span class="dash"></span>{/if}
+				</span>
+			</button>
+			{#if checkedCount > 0}
+				<div class="actions">
+					{#each TOOLBAR as item (item.action)}
+						<button
+							class="act"
+							aria-label={item.label}
+							title="{item.label} ({item.key})"
+							onclick={() => run(item.action)}
+						>
+							<Icon name={item.icon} size={18} />
+						</button>
+					{/each}
+				</div>
+				<span class="total" aria-live="polite">{checkedCount.toLocaleString()} selected</span>
+			{:else}
+				<span class="total" aria-live="polite">
+					{list.count.toLocaleString()} conversation{list.count === 1 ? '' : 's'}
+				</span>
+			{/if}
 			{#if list.error}<span class="warn" role="status">{list.error}</span>{/if}
 		</div>
 		<div class="viewport">
@@ -110,11 +179,19 @@
 				>
 					{#snippet row(index, active)}
 						{@const id = list.idAt(index)}
+						{@const row = id === undefined ? undefined : ops.project(list.rows.get(id))}
 						<ThreadRow
-							row={id === undefined ? undefined : list.rows.get(id)}
+							{row}
 							{active}
+							checked={id !== undefined && list.checked.has(id)}
 							labelName={(key) => nav.labelName(key)}
+							labelColor={(key) => nav.labelColor(key)}
 							{hiddenLabel}
+							oncheck={(range) => list.toggleChecked(index, range)}
+							onstar={() => {
+								if (id === undefined || !row) return;
+								act('star', { threadIds: [id], rows: [row], view: list.view });
+							}}
 						/>
 					{/snippet}
 				</VirtualList>
@@ -135,11 +212,73 @@
 		display: flex;
 		align-items: center;
 		gap: 12px;
-		height: 36px;
+		height: 40px;
 		padding: 0 18px;
 		border-bottom: 1px solid var(--line);
 		color: var(--muted);
 		font-size: 12px;
+	}
+
+	.bar {
+		padding-left: 8px;
+	}
+
+	.all,
+	.act {
+		display: grid;
+		place-items: center;
+		width: 32px;
+		height: 32px;
+		border: 0;
+		border-radius: 50%;
+		background: none;
+		color: var(--ink-2);
+		cursor: pointer;
+	}
+
+	.all:hover,
+	.act:hover {
+		background: var(--hover);
+		color: var(--ink);
+	}
+
+	.box {
+		display: grid;
+		place-items: center;
+		width: 16px;
+		height: 16px;
+		border: 1.5px solid var(--line-strong);
+		border-radius: 4px;
+		color: var(--accent-ink);
+	}
+
+	.box.true,
+	.box.mixed {
+		border-color: var(--accent);
+		background: var(--accent);
+	}
+
+	.dash {
+		width: 8px;
+		height: 2px;
+		border-radius: 1px;
+		background: var(--accent-ink);
+	}
+
+	.actions {
+		display: flex;
+		gap: 2px;
+		padding-right: 8px;
+		margin-right: 4px;
+		border-right: 1px solid var(--line);
+		animation: fade 120ms var(--ease);
+	}
+
+	@keyframes fade {
+		from {
+			opacity: 0;
+			transform: translateX(-4px);
+		}
 	}
 
 	.total {

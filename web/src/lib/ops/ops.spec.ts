@@ -1,0 +1,277 @@
+import type { ThreadRowDto } from '@tagmail/api-types';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError, type OpAckDto, type OpDto, type OpRequest, type ViewId } from '../transport';
+import { MAX_RESENDS, OpsStore, type OpList, type OpsApi, type Removed } from './ops.svelte';
+
+function row(id: number, patch: Partial<ThreadRowDto> = {}): ThreadRowDto {
+	return {
+		id,
+		accountId: 1,
+		subject: `s${id}`,
+		snippet: '',
+		lastDate: 1000 - id,
+		messageCount: 1,
+		unreadCount: 1,
+		starred: false,
+		hasAttachment: false,
+		senders: [],
+		labels: [],
+		...patch
+	};
+}
+
+/** A list of ids with the membership calls the store makes. */
+class FakeList implements OpList {
+	ids: number[];
+	refetches = 0;
+	readonly rows = new Map<number, ThreadRowDto>();
+
+	constructor(
+		readonly view: ViewId,
+		ids: number[]
+	) {
+		this.ids = [...ids];
+		for (const id of ids) this.rows.set(id, row(id));
+	}
+
+	takeOut(ids: readonly number[]): Removed[] {
+		const out = ids.map((id) => ({ id, at: this.ids.indexOf(id) })).filter((r) => r.at !== -1);
+		this.ids = this.ids.filter((id) => !ids.includes(id));
+		return out.sort((a, b) => a.at - b.at);
+	}
+
+	putBack(entries: readonly Removed[]): void {
+		for (const { id, at } of [...entries].sort((a, b) => a.at - b.at)) {
+			if (!this.ids.includes(id)) this.ids.splice(at, 0, id);
+		}
+	}
+
+	scheduleRefetch(): void {
+		this.refetches++;
+	}
+
+	patchRow(id: number, patch: (r: ThreadRowDto) => ThreadRowDto): void {
+		const r = this.rows.get(id);
+		if (r) this.rows.set(id, patch(r));
+	}
+}
+
+interface Deferred {
+	request: OpRequest;
+	resolve: (ack: OpAckDto) => void;
+	reject: (e: unknown) => void;
+}
+
+function setup() {
+	const posted: Deferred[] = [];
+	const mocks = {
+		retryOp: vi.fn((opId: string) => Promise.resolve({ opId, status: 'pending' as const })),
+		discardOp: vi.fn<(opId: string) => Promise<void>>(() => Promise.resolve()),
+		ops: vi.fn<(status: 'pending' | 'failed') => Promise<OpDto[]>>(() => Promise.resolve([]))
+	};
+	const api: OpsApi = {
+		postOp: (request) =>
+			new Promise((resolve, reject) => posted.push({ request, resolve, reject })),
+		retryOp: mocks.retryOp,
+		discardOp: mocks.discardOp,
+		ops: mocks.ops
+	};
+	const inbox = new FakeList('inbox', [1, 2, 3, 4]);
+	const label = new FakeList('label:work', [2, 4]);
+	const toasts: { text: string; key?: string; actions: string[]; run: (() => void)[] }[] = [];
+	let n = 0;
+	const store = new OpsStore({
+		api,
+		lists: () => [inbox, label],
+		context: () => ({ inboxIds: new Set([1]) }),
+		names: () => ({ label: (k) => k.toUpperCase(), mailbox: () => 'Box' }),
+		notify: {
+			show(text, options = {}) {
+				toasts.push({
+					text,
+					key: options.key,
+					actions: (options.actions ?? []).map((a) => a.label),
+					run: (options.actions ?? []).map((a) => a.run)
+				});
+				return toasts.length;
+			},
+			dismissKey() {}
+		},
+		uuid: () => `op-${++n}`,
+		resendDelayMs: 5
+	});
+	return { store, mocks, posted, inbox, label, toasts };
+}
+
+const flush = () => new Promise((r) => setTimeout(r, 0));
+
+describe('OpsStore', () => {
+	beforeEach(() => vi.useRealTimers());
+	afterEach(() => vi.useRealTimers());
+
+	it('gives every op a client id and applies it before the server answers', () => {
+		const { store, posted, inbox, label, toasts } = setup();
+		store.run({ kind: 'archive', threadIds: [2] }, { view: 'inbox' });
+		expect(posted[0].request).toEqual({ opId: 'op-1', kind: 'archive', threadIds: [2] });
+		expect(inbox.ids).toEqual([1, 3, 4]);
+		expect(label.ids).toEqual([2, 4]);
+		expect(toasts[0]).toMatchObject({ text: 'Archived 1 conversation', actions: ['Undo'] });
+		expect(store.unsynced.map((o) => o.status)).toEqual(['sending']);
+	});
+
+	it('projects pending row changes and keeps them once confirmed', async () => {
+		const { store, posted, inbox } = setup();
+		const op = store.run({ kind: 'label.add', label: 'work', threadIds: [1] }, { view: 'inbox' });
+		expect(store.project(row(1)).labels).toEqual(['work']);
+		expect(store.project(row(3)).labels).toEqual([]);
+		posted[0].resolve({ opId: op.opId, status: 'pending' });
+		await flush();
+		expect(store.get(op.opId)?.status).toBe('pending');
+		store.changes({
+			changes: [
+				{
+					seq: 1,
+					entity: 'op' as never,
+					id: 0,
+					op: { kind: 'upsert' },
+					payload: { opId: op.opId, status: 'done' }
+				}
+			],
+			next: 'e:1',
+			more: false
+		});
+		expect(store.get(op.opId)).toBeUndefined();
+		expect(inbox.rows.get(1)?.labels).toEqual(['work']);
+	});
+
+	it('rolls back and offers Retry when the server refuses', async () => {
+		const { store, posted, inbox, toasts } = setup();
+		const op = store.run({ kind: 'archive', threadIds: [2, 3] }, { view: 'inbox' });
+		expect(inbox.ids).toEqual([1, 4]);
+		posted[0].reject(new ApiError(503, { error: 'unavailable', message: 'offline' }));
+		await flush();
+		expect(inbox.ids).toEqual([1, 2, 3, 4]);
+		expect(op.status).toBe('failed');
+		expect(op.error).toBe('offline');
+		expect(store.failedCount).toBe(1);
+		const failure = toasts.at(-1)!;
+		expect(failure).toMatchObject({ text: "Couldn't archive 2 conversations", actions: ['Retry'] });
+		expect(failure.key).toBe(toasts[0].key);
+
+		failure.run[0]();
+		expect(inbox.ids).toEqual([1, 4]);
+		expect(posted[1].request.opId).toBe(op.opId);
+	});
+
+	it('rolls back when the executor reports a failure', () => {
+		const { store, posted, inbox } = setup();
+		const op = store.run({ kind: 'star', threadIds: [1] }, { view: 'inbox' });
+		posted[0].resolve({ opId: op.opId, status: 'pending' });
+		store.changes({
+			changes: [
+				{
+					seq: 2,
+					entity: 'op' as never,
+					id: 0,
+					op: { kind: 'upsert' },
+					payload: { opId: op.opId, status: 'failed', error: 'read-only' }
+				}
+			],
+			next: 'e:2',
+			more: false
+		});
+		expect(store.project(row(1)).starred).toBe(false);
+		expect(op).toMatchObject({ status: 'failed', error: 'read-only', serverKnown: true });
+		expect(inbox.ids).toEqual([1, 2, 3, 4]);
+	});
+
+	it('re-sends network failures with the same op id and applies them once', async () => {
+		const { store, posted, inbox } = setup();
+		const op = store.run({ kind: 'archive', threadIds: [1] }, { view: 'inbox' });
+		posted[0].reject(new TypeError('Failed to fetch'));
+		await new Promise((r) => setTimeout(r, 20));
+		expect(posted).toHaveLength(2);
+		expect(posted[1].request).toEqual(posted[0].request);
+		posted[1].resolve({ opId: op.opId, status: 'pending' });
+		await flush();
+		expect(op.status).toBe('pending');
+		expect(inbox.ids).toEqual([2, 3, 4]);
+	});
+
+	it('gives up re-sending after a bound', async () => {
+		const { store, posted } = setup();
+		const op = store.run({ kind: 'markRead', threadIds: [1] }, { view: 'inbox' });
+		for (let i = 0; i <= MAX_RESENDS; i++) {
+			await vi.waitFor(() => expect(posted).toHaveLength(i + 1));
+			posted[i].reject(new TypeError('Failed to fetch'));
+		}
+		await vi.waitFor(() => expect(op.status).toBe('failed'));
+		expect(posted).toHaveLength(MAX_RESENDS + 1);
+		expect(new Set(posted.map((p) => p.request.opId))).toEqual(new Set([op.opId]));
+	});
+
+	it('retries an executor failure through the retry endpoint', async () => {
+		const { store, posted, mocks } = setup();
+		const op = store.run({ kind: 'trash', threadIds: [4] }, { view: 'inbox' });
+		posted[0].resolve({ opId: op.opId, status: 'pending' });
+		await flush();
+		store.changes({
+			changes: [
+				{
+					seq: 3,
+					entity: 'op' as never,
+					id: 0,
+					op: { kind: 'upsert' },
+					payload: { opId: op.opId, status: 'failed' }
+				}
+			],
+			next: 'e:3',
+			more: false
+		});
+		await store.retry(op);
+		expect(mocks.retryOp).toHaveBeenCalledWith(op.opId);
+		expect(posted).toHaveLength(1);
+		expect(op.status).toBe('pending');
+	});
+
+	it('undo restores rows to their old positions with the inverse op', () => {
+		const { store, posted, inbox } = setup();
+		const op = store.run({ kind: 'archive', threadIds: [1, 3] }, { view: 'inbox' });
+		expect(inbox.ids).toEqual([2, 4]);
+		const undo = store.undo(op)!;
+		expect(undo.intent).toEqual({ kind: 'unarchive', threadIds: [1, 3] });
+		expect(posted[1].request.kind).toBe('unarchive');
+		expect(inbox.ids).toEqual([1, 2, 3, 4]);
+	});
+
+	it('removing the filtered label drops the thread from that label list only', () => {
+		const { store, inbox, label } = setup();
+		store.run({ kind: 'label.remove', label: 'work', threadIds: [2] }, { view: 'label:work' });
+		expect(label.ids).toEqual([4]);
+		expect(inbox.ids).toEqual([1, 2, 3, 4]);
+	});
+
+	it('discard forgets the op and asks the server to drop it', async () => {
+		const { store, posted, mocks } = setup();
+		const op = store.run({ kind: 'archive', threadIds: [1] }, { view: 'inbox' });
+		posted[0].resolve({ opId: op.opId, status: 'pending' });
+		await flush();
+		await store.discard(op);
+		expect(mocks.discardOp).toHaveBeenCalledWith(op.opId);
+		expect(store.unsynced).toEqual([]);
+	});
+
+	it('picks up unsynced ops from the server without applying them twice', async () => {
+		const { store, mocks, inbox } = setup();
+		mocks.ops.mockImplementation((status) =>
+			Promise.resolve(
+				status === 'failed'
+					? [{ opId: 'srv-1', kind: 'archive', status: 'failed', error: 'nope', threadIds: [1] }]
+					: []
+			)
+		);
+		await store.load();
+		expect(store.unsynced).toMatchObject([{ opId: 'srv-1', status: 'failed', serverKnown: true }]);
+		expect(inbox.ids).toEqual([1, 2, 3, 4]);
+	});
+});

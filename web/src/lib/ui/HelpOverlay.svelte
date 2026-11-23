@@ -6,6 +6,14 @@
 
 	let dialog: HTMLDialogElement;
 
+	const GROUPS = ['Navigate', 'Act', 'Write'] as const;
+
+	function joiner(action: string): string {
+		if (action === 'open') return 'or';
+		if (action === 'markRead' || action === 'markUnread') return '+';
+		return 'then';
+	}
+
 	$effect(() => {
 		if (open && !dialog.open) dialog.showModal();
 		else if (!open && dialog.open) dialog.close();
@@ -26,26 +34,29 @@
 			<Icon name="close" />
 		</button>
 	</header>
-	<dl>
-		{#each HELP as item (item.action)}
-			<div class="item">
-				<dt>
-					{#each item.keys as key, i (key)}
-						{#if i > 0}<span class="then">{item.action === 'open' ? 'or' : 'then'}</span>{/if}<kbd>
-							{key}
-						</kbd>
-					{/each}
-				</dt>
-				<dd>{item.label}</dd>
-			</div>
-		{/each}
-	</dl>
+	{#each GROUPS as group (group)}
+		<h3>{group}</h3>
+		<dl>
+			{#each HELP.filter((h) => h.group === group) as item (item.action)}
+				<div class="item">
+					<dt>
+						{#each item.keys as key, i (key)}
+							{#if i > 0}<span class="then">{joiner(item.action)}</span>{/if}<kbd>
+								{key}
+							</kbd>
+						{/each}
+					</dt>
+					<dd>{item.label}</dd>
+				</div>
+			{/each}
+		</dl>
+	{/each}
 	<p class="foot">Shortcuts are off while you type in a field. <kbd>Esc</kbd> leaves it.</p>
 </dialog>
 
 <style>
 	dialog {
-		width: min(560px, calc(100vw - 32px));
+		width: min(620px, calc(100vw - 32px));
 		padding: 0;
 		border: 1px solid var(--line);
 		border-radius: var(--radius-lg);
@@ -98,12 +109,25 @@
 		background: var(--hover);
 	}
 
+	dialog {
+		max-height: calc(100dvh - 48px);
+	}
+
+	h3 {
+		margin: 14px 24px 0;
+		color: var(--muted);
+		font-size: 11px;
+		font-weight: 650;
+		letter-spacing: 0.09em;
+		text-transform: uppercase;
+	}
+
 	dl {
 		display: grid;
 		grid-template-columns: 1fr 1fr;
 		gap: 0 24px;
 		margin: 0;
-		padding: 8px 24px 4px;
+		padding: 2px 24px 4px;
 	}
 
 	.item {

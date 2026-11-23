@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { labelHue } from '../format';
+	import { labelColor } from '../format';
 	import { nav, theme } from '../stores';
 	import Icon, { type IconName } from './Icon.svelte';
 
@@ -8,10 +8,12 @@
 		open = false,
 		onnavigate,
 		onhelp,
-		onlogout
+		onlogout,
+		oncompose
 	}: {
 		open?: boolean;
 		onnavigate: () => void;
+		oncompose: () => void;
 		onhelp: () => void;
 		onlogout: () => void;
 	} = $props();
@@ -41,6 +43,10 @@
 </script>
 
 <nav class="rail" class:open aria-label="Mailboxes">
+	<button class="compose" onclick={oncompose} title="Compose (c)">
+		<Icon name="pencil" />
+		<span>Compose</span>
+	</button>
 	<ul class="primary">
 		{#each items as item (item.href)}
 			<li>
@@ -62,7 +68,8 @@
 						aria-current={currentLabel === label.key ? 'page' : undefined}
 						onclick={onnavigate}
 					>
-						<span class="tag" style:--h={labelHue(label.key)} aria-hidden="true"></span>
+						<span class="tag" style:--c={labelColor(label.key, label.color)} aria-hidden="true"
+						></span>
 						<span>{label.name}</span>
 					</a>
 				</li>
@@ -75,8 +82,18 @@
 	<ul class="footer">
 		<li>
 			<a
+				href="/settings/labels"
+				aria-current={page.url.pathname === '/settings/labels' ? 'page' : undefined}
+				onclick={onnavigate}
+			>
+				<Icon name="tag" />
+				<span>Manage labels</span>
+			</a>
+		</li>
+		<li>
+			<a
 				href="/settings/devices"
-				aria-current={page.url.pathname.startsWith('/settings') ? 'page' : undefined}
+				aria-current={page.url.pathname === '/settings/devices' ? 'page' : undefined}
 				onclick={onnavigate}
 			>
 				<Icon name="devices" />
@@ -104,6 +121,34 @@
 		height: 100%;
 		padding: 4px 12px 12px 8px;
 		overflow-y: auto;
+	}
+
+	.compose {
+		display: inline-flex;
+		align-items: center;
+		gap: 12px;
+		align-self: flex-start;
+		height: 52px;
+		margin: 0 0 14px 4px;
+		padding: 0 22px 0 18px;
+		border: 0;
+		border-radius: 16px;
+		background: var(--accent-soft);
+		color: var(--accent);
+		font-weight: 650;
+		font-size: 14.5px;
+		cursor: pointer;
+		transition:
+			box-shadow 140ms var(--ease),
+			transform 140ms var(--ease);
+	}
+
+	.compose:hover {
+		box-shadow: var(--shadow);
+	}
+
+	.compose:active {
+		transform: translateY(1px);
 	}
 
 	ul {
@@ -160,7 +205,7 @@
 		margin: 0 2px;
 		clip-path: polygon(5px 0, 100% 0, 100% 100%, 5px 100%, 0 50%);
 		border-radius: 0 3px 3px 0;
-		background: oklch(0.66 0.14 var(--h));
+		background: var(--c);
 	}
 
 	.none {

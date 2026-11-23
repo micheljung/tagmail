@@ -2,9 +2,15 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { APP_NAME } from '#lib/document-title.ts';
-	import { shortcuts } from '#lib/shortcuts/index.ts';
-	import { lists, nav } from '#lib/stores/index.ts';
-	import { api, type ThreadDetailDto } from '#lib/transport/index.ts';
+	import ComposeForm from '#lib/compose/ComposeForm.svelte';
+	import { composer } from '#lib/compose/composer.svelte.ts';
+	import type { Draft } from '#lib/compose/draft.svelte.ts';
+	import { act } from '#lib/ops/actions.svelte.ts';
+	import { patchRow } from '#lib/ops/effects.ts';
+	import { shortcuts, type ShortcutAction } from '#lib/shortcuts/index.ts';
+	import { lists, nav, ops, toasts } from '#lib/stores/index.ts';
+	import { api, type ReplyMode, type ThreadDetailDto } from '#lib/transport/index.ts';
+	import type { IconName } from '#lib/ui/Icon.svelte';
 	import Icon from '#lib/ui/Icon.svelte';
 	import LabelChip from '#lib/ui/LabelChip.svelte';
 	import MessageCard from '#lib/ui/MessageCard.svelte';
@@ -18,6 +24,76 @@
 	let error = $state<string | null>(null);
 	const expanded = new SvelteSet<number>();
 	let heading: HTMLHeadingElement | undefined = $state();
+	let reply = $state.raw<Draft | null>(null);
+	let replying = $state<ReplyMode | null>(null);
+	let replyForm: ComposeForm | undefined = $state();
+
+	const thread = $derived(detail ? ops.project(detail.thread) : null);
+
+	/** Actions that take the conversation out of view send the player back to the list. */
+	const LEAVES: ReadonlySet<ShortcutAction> = new Set(['archive', 'delete', 'markUnread']);
+
+	const TOOLBAR: { action: ShortcutAction; icon: IconName; label: string; key: string }[] = [
+		{ action: 'archive', icon: 'archive', label: 'Archive', key: 'e' },
+		{ action: 'delete', icon: 'trash', label: 'Delete', key: '#' },
+		{ action: 'markUnread', icon: 'unread', label: 'Mark as unread', key: 'Shift+U' },
+		{ action: 'label', icon: 'tag', label: 'Label as', key: 'l' },
+		{ action: 'move', icon: 'folder', label: 'Move to', key: 'v' }
+	];
+
+	function run(action: ShortcutAction): boolean {
+		if (!thread) return false;
+		const view = list && list.index.has(thread.id) ? list.view : null;
+		const done = act(action, { threadIds: [thread.id], rows: [thread], view });
+		if (done && LEAVES.has(action)) void goto(lists.currentPath);
+		return done;
+	}
+
+	async function startReply(mode: ReplyMode) {
+		const last = detail?.messages.at(-1);
+		if (!last || replying) return;
+		if (reply) await reply.close();
+		replying = mode;
+		try {
+			reply = await composer.reply(last.id, mode);
+			requestAnimationFrame(() => {
+				replyForm?.focus();
+				document.getElementById('reply')?.scrollIntoView({ block: 'nearest' });
+			});
+		} catch (e) {
+			toasts.show(`Couldn't start the reply: ${errorText(e)}`, { tone: 'error' });
+		} finally {
+			replying = null;
+		}
+	}
+
+	async function sendReply() {
+		if (!reply) return;
+		if (await composer.send(reply)) reply = null;
+	}
+
+	async function discardReply() {
+		const d = reply;
+		reply = null;
+		await d?.close(true);
+	}
+
+	$effect(() =>
+		ops.onSettled((op) => {
+			if (detail && op.intent.threadIds.includes(detail.thread.id)) {
+				detail = { ...detail, thread: patchRow(detail.thread, op.intent) };
+			}
+		})
+	);
+
+	$effect(() => {
+		void id;
+		return () => {
+			const d = reply;
+			reply = null;
+			void d?.close();
+		};
+	});
 
 	const list = $derived(lists.current);
 	const position = $derived.by(() => {
@@ -63,7 +139,12 @@
 				void goto(`/thread/${newer}`);
 				return true;
 			}
-			return action === 'next' || action === 'previous';
+			if (action === 'reply' || action === 'replyAll' || action === 'forward') {
+				void startReply(action === 'reply' ? 'reply' : action === 'replyAll' ? 'all' : 'forward');
+				return true;
+			}
+			if (action === 'next' || action === 'previous') return true;
+			return run(action);
 		})
 	);
 
@@ -81,6 +162,19 @@
 		<a class="icon-btn" href={lists.currentPath} aria-label="Back to the list" title="Back (u)">
 			<Icon name="back" />
 		</a>
+		{#if thread}
+			<span class="sep" aria-hidden="true"></span>
+			{#each TOOLBAR as item (item.action)}
+				<button
+					class="icon-btn"
+					aria-label={item.label}
+					title="{item.label} ({item.key})"
+					onclick={() => run(item.action)}
+				>
+					<Icon name={item.icon} />
+				</button>
+			{/each}
+		{/if}
 		<span class="spacer"></span>
 		{#if list && position >= 0}
 			<span class="pos">{(position + 1).toLocaleString()} of {list.count.toLocaleString()}</span>
@@ -114,10 +208,24 @@
 		<div class="state" role="status"><span class="spinner" aria-hidden="true"></span>Opening</div>
 	{:else}
 		<header class="head">
-			<h1 bind:this={heading} tabindex="-1">{detail.thread.subject || '(no subject)'}</h1>
-			<div class="chips">
-				{#each detail.thread.labels as key (key)}
-					<LabelChip labelKey={key} name={nav.labelName(key)} />
+			<div class="title">
+				<h1 bind:this={heading} tabindex="-1">{detail.thread.subject || '(no subject)'}</h1>
+				{#if thread}
+					<button
+						class="icon-btn star"
+						class:on={thread.starred}
+						aria-pressed={thread.starred}
+						aria-label={thread.starred ? 'Starred' : 'Not starred'}
+						title="Star (s)"
+						onclick={() => run('star')}
+					>
+						<Icon name="star" filled={thread.starred} />
+					</button>
+				{/if}
+			</div>
+			<div class="chips" aria-label="Labels">
+				{#each thread?.labels ?? [] as key (key)}
+					<LabelChip labelKey={key} name={nav.labelName(key)} color={nav.labelColor(key)} />
 				{/each}
 			</div>
 		</header>
@@ -127,6 +235,43 @@
 				<MessageCard message={m} open={expanded.has(m.id)} ontoggle={() => toggle(m.id)} />
 			{/each}
 		</ol>
+
+		<section class="reply" id="reply" aria-label="Reply">
+			{#if reply}
+				<div class="reply-head">
+					<Icon
+						name={reply.mode === 'forward'
+							? 'forward'
+							: reply.mode === 'all'
+								? 'replyAll'
+								: 'reply'}
+						size={18}
+					/>
+					<span>
+						{reply.mode === 'forward' ? 'Forward' : reply.mode === 'all' ? 'Reply all' : 'Reply'}
+					</span>
+				</div>
+				<ComposeForm
+					bind:this={replyForm}
+					draft={reply}
+					inline
+					onsend={() => void sendReply()}
+					ondiscard={() => void discardReply()}
+				/>
+			{:else}
+				<div class="reply-actions">
+					<button class="btn" onclick={() => startReply('reply')} disabled={replying !== null}>
+						<Icon name="reply" size={17} />Reply
+					</button>
+					<button class="btn" onclick={() => startReply('all')} disabled={replying !== null}>
+						<Icon name="replyAll" size={17} />Reply all
+					</button>
+					<button class="btn" onclick={() => startReply('forward')} disabled={replying !== null}>
+						<Icon name="forward" size={17} />Forward
+					</button>
+				</div>
+			{/if}
+		</section>
 	{/if}
 </article>
 
@@ -153,6 +298,61 @@
 
 	.spacer {
 		flex: 1;
+	}
+
+	.sep {
+		width: 1px;
+		height: 22px;
+		margin: 0 6px;
+		background: var(--line);
+	}
+
+	button.icon-btn {
+		border: 0;
+		background: none;
+		cursor: pointer;
+	}
+
+	.title {
+		display: flex;
+		align-items: flex-start;
+		gap: 8px;
+	}
+
+	.title h1 {
+		flex: 1;
+	}
+
+	.star {
+		margin-top: -6px;
+		color: var(--faint);
+	}
+
+	.star.on {
+		color: var(--star);
+	}
+
+	.reply {
+		padding: 0 20px 48px 76px;
+	}
+
+	.reply-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 10px;
+	}
+
+	.reply-head {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin-bottom: 8px;
+		color: var(--muted);
+		font-weight: 600;
+	}
+
+	.reply :global(.form.inline) {
+		min-height: 320px;
 	}
 
 	.pos {
@@ -206,7 +406,7 @@
 
 	.messages {
 		margin: 0;
-		padding: 8px 20px 40px;
+		padding: 8px 20px 16px;
 		list-style: none;
 	}
 
@@ -250,6 +450,14 @@
 
 		.messages {
 			padding: 4px 6px 32px;
+		}
+
+		.reply {
+			padding: 0 8px 32px;
+		}
+
+		.sep {
+			display: none;
 		}
 	}
 </style>

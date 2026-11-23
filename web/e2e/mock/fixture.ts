@@ -39,7 +39,9 @@ export const MAILBOXES = [
 	{ id: 1, accountId: 1, name: 'INBOX', delimiter: '/', specialUse: null },
 	{ id: 2, accountId: 1, name: 'Sent', delimiter: '/', specialUse: 'sent' },
 	{ id: 3, accountId: 1, name: 'Archive', delimiter: '/', specialUse: 'archive' },
-	{ id: 4, accountId: 1, name: 'Trash', delimiter: '/', specialUse: 'trash' }
+	{ id: 4, accountId: 1, name: 'Trash', delimiter: '/', specialUse: 'trash' },
+	{ id: 5, accountId: 1, name: 'Junk', delimiter: '/', specialUse: 'junk' },
+	{ id: 6, accountId: 1, name: 'Projects', delimiter: '/', specialUse: null }
 ];
 
 const PEOPLE: Address[] = [

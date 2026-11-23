@@ -50,9 +50,15 @@ export default defineConfig(
 		}
 	},
 	{
-		// Id indexes and row caches are deliberately non-reactive; a version
-		// counter in $state tells the UI when they changed.
-		files: ['src/lib/list/**', 'src/lib/stores/**'],
+		// Id indexes, row caches and op bookkeeping are deliberately non-reactive;
+		// a version counter or a replaced $state.raw value tells the UI they changed.
+		files: [
+			'src/lib/list/**',
+			'src/lib/stores/**',
+			'src/lib/ops/**',
+			'src/lib/compose/**',
+			'src/lib/ui/LabelPicker.svelte'
+		],
 		rules: { 'svelte/prefer-svelte-reactivity': 'off' }
 	}
 );

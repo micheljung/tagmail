@@ -67,3 +67,8 @@ export function fileSize(bytes: number): string {
 	}
 	return `${unit === 0 ? n : n.toFixed(n < 10 ? 1 : 0)} ${SIZE_UNITS[unit]}`;
 }
+
+/** A label's swatch color: the one the player picked, else its stable hue. */
+export function labelColor(key: string, color: string | null | undefined): string {
+	return color ?? `oklch(0.66 0.14 ${labelHue(key)})`;
+}

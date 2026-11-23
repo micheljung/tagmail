@@ -1,4 +1,5 @@
-import type { ChangeDto, ChangesDto } from '@tagmail/api-types';
+import type { ChangeDto, ChangesDto, ThreadRowDto } from '@tagmail/api-types';
+import { SvelteSet } from 'svelte/reactivity';
 import { ThreadIndex, insertionPoint } from '../list/threadIndex';
 import { PAGE_SIZE, RowCache } from '../list/rowCache.svelte';
 import type { Range } from '../list/math';
@@ -6,6 +7,7 @@ import type { Api, ViewId } from '../transport';
 import { parseCursor, type Cursor } from './cursor';
 import type { ChangeListener, EventHub } from './events.svelte';
 import type { NavStore } from './nav.svelte';
+import type { OpList, Removed } from '../ops/ops.svelte';
 
 export const REFETCH_DEBOUNCE_MS = 300;
 
@@ -26,7 +28,7 @@ export type ListStatus = 'loading' | 'ready' | 'error';
  * selection (by thread id, so patches never shift it) and live patching
  * from the change feed.
  */
-export class ThreadList implements ChangeListener {
+export class ThreadList implements ChangeListener, OpList {
 	readonly view: ViewId;
 	readonly rows: RowCache;
 	index = new ThreadIndex();
@@ -36,6 +38,10 @@ export class ThreadList implements ChangeListener {
 	status = $state<ListStatus>('loading');
 	error = $state<string | null>(null);
 	selectedId = $state<number | null>(null);
+	/** Threads ticked for a bulk action (`x`, checkboxes). */
+	readonly checked = new SvelteSet<number>();
+	/** Index of the last ticked row, the start of a shift-click range. */
+	checkAnchor = -1;
 	/** Virtual scroll offset, kept while the list is off screen. */
 	scrollOffset = 0;
 	/** Rows currently rendered; patches only trust dates inside it. */
@@ -123,6 +129,84 @@ export class ThreadList implements ChangeListener {
 		return at === -1 ? undefined : this.index.at(at + delta);
 	}
 
+	/** Ticks or unticks the row at `index`; with `range`, everything from the anchor. */
+	toggleChecked(index: number, range = false): void {
+		const id = this.index.at(index);
+		if (id === undefined) return;
+		const on = !this.checked.has(id);
+		if (range && this.checkAnchor !== -1) {
+			const [from, to] = [Math.min(this.checkAnchor, index), Math.max(this.checkAnchor, index)];
+			for (const rowId of this.index.slice(from, to + 1)) {
+				if (on) this.checked.add(rowId);
+				else this.checked.delete(rowId);
+			}
+		} else if (on) this.checked.add(id);
+		else this.checked.delete(id);
+		this.checkAnchor = index;
+	}
+
+	/** Ticks the rows on screen (Gmail's "select all" is per page), or clears the ticks. */
+	setAllChecked(on: boolean): void {
+		this.checked.clear();
+		this.checkAnchor = -1;
+		if (!on) return;
+		for (const id of this.index.slice(this.window.first, this.window.last + 1)) {
+			this.checked.add(id);
+		}
+	}
+
+	/** Threads an action applies to: the ticked ones, else the selected one. */
+	targets(): number[] {
+		if (this.checked.size > 0) {
+			return this.index.slice(0, this.count).filter((id) => this.checked.has(id));
+		}
+		return this.selectedId === null ? [] : [this.selectedId];
+	}
+
+	takeOut(ids: readonly number[]): Removed[] {
+		const out: Removed[] = [];
+		for (const id of ids) {
+			const at = this.index.indexOf(id);
+			if (at !== -1) out.push({ id, at });
+		}
+		if (out.length === 0) return out;
+		out.sort((a, b) => a.at - b.at);
+		const gone = new Set(out.map((r) => r.id));
+		const selectedAt = this.selectedId === null ? -1 : this.index.indexOf(this.selectedId);
+		this.index.removeMany(gone);
+		if (this.selectedId !== null && gone.has(this.selectedId)) {
+			const before = out.filter((r) => r.at < selectedAt).length;
+			const at = Math.min(selectedAt - before, this.index.length - 1);
+			this.selectedId = this.index.at(at) ?? null;
+			this.#lastSelectedIndex = Math.max(0, at);
+		}
+		for (const id of gone) this.checked.delete(id);
+		this.#indexChanged();
+		if (this.attached) this.ensureWindow(this.window);
+		return out;
+	}
+
+	putBack(entries: readonly Removed[]): void {
+		let changed = false;
+		for (const { id, at } of [...entries].sort((a, b) => a.at - b.at)) {
+			if (this.index.has(id)) continue;
+			this.index.insert(Math.min(at, this.index.length), id);
+			changed = true;
+		}
+		if (!changed) return;
+		this.#indexChanged();
+		if (entries.length > 0 && this.selectedId !== null) {
+			const first = [...entries].sort((a, b) => a.at - b.at)[0];
+			this.selectedId = first.id;
+			this.#lastSelectedIndex = this.index.indexOf(first.id);
+		}
+		if (this.attached) this.ensureWindow(this.window);
+	}
+
+	patchRow(id: number, patch: (row: ThreadRowDto) => ThreadRowDto): void {
+		this.rows.update(id, patch);
+	}
+
 	ensureWindow(range: Range): void {
 		this.window = range;
 		if (range.last < range.first) return;
@@ -207,6 +291,7 @@ export class ThreadList implements ChangeListener {
 			if (this.index.has(id) || payload.lastDate !== undefined) this.scheduleRefetch();
 			return false;
 		}
+		const wasSelected = this.selectedId === id;
 		const removed = this.#remove(id);
 		if (!member) return removed;
 		if (payload.lastDate === undefined) {
@@ -227,6 +312,7 @@ export class ThreadList implements ChangeListener {
 			return removed;
 		}
 		this.index.insert(at, id);
+		if (wasSelected) this.selectedId = id;
 		return true;
 	}
 
@@ -286,6 +372,10 @@ export class ThreadLists {
 		this.current = list;
 		this.currentPath = path;
 		return list;
+	}
+
+	all(): IterableIterator<ThreadList> {
+		return this.#lists.values();
 	}
 
 	clear(): void {

@@ -1,10 +1,32 @@
 export type ShortcutAction =
-	'next' | 'previous' | 'open' | 'back' | 'search' | 'help' | 'goInbox' | 'goLabel' | 'escape';
+	| 'next'
+	| 'previous'
+	| 'open'
+	| 'back'
+	| 'search'
+	| 'help'
+	| 'goInbox'
+	| 'goLabel'
+	| 'escape'
+	| 'select'
+	| 'archive'
+	| 'label'
+	| 'move'
+	| 'delete'
+	| 'star'
+	| 'markRead'
+	| 'markUnread'
+	| 'reply'
+	| 'replyAll'
+	| 'forward'
+	| 'compose';
 
 export interface ShortcutHelp {
 	keys: string[];
 	action: ShortcutAction;
 	label: string;
+	/** Help section. */
+	group: 'Navigate' | 'Act' | 'Write';
 }
 
 /** Keys as typed, space-separated for sequences. */
@@ -18,18 +40,42 @@ const BINDINGS: Record<string, ShortcutAction> = {
 	'?': 'help',
 	'g i': 'goInbox',
 	'g l': 'goLabel',
-	Escape: 'escape'
+	Escape: 'escape',
+	x: 'select',
+	e: 'archive',
+	l: 'label',
+	v: 'move',
+	'#': 'delete',
+	s: 'star',
+	I: 'markRead',
+	U: 'markUnread',
+	r: 'reply',
+	a: 'replyAll',
+	f: 'forward',
+	c: 'compose'
 };
 
 export const HELP: readonly ShortcutHelp[] = [
-	{ keys: ['j'], action: 'next', label: 'Older conversation' },
-	{ keys: ['k'], action: 'previous', label: 'Newer conversation' },
-	{ keys: ['o', 'Enter'], action: 'open', label: 'Open conversation' },
-	{ keys: ['u'], action: 'back', label: 'Back to the list' },
-	{ keys: ['/'], action: 'search', label: 'Search mail' },
-	{ keys: ['g', 'i'], action: 'goInbox', label: 'Go to Inbox' },
-	{ keys: ['g', 'l'], action: 'goLabel', label: 'Go to label' },
-	{ keys: ['?'], action: 'help', label: 'Keyboard shortcuts' }
+	{ keys: ['j'], action: 'next', label: 'Older conversation', group: 'Navigate' },
+	{ keys: ['k'], action: 'previous', label: 'Newer conversation', group: 'Navigate' },
+	{ keys: ['o', 'Enter'], action: 'open', label: 'Open conversation', group: 'Navigate' },
+	{ keys: ['u'], action: 'back', label: 'Back to the list', group: 'Navigate' },
+	{ keys: ['/'], action: 'search', label: 'Search mail', group: 'Navigate' },
+	{ keys: ['g', 'i'], action: 'goInbox', label: 'Go to Inbox', group: 'Navigate' },
+	{ keys: ['g', 'l'], action: 'goLabel', label: 'Go to label', group: 'Navigate' },
+	{ keys: ['?'], action: 'help', label: 'Keyboard shortcuts', group: 'Navigate' },
+	{ keys: ['x'], action: 'select', label: 'Select conversation', group: 'Act' },
+	{ keys: ['e'], action: 'archive', label: 'Archive', group: 'Act' },
+	{ keys: ['l'], action: 'label', label: 'Label as…', group: 'Act' },
+	{ keys: ['v'], action: 'move', label: 'Move to…', group: 'Act' },
+	{ keys: ['#'], action: 'delete', label: 'Delete', group: 'Act' },
+	{ keys: ['s'], action: 'star', label: 'Star or unstar', group: 'Act' },
+	{ keys: ['⇧', 'i'], action: 'markRead', label: 'Mark as read', group: 'Act' },
+	{ keys: ['⇧', 'u'], action: 'markUnread', label: 'Mark as unread', group: 'Act' },
+	{ keys: ['c'], action: 'compose', label: 'Compose', group: 'Write' },
+	{ keys: ['r'], action: 'reply', label: 'Reply', group: 'Write' },
+	{ keys: ['a'], action: 'replyAll', label: 'Reply all', group: 'Write' },
+	{ keys: ['f'], action: 'forward', label: 'Forward', group: 'Write' }
 ];
 
 /** How long the first key of a sequence waits for the second. */

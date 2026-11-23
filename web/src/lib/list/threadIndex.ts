@@ -45,6 +45,14 @@ export class ThreadIndex {
 		return true;
 	}
 
+	/** Drops every id in `ids` in one pass. */
+	removeMany(ids: ReadonlySet<number>): void {
+		const next = this.#ids.filter((id) => !ids.has(id));
+		if (next.length === this.#ids.length) return;
+		this.#ids = next;
+		this.#positions = null;
+	}
+
 	insert(at: number, id: number): void {
 		const next = new Float64Array(this.#ids.length + 1);
 		next.set(this.#ids.subarray(0, at));

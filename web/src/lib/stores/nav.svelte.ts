@@ -26,6 +26,16 @@ export class NavStore {
 		return this.labels.find((l) => l.key === key)?.name ?? key;
 	}
 
+	labelColor(key: string): string | null {
+		return this.labels.find((l) => l.key === key)?.color ?? null;
+	}
+
+	mailboxName(id: number): string {
+		const box = this.mailboxes.find((m) => m.id === id);
+		if (!box) return 'another folder';
+		return isInbox(box) ? 'Inbox' : box.name;
+	}
+
 	load(): Promise<void> {
 		this.#loading ??= this.#fetch().finally(() => (this.#loading = null));
 		return this.#loading;

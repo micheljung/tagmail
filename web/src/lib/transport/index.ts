@@ -2,7 +2,9 @@ import { Api } from './api';
 import { HttpTransport } from './http';
 
 export * from './api';
+export * from './write';
 export type {
+	AddressDto,
 	DeviceDto,
 	LabelDto,
 	MailboxDto,
@@ -12,7 +14,8 @@ export type {
 	PasskeyDto,
 	SessionDto,
 	ThreadDetailDto,
-	ThreadMessageDto
+	ThreadMessageDto,
+	ThreadRowDto
 } from '@tagmail/api-types';
 export * from './passkey';
 export { HttpTransport } from './http';

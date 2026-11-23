@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SEQUENCE_TIMEOUT_MS, ShortcutMatcher, type KeyLike } from './keymap';
+import { HELP, SEQUENCE_TIMEOUT_MS, ShortcutMatcher, type KeyLike } from './keymap';
 
 function key(k: string, extra: Partial<KeyLike> = {}): KeyLike {
 	return { key: k, ctrlKey: false, metaKey: false, altKey: false, target: null, ...extra };
@@ -28,6 +28,40 @@ describe('ShortcutMatcher', () => {
 		]);
 	});
 
+	it('maps the write shortcuts, shift variants included', () => {
+		const m = new ShortcutMatcher();
+		const keys = ['x', 'e', 'l', 'v', '#', 's', 'I', 'U', 'r', 'a', 'f', 'c'];
+		expect(keys.map((k) => m.match(key(k)))).toEqual([
+			'select',
+			'archive',
+			'label',
+			'move',
+			'delete',
+			'star',
+			'markRead',
+			'markUnread',
+			'reply',
+			'replyAll',
+			'forward',
+			'compose'
+		]);
+		expect(m.match(key('i'))).toBeNull();
+	});
+
+	it('keeps g l as the label jump while a lone l labels', () => {
+		const m = new ShortcutMatcher(() => 0);
+		expect(m.match(key('l'))).toBe('label');
+		m.match(key('g'));
+		expect(m.match(key('l'))).toBe('goLabel');
+	});
+
+	it('lists every bound action in the help', () => {
+		const bound = new Set(HELP.map((h) => h.action));
+		for (const action of ['archive', 'label', 'move', 'delete', 'compose', 'reply', 'markUnread']) {
+			expect(bound.has(action as never)).toBe(true);
+		}
+	});
+
 	it('matches g sequences within the timeout', () => {
 		const now = 0;
 		const m = new ShortcutMatcher(() => now);
@@ -45,7 +79,7 @@ describe('ShortcutMatcher', () => {
 		now = SEQUENCE_TIMEOUT_MS + 1;
 		expect(m.match(key('j'))).toBe('next');
 		m.match(key('g'));
-		expect(m.match(key('x'))).toBeNull();
+		expect(m.match(key('z'))).toBeNull();
 		expect(m.pending).toBeNull();
 	});
 

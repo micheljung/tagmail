@@ -2,7 +2,6 @@ import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { extname, join, normalize, resolve } from 'node:path';
 import {
-	LABELS,
 	MAILBOXES,
 	PASSWORD,
 	SETUP_TOKEN,
@@ -19,6 +18,19 @@ import {
 } from './fixture.ts';
 import { encodeIdIndex } from './idIndex.ts';
 import { RENDER_CSP, WEB_APP_CSP, renderMessage } from './render.ts';
+import {
+	INBOX,
+	TRASH,
+	anyMoved,
+	applyOverride,
+	currentLabels,
+	isDeleted,
+	mailboxOf,
+	resetWrites,
+	writeApi,
+	writeMock,
+	type WriteContext
+} from './write.ts';
 
 const PORT = Number(process.env.PORT ?? 4180);
 const ROOT = resolve(process.env.WEB_ROOT ?? join(import.meta.dirname, '../../build'));
@@ -84,10 +96,11 @@ function cursor(): string {
 }
 
 function row(id: number): Row | undefined {
+	if (isDeleted(id)) return undefined;
 	const extra = extraRows.get(id);
-	if (extra) return extra;
+	if (extra) return applyOverride(extra);
 	const at = positionOf(id);
-	return at === undefined ? undefined : rowAt(at);
+	return at === undefined ? undefined : applyOverride(rowAt(at));
 }
 
 function allIds(): number[] {
@@ -114,14 +127,27 @@ function matches(r: Row, i: number, query: string): boolean {
 }
 
 function viewIds(view: string): number[] | null {
-	if (view === 'inbox') return null;
+	const moved = anyMoved();
+	if (view === 'inbox' || view === `mailbox:${INBOX}`) {
+		return moved ? allIds().filter((id) => mailboxOf(id) === INBOX && !isDeleted(id)) : null;
+	}
+	if (view.startsWith('mailbox:')) {
+		const box = Number(view.slice('mailbox:'.length));
+		return allIds().filter((id) => mailboxOf(id) === box && !isDeleted(id));
+	}
 	let query: string;
 	if (view.startsWith('label:')) query = `label:${view.slice(6)}`;
 	else if (view.startsWith('search:')) query = view.slice(7);
 	else return [];
+	const visible = (id: number) => !moved || (!isDeleted(id) && mailboxOf(id) !== TRASH);
 	const out: number[] = [];
-	for (const id of extraOrder) if (matches(extraRows.get(id)!, -1, query)) out.push(id);
-	for (let i = 0; i < THREAD_COUNT; i++) if (matches(rowAt(i), i, query)) out.push(baseIds[i]);
+	for (const id of extraOrder) {
+		if (visible(id) && matches(row(id)!, -1, query)) out.push(id);
+	}
+	for (let i = 0; i < THREAD_COUNT; i++) {
+		const id = baseIds[i];
+		if (visible(id) && matches(row(id) ?? rowAt(i), i, query)) out.push(id);
+	}
 	return out;
 }
 
@@ -154,10 +180,14 @@ function authed(req: IncomingMessage): boolean {
 	return (req.headers.cookie ?? '').split(/;\s*/).includes(`${COOKIE}=${SESSION_TOKEN}`);
 }
 
-async function body(req: IncomingMessage): Promise<Record<string, string>> {
+async function readBody(req: IncomingMessage): Promise<Buffer> {
 	const chunks: Buffer[] = [];
 	for await (const c of req) chunks.push(c as Buffer);
-	const text = Buffer.concat(chunks).toString('utf8');
+	return Buffer.concat(chunks);
+}
+
+async function body(req: IncomingMessage): Promise<Record<string, string>> {
+	const text = (await readBody(req)).toString('utf8');
 	return text ? (JSON.parse(text) as Record<string, string>) : {};
 }
 
@@ -170,6 +200,9 @@ function login(res: ServerResponse, status = 200) {
 }
 
 function pushChanges(changes: unknown[]) {
+	if (changes.length === 0) return;
+	seq++;
+	changes = changes.map((c) => ({ ...(c as object), seq }));
 	const data = JSON.stringify({ changes, next: cursor(), more: false });
 	for (const client of sseClients)
 		client.write(`event: changes\nid: ${cursor()}\ndata: ${data}\n\n`);
@@ -212,13 +245,9 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
 		res.setHeader('set-cookie', `${COOKIE}=; Max-Age=0; Path=/`);
 		return send(res, 204, '');
 	}
+	if (await writeApi(req, res, url, writeContext)) return;
 	if (path === '/api/mailboxes') return send(res, 200, MAILBOXES);
-	if (path === '/api/labels')
-		return send(
-			res,
-			200,
-			LABELS.map((l) => ({ ...l, color: null }))
-		);
+	if (path === '/api/labels') return send(res, 200, currentLabels());
 	if (path === '/api/sessions') return send(res, 200, { sessions });
 	if (path === '/api/devices') return send(res, 200, { devices });
 	if (path === '/api/passkeys') return send(res, 200, { passkeys: [] });
@@ -352,10 +381,8 @@ async function mock(req: IncomingMessage, res: ServerResponse, url: URL) {
 		};
 		extraRows.set(id, r);
 		extraOrder.unshift(id);
-		seq++;
 		pushChanges([
 			{
-				seq,
 				entity: 'thread',
 				id,
 				op: { kind: 'upsert' },
@@ -371,14 +398,24 @@ async function mock(req: IncomingMessage, res: ServerResponse, url: URL) {
 		extraRows.clear();
 		imageSenders.clear();
 		extraOrder.length = 0;
+		resetWrites();
 		return send(res, 204, '');
 	}
 	if (url.pathname === '/__mock/fresh-install' && req.method === 'POST') {
 		ownerExists = false;
 		return send(res, 204, '');
 	}
+	if (await writeMock(req, res, url, writeContext)) return;
 	return error(res, 404, 'not_found', 'no such mock hook');
 }
+
+const writeContext: WriteContext = {
+	row,
+	push: pushChanges,
+	send,
+	error,
+	readBody
+};
 
 function serveStatic(res: ServerResponse, path: string) {
 	let file = normalize(join(ROOT, decodeURIComponent(path)));

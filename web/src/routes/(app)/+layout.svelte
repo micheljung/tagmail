@@ -2,11 +2,17 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { shortcuts } from '#lib/shortcuts/index.ts';
-	import { hub, lists, nav, resetAppState } from '#lib/stores/index.ts';
+	import ComposeDock from '#lib/compose/ComposeDock.svelte';
+	import { composer, outbox } from '#lib/compose/composer.svelte.ts';
+	import { hub, lists, nav, ops, resetAppState } from '#lib/stores/index.ts';
 	import { api } from '#lib/transport/index.ts';
 	import HelpOverlay from '#lib/ui/HelpOverlay.svelte';
 	import Icon from '#lib/ui/Icon.svelte';
 	import LabelJump from '#lib/ui/LabelJump.svelte';
+	import LabelPicker from '#lib/ui/LabelPicker.svelte';
+	import MovePicker from '#lib/ui/MovePicker.svelte';
+	import Toaster from '#lib/ui/Toaster.svelte';
+	import UnsyncedPanel from '#lib/ui/UnsyncedPanel.svelte';
 	import Logo from '#lib/ui/Logo.svelte';
 	import NavRail from '#lib/ui/NavRail.svelte';
 	import SearchBar from '#lib/ui/SearchBar.svelte';
@@ -19,6 +25,23 @@
 	let helpOpen = $state(false);
 	let labelJumpOpen = $state(false);
 	let drawerOpen = $state(false);
+	let unsyncedOpen = $state(false);
+
+	/** A change still on its way after this long gets surfaced; quick ones never flash. */
+	const STALE_MS = 3000;
+	let now = $state(Date.now());
+
+	const unsyncedFailed = $derived(ops.failedCount + outbox.failed.length);
+	const unsynced = $derived(
+		ops.unsynced.filter((o) => o.status === 'failed' || now - o.createdAt > STALE_MS).length +
+			outbox.failed.length
+	);
+
+	$effect(() => {
+		if (ops.unsynced.length === 0) return;
+		const timer = setInterval(() => (now = Date.now()), 1000);
+		return () => clearInterval(timer);
+	});
 
 	const query = $derived(
 		page.url.pathname === '/search' ? (page.url.searchParams.get('q') ?? '') : ''
@@ -31,8 +54,14 @@
 			void goto(error.code === 'setup_required' ? '/setup' : `/login?next=${next}`);
 		};
 		void nav.load();
+		void ops.load().catch(() => undefined);
+		void outbox.load().catch(() => undefined);
+		void composer.loadIdentities().catch(() => undefined);
 		return shortcuts.push((action) => {
 			switch (action) {
+				case 'compose':
+					composer.open();
+					return true;
 				case 'search':
 					search?.focus();
 					return true;
@@ -94,6 +123,17 @@
 		</button>
 		<div class="brand"><Logo /></div>
 		<SearchBar bind:this={search} {query} />
+		{#if unsynced > 0}
+			<button
+				class="unsynced"
+				class:failed={unsyncedFailed > 0}
+				onclick={() => (unsyncedOpen = true)}
+				aria-haspopup="dialog"
+			>
+				<Icon name={unsyncedFailed > 0 ? 'alert' : 'sync'} size={16} />
+				<span>{unsynced} unsynced</span>
+			</button>
+		{/if}
 		<span
 			class="live"
 			class:on={hub.connected}
@@ -107,6 +147,10 @@
 		<NavRail
 			open={drawerOpen}
 			onnavigate={() => (drawerOpen = false)}
+			oncompose={() => {
+				drawerOpen = false;
+				composer.open();
+			}}
 			onhelp={() => (helpOpen = true)}
 			onlogout={logout}
 		/>
@@ -120,6 +164,11 @@
 
 <HelpOverlay bind:open={helpOpen} />
 <LabelJump bind:open={labelJumpOpen} />
+<LabelPicker />
+<MovePicker />
+<UnsyncedPanel bind:open={unsyncedOpen} />
+<ComposeDock />
+<Toaster />
 
 <style>
 	.skip {
@@ -170,6 +219,33 @@
 
 	.menu:hover {
 		background: var(--hover);
+	}
+
+	.unsynced {
+		display: inline-flex;
+		flex: none;
+		align-items: center;
+		gap: 6px;
+		height: 32px;
+		margin-left: auto;
+		padding: 0 12px;
+		border: 1px solid var(--line-strong);
+		border-radius: 999px;
+		background: var(--surface);
+		color: var(--ink-2);
+		font-size: 12.5px;
+		font-weight: 600;
+		cursor: pointer;
+	}
+
+	.unsynced.failed {
+		border-color: color-mix(in oklab, var(--danger) 50%, transparent);
+		background: var(--danger-soft);
+		color: var(--danger);
+	}
+
+	.unsynced + .live {
+		margin-left: 0;
 	}
 
 	.live {
