@@ -1,27 +1,34 @@
-import type { OutboxItemDto, OutboxStatus, SendAckDto } from '../transport';
+import type { ChangesDto } from '@tagmail/api-types';
 import type { Notifier } from '../ops/ops.svelte';
-
-export const OUTBOX_POLL_MS = 700;
+import type { OutboxItemDto, OutboxStateDto, SendStatusDto } from '../transport';
 
 export interface OutboxApi {
-	send(opId: string, draftId: number): Promise<SendAckDto>;
+	send(body: { opId: string; draftId: number }): Promise<SendStatusDto>;
 	outbox(): Promise<OutboxItemDto[]>;
-	cancelOutbox(id: number): Promise<void>;
+	cancelOutbox(id: number): Promise<OutboxItemDto>;
+	retryOutbox(id: number): Promise<OutboxItemDto>;
 }
 
 export interface Sending {
 	opId: string;
-	draftId: number;
+	draftId: number | null;
 	subject: string;
-	status: OutboxStatus | 'sent';
+	status: OutboxStateDto;
 	error: string | null;
-	/** Outbox row id once the server listed it. */
+	/** Outbox item id once the server listed it. */
 	id: number | null;
+}
+
+/** Payload of an `outbox` change event. */
+interface OutboxChange {
+	status?: OutboxStateDto;
+	error?: string | null;
 }
 
 /**
  * Sent messages until the server confirms them: "Sending…" while queued,
- * "Message sent" once the outbox no longer lists it, Retry on failure.
+ * "Message sent" on the `sent` event, Retry on failure. Status arrives
+ * through `outbox` change events; the list is read only to learn item ids.
  */
 export class Outbox {
 	items = $state.raw<Sending[]>([]);
@@ -30,7 +37,7 @@ export class Outbox {
 	readonly #notify: Notifier;
 	readonly #reopen: (draftId: number) => void;
 	readonly #uuid: () => string;
-	#timer: ReturnType<typeof setTimeout> | null = null;
+	#syncing: Promise<void> | null = null;
 
 	constructor(
 		api: OutboxApi,
@@ -62,58 +69,96 @@ export class Outbox {
 	}
 
 	async retry(item: Sending): Promise<void> {
-		this.items = this.items.filter((i) => i !== item);
-		await this.send(item.draftId, item.subject);
-	}
-
-	async cancel(item: Sending): Promise<void> {
-		if (item.id === null || item.status === 'sending') return;
+		if (item.id === null) {
+			this.#update(item.opId, { status: 'queued', error: null });
+			await this.#post({ ...item, status: 'queued' });
+			return;
+		}
+		this.#update(item.opId, { status: 'queued', error: null });
 		try {
-			await this.#api.cancelOutbox(item.id);
-			this.items = this.items.filter((i) => i !== item);
-			this.#notify.dismissKey(`send:${item.opId}`);
-			this.#reopen(item.draftId);
+			const row = await this.#api.retryOutbox(item.id);
+			this.#update(item.opId, { status: row.status, error: row.error });
 		} catch (e) {
-			this.#notify.show(`Too late to cancel: ${e instanceof Error ? e.message : String(e)}`, {
-				tone: 'error'
-			});
+			this.#update(item.opId, { status: 'failed', error: message(e) });
 		}
 	}
 
+	async cancel(item: Sending): Promise<void> {
+		if (item.id === null || item.status !== 'queued') return;
+		try {
+			await this.#api.cancelOutbox(item.id);
+			this.items = this.items.filter((i) => i.opId !== item.opId);
+			this.#notify.dismissKey(`send:${item.opId}`);
+			if (item.draftId !== null) this.#reopen(item.draftId);
+		} catch (e) {
+			this.#notify.show(`Too late to cancel: ${message(e)}`, { tone: 'error' });
+		}
+	}
+
+	/** Forgets a failed send here; the item stays in the server's outbox. */
 	dismiss(item: Sending): void {
-		this.items = this.items.filter((i) => i !== item);
+		this.items = this.items.filter((i) => i.opId !== item.opId);
 		this.#notify.dismissKey(`send:${item.opId}`);
 	}
 
-	/** Failed sends from an earlier visit. */
-	async load(): Promise<void> {
+	/** Unsent items from an earlier visit; failed ones show in the unsynced panel. */
+	load(): Promise<void> {
+		this.#syncing ??= this.#sync().finally(() => (this.#syncing = null));
+		return this.#syncing;
+	}
+
+	changes(page: ChangesDto): void {
+		for (const change of page.changes) {
+			if (change.entity !== 'outbox') continue;
+			const item = this.items.find((i) => i.id === change.id);
+			if (change.op.kind === 'delete') {
+				if (item) this.dismiss(item);
+				continue;
+			}
+			const payload = (change.payload ?? {}) as OutboxChange;
+			if (!item) {
+				void this.load();
+				continue;
+			}
+			if (payload.status) {
+				this.#update(item.opId, { status: payload.status, error: payload.error ?? null });
+			}
+		}
+	}
+
+	async #sync(): Promise<void> {
 		const rows = await this.#api.outbox();
-		const known = new Set(this.items.map((i) => i.opId));
-		const restored = rows
-			.filter((r) => r.status === 'failed' && !known.has(r.opId))
-			.map((r) => ({
-				opId: r.opId,
-				draftId: r.draftId,
-				subject: r.subject,
-				status: r.status,
-				error: r.error ?? null,
-				id: r.id
-			}));
-		if (restored.length > 0) this.items = [...this.items, ...restored];
+		for (const row of rows) {
+			const known = this.items.find((i) => i.opId === row.opId);
+			if (known) {
+				this.#update(row.opId, { id: row.id, status: row.status, error: row.error });
+			} else if (row.status === 'failed' || row.status === 'queued' || row.status === 'sending') {
+				this.items = [
+					...this.items,
+					{
+						opId: row.opId,
+						draftId: row.draftId,
+						subject: row.subject,
+						status: row.status,
+						error: row.error,
+						id: row.id
+					}
+				];
+			}
+		}
 	}
 
 	async #post(item: Sending): Promise<void> {
 		this.#progress(item);
+		if (item.draftId === null) return;
 		try {
-			await this.#api.send(item.opId, item.draftId);
+			const ack = await this.#api.send({ opId: item.opId, draftId: item.draftId });
+			this.#update(item.opId, { status: ack.status });
 		} catch (e) {
-			this.#update(item.opId, {
-				status: 'failed',
-				error: e instanceof Error ? e.message : String(e)
-			});
+			this.#update(item.opId, { status: 'failed', error: message(e) });
 			return;
 		}
-		this.#schedule();
+		await this.load().catch(() => undefined);
 	}
 
 	#progress(item: Sending): void {
@@ -147,35 +192,15 @@ export class Outbox {
 		} else if (after.status === 'sent') {
 			this.items = this.items.filter((i) => i.opId !== opId);
 			this.#notify.show('Message sent', { key: `send:${opId}` });
-		} else if (before.id === null && after.id !== null) {
+		} else if (
+			(before.id === null && after.id !== null) ||
+			(before.status !== after.status && after.status !== 'failed')
+		) {
 			this.#progress(after);
 		}
 	}
+}
 
-	#schedule(): void {
-		if (this.#timer) return;
-		this.#timer = setTimeout(() => {
-			this.#timer = null;
-			void this.#poll();
-		}, OUTBOX_POLL_MS);
-	}
-
-	async #poll(): Promise<void> {
-		const active = this.items.filter((i) => i.status === 'queued' || i.status === 'sending');
-		if (active.length === 0) return;
-		let rows: OutboxItemDto[];
-		try {
-			rows = await this.#api.outbox();
-		} catch {
-			this.#schedule();
-			return;
-		}
-		const byOp = new Map(rows.map((r) => [r.opId, r]));
-		for (const item of active) {
-			const row = byOp.get(item.opId);
-			if (!row) this.#update(item.opId, { status: 'sent' });
-			else this.#update(item.opId, { status: row.status, error: row.error ?? null, id: row.id });
-		}
-		if (this.items.some((i) => i.status === 'queued' || i.status === 'sending')) this.#schedule();
-	}
+function message(e: unknown): string {
+	return e instanceof Error ? e.message : String(e);
 }

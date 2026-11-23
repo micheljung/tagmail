@@ -3,7 +3,7 @@ import {
 	ATTACHMENT_MAX_BYTES,
 	DRAFT_ATTACHMENTS_MAX_BYTES,
 	type AttachmentDto,
-	type DraftInput,
+	type DraftInputDto,
 	type ReplyMode
 } from '../transport';
 import { fileSize } from '../format';
@@ -12,8 +12,8 @@ import { parseAddresses, toRecipient, type Recipient } from './addresses';
 export const AUTOSAVE_MS = 1200;
 
 export interface DraftApi {
-	createDraft(draft: DraftInput): Promise<{ id: number }>;
-	updateDraft(id: number, draft: DraftInput): Promise<void>;
+	createDraft(draft: DraftInputDto): Promise<{ id: number }>;
+	updateDraft(id: number, draft: DraftInputDto): Promise<unknown>;
 	deleteDraft(id: number): Promise<void>;
 	uploadAttachment(
 		file: File,
@@ -42,7 +42,7 @@ export interface DraftInit {
 	cc?: AddressDto[];
 	bcc?: AddressDto[];
 	subject?: string;
-	html?: string;
+	html?: string | null;
 	inReplyTo?: number | null;
 	forwardOf?: number | null;
 	attachments?: AttachmentDto[];
@@ -160,9 +160,9 @@ export class Draft {
 		this.touch();
 	}
 
-	input(): DraftInput {
+	input(): DraftInputDto {
 		const plain = (list: Recipient[]) => list.map(({ name, email }) => ({ name, email }));
-		return {
+		const body: DraftInputDto = {
 			identityId: this.identityId ?? 0,
 			to: plain(this.to),
 			cc: plain(this.cc),
@@ -170,10 +170,11 @@ export class Draft {
 			subject: this.subject,
 			text: this.text,
 			html: this.html,
-			inReplyTo: this.inReplyTo,
-			forwardOf: this.forwardOf,
 			attachmentIds: this.uploads.filter((u) => u.id !== null).map((u) => u.id as string)
 		};
+		if (this.inReplyTo !== null) body.inReplyTo = this.inReplyTo;
+		if (this.forwardOf !== null) body.forwardOf = this.forwardOf;
+		return body;
 	}
 
 	/** Saves now (coalescing with a save in flight); resolves once stored. */

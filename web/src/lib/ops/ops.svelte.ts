@@ -1,5 +1,5 @@
 import type { ChangesDto, ThreadRowDto } from '@tagmail/api-types';
-import type { OpAckDto, OpDto, OpRequest, OpStatus, ViewId } from '../transport';
+import type { NewOpDto, OpDto, OpStatusDto, ViewId } from '../transport';
 import {
 	describeDone,
 	describeIntent,
@@ -9,6 +9,7 @@ import {
 	patchRow,
 	type Names,
 	type OpIntent,
+	type Origins,
 	type ViewContext
 } from './effects';
 
@@ -27,8 +28,8 @@ export interface OpList {
 }
 
 export interface OpsApi {
-	postOp(op: OpRequest): Promise<OpAckDto>;
-	retryOp(opId: string): Promise<OpAckDto>;
+	postOp(op: NewOpDto): Promise<OpDto>;
+	retryOp(opId: string): Promise<OpDto>;
 	discardOp(opId: string): Promise<void>;
 	ops(status: 'pending' | 'failed'): Promise<OpDto[]>;
 }
@@ -58,13 +59,15 @@ export interface OpsHost {
 	resendDelayMs?: number;
 }
 
-export type TrackedStatus = 'sending' | OpStatus;
+export type TrackedStatus = 'sending' | OpStatusDto;
 
 export interface TrackedOp {
 	readonly opId: string;
 	readonly intent: OpIntent;
 	/** The list it was started from, for undo. */
 	readonly view: ViewId | null;
+	/** Where the threads were, for undoing moves. */
+	readonly origins?: Origins;
 	status: TrackedStatus;
 	error: string | null;
 	/** The server has a record of it (so retry and discard go through the API). */
@@ -78,11 +81,16 @@ export interface TrackedOp {
 /** Network failures are re-sent with the same op id, at most this often. */
 export const MAX_RESENDS = 2;
 
-/** Change payload of an `op` entity. */
-interface OpChange {
-	opId?: string;
-	status?: OpStatus;
-	error?: string | null;
+/** Change payload of an `op` entity: the op on upsert, `{opId}` on delete. */
+type OpChange = Partial<OpDto> & { opId?: string };
+
+function intentOf(dto: OpDto): OpIntent {
+	return {
+		kind: dto.kind,
+		threadIds: dto.threadIds,
+		...(dto.label !== null ? { label: dto.label } : {}),
+		...(dto.mailboxId !== null ? { mailboxId: dto.mailboxId } : {})
+	};
 }
 
 function lowerFirst(s: string): string {
@@ -149,11 +157,15 @@ export class OpsStore {
 	}
 
 	/** Starts an op: applies it here, sends it, and offers Undo. */
-	run(intent: OpIntent, options: { view?: ViewId | null; undoOf?: TrackedOp } = {}): TrackedOp {
+	run(
+		intent: OpIntent,
+		options: { view?: ViewId | null; origins?: Origins; undoOf?: TrackedOp } = {}
+	): TrackedOp {
 		const op: TrackedOp = {
 			opId: this.#host.uuid?.() ?? crypto.randomUUID(),
 			intent,
 			view: options.view ?? null,
+			origins: options.origins,
 			status: 'sending',
 			error: null,
 			serverKnown: false,
@@ -163,7 +175,7 @@ export class OpsStore {
 		};
 		this.#ops.set(op.opId, op);
 		this.#activate(op, options.undoOf);
-		const inverse = op.view ? inverseOf(intent, op.view, this.#host.context()) : null;
+		const inverse = this.#inverse(op);
 		this.#host.notify.show(describeDone(intent, this.#host.names()), {
 			key: `op:${op.opId}`,
 			actions: inverse ? [{ label: 'Undo', run: () => this.undo(op) }] : []
@@ -172,16 +184,21 @@ export class OpsStore {
 		return op;
 	}
 
-	undo(op: TrackedOp): TrackedOp | null {
-		if (!op.view) return null;
-		const inverse = inverseOf(op.intent, op.view, this.#host.context());
-		if (!inverse) return null;
+	/** Takes `op` back with its inverse ops; returns them. */
+	undo(op: TrackedOp): TrackedOp[] {
+		const inverse = this.#inverse(op);
+		if (!inverse) return [];
 		this.#host.notify.dismissKey(`op:${op.opId}`);
 		if (op.status === 'failed') {
 			void this.discard(op);
-			return null;
+			return [];
 		}
-		return this.run(inverse, { view: op.view, undoOf: op });
+		return inverse.map((intent) => this.run(intent, { view: op.view, undoOf: op }));
+	}
+
+	#inverse(op: TrackedOp): OpIntent[] | null {
+		if (!op.view && !op.origins) return null;
+		return inverseOf(op.intent, op.view ?? 'inbox', this.#host.context(), op.origins);
 	}
 
 	async retry(snapshot: TrackedOp): Promise<void> {
@@ -229,18 +246,13 @@ export class OpsStore {
 			}
 			this.#ops.set(dto.opId, {
 				opId: dto.opId,
-				intent: {
-					kind: dto.kind,
-					threadIds: dto.threadIds ?? [],
-					...(dto.label ? { label: dto.label } : {}),
-					...(dto.mailboxId != null ? { mailboxId: dto.mailboxId } : {})
-				},
+				intent: intentOf(dto),
 				view: null,
 				status: dto.status,
 				error: dto.error ?? null,
 				serverKnown: true,
 				applied: false,
-				createdAt: (dto.createdAt ?? 0) * 1000,
+				createdAt: dto.createdAt * 1000,
 				removed: []
 			});
 		}
@@ -250,10 +262,18 @@ export class OpsStore {
 	/** Change feed: `op` entities carry the executor's verdict. */
 	changes(page: ChangesDto): void {
 		for (const change of page.changes) {
-			if ((change.entity as string) !== 'op') continue;
+			if (change.entity !== 'op') continue;
 			const payload = (change.payload ?? {}) as OpChange;
 			const op = payload.opId ? this.#ops.get(payload.opId) : undefined;
-			if (!op || !payload.status) continue;
+			if (change.op.kind === 'delete') {
+				if (op) this.#forget(op);
+				continue;
+			}
+			if (!payload.opId || !payload.status) continue;
+			if (!op) {
+				if (payload.status !== 'done' && payload.kind) this.#adopt(payload as OpDto);
+				continue;
+			}
 			op.serverKnown = true;
 			if (payload.status === 'done') this.#done(op);
 			else if (payload.status === 'failed' && op.status !== 'failed') {
@@ -262,12 +282,35 @@ export class OpsStore {
 		}
 	}
 
+	/** An op another tab or device started: listed, its effect is in the server's rows. */
+	#adopt(dto: OpDto): void {
+		this.#ops.set(dto.opId, {
+			opId: dto.opId,
+			intent: intentOf(dto),
+			view: null,
+			status: dto.status,
+			error: dto.error,
+			serverKnown: true,
+			applied: false,
+			createdAt: dto.createdAt * 1000,
+			removed: []
+		});
+		this.version++;
+	}
+
+	#forget(op: TrackedOp): void {
+		this.#deactivate(op);
+		this.#ops.delete(op.opId);
+		this.#host.notify.dismissKey(`op:${op.opId}`);
+		this.version++;
+	}
+
 	async #send(op: TrackedOp, resends: number): Promise<void> {
 		const { kind, threadIds, emailIds, label, mailboxId } = op.intent;
-		const request: OpRequest = { opId: op.opId, kind, threadIds };
+		const request: NewOpDto = { opId: op.opId, kind, threadIds };
 		if (emailIds) request.emailIds = emailIds;
-		if (label !== undefined) request.label = label;
-		if (mailboxId !== undefined) request.mailboxId = mailboxId;
+		if (label != null) request.label = label;
+		if (mailboxId != null) request.mailboxId = mailboxId;
 		try {
 			this.#ack(op, await this.#host.api.postOp(request));
 		} catch (e) {
@@ -281,11 +324,13 @@ export class OpsStore {
 		}
 	}
 
-	#ack(op: TrackedOp, ack: OpAckDto): void {
+	#ack(op: TrackedOp, ack: OpDto): void {
 		if (!this.#ops.has(op.opId)) return;
 		op.serverKnown = true;
 		if (ack.status === 'done') return this.#done(op);
-		if (ack.status === 'failed') return this.#fail(op, 'The mail server refused the change');
+		if (ack.status === 'failed') {
+			return this.#fail(op, ack.error ?? 'The mail server refused the change');
+		}
 		if (op.status === 'sending') op.status = 'pending';
 		this.version++;
 	}
@@ -320,14 +365,18 @@ export class OpsStore {
 	#activate(op: TrackedOp, undoOf?: TrackedOp): void {
 		if (op.applied) return;
 		const ctx = this.#host.context();
+		const mine = new Set(op.intent.threadIds);
 		for (const list of this.#host.lists()) {
-			if (leavesView(op.intent, list.view, ctx)) {
+			const back = undoOf?.removed
+				.find((r) => r.list === list)
+				?.entries.filter((e) => mine.has(e.id));
+			if (back?.length) {
+				list.putBack(back);
+			} else if (leavesView(op.intent, list.view, ctx)) {
 				const entries = list.takeOut(op.intent.threadIds);
 				if (entries.length > 0) op.removed.push({ list, entries });
 			} else if (joinsView(op.intent, list.view, ctx)) {
-				const back = undoOf?.removed.find((r) => r.list === list);
-				if (back) list.putBack(back.entries);
-				else list.scheduleRefetch();
+				list.scheduleRefetch();
 			}
 		}
 		op.applied = true;

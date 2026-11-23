@@ -3,7 +3,9 @@ import { LABELS, idAt, rowAt } from './mock/fixture.ts';
 import { expect, list, openInbox, row, test } from './helpers.ts';
 
 function total(page: Page, n: number) {
-	return expect(page.locator('.total')).toHaveText(`${n.toLocaleString('en-US')} conversations`);
+	return expect(page.locator('.total')).toHaveText(
+		`${n.toLocaleString('en-US')} conversation${n === 1 ? '' : 's'}`
+	);
 }
 
 function toast(page: Page, text: string | RegExp) {
@@ -218,12 +220,45 @@ test('labels can be created, colored, renamed and deleted in settings', async ({
 	await item.getByRole('button', { name: 'Rename' }).click();
 	await item.getByLabel('New name for Invoices').fill('Bills');
 	await item.getByLabel('New name for Invoices').press('Enter');
-	await expect(item.getByRole('status')).toContainText('Renaming on the server');
-	await expect(item.getByRole('status')).toHaveCount(0);
+	const bills = page.locator('li[data-label="bills"]');
+	await expect(bills.getByRole('status')).toContainText('Renaming on the server');
+	await expect(bills.getByRole('status')).toHaveCount(0);
+	await expect(item).toHaveCount(0);
 	await expect(page.getByRole('navigation').getByRole('link', { name: 'Bills' })).toBeVisible();
 
-	await item.getByRole('button', { name: 'Delete' }).click();
-	await item.getByRole('button', { name: 'Delete' }).click();
-	await expect(item).toHaveCount(0);
+	await bills.getByRole('button', { name: 'Delete' }).click();
+	await bills.getByRole('button', { name: 'Delete' }).click();
+	await expect(bills).toHaveCount(0);
 	await expect(page.getByRole('navigation').getByRole('link', { name: 'Bills' })).toHaveCount(0);
+});
+
+test('renaming a label keeps its conversations under the new name', async ({ page }) => {
+	const label = LABELS.find((l) => l.key === 'finance')!;
+	await page.goto(`/label/${label.key}`);
+	const view = page.getByRole('listbox', { name: `Label ${label.name}` });
+	await expect(view.locator('[data-loaded]').first()).toBeVisible();
+	const count = await page.locator('.total').textContent();
+	await page.getByRole('link', { name: 'Manage labels' }).click();
+	const item = page.locator(`li[data-label="${label.key}"]`);
+	await item.getByRole('button', { name: 'Rename' }).click();
+	await item.getByLabel(`New name for ${label.name}`).fill('Money');
+	await item.getByLabel(`New name for ${label.name}`).press('Enter');
+	await expect(page.locator('li[data-label="money"]').getByRole('status')).toBeVisible();
+	await page.getByRole('navigation').getByRole('link', { name: 'Money' }).click();
+	await expect(page).toHaveURL(/\/label\/money$/);
+	await expect(page.locator('.total')).toHaveText(count!);
+});
+
+test('undo returns trashed threads from a label list to their own folders', async ({ page }) => {
+	const label = LABELS.find((l) => l.key === 'travel')!;
+	await page.goto(`/label/${label.key}`);
+	const view = page.getByRole('listbox', { name: `Label ${label.name}` });
+	await expect(view.locator('[data-loaded]').first()).toBeVisible();
+	await view.focus();
+	const first = await row(page, 0).getAttribute('id');
+	await page.keyboard.press('#');
+	await toast(page, 'Moved 1 conversation to Trash').getByRole('button', { name: 'Undo' }).click();
+	await expect(row(page, 0)).toHaveId(first!);
+	await page.goto('/inbox');
+	await total(page, 100_000);
 });

@@ -15,6 +15,7 @@ interface ThreadPayload {
 	lastDate?: number;
 	mailboxes?: number[];
 	removedFrom?: number[];
+	labels?: string[];
 }
 
 interface MessagePayload {
@@ -248,6 +249,9 @@ export class ThreadList implements ChangeListener, OpList {
 	}
 
 	#member(payload: ThreadPayload): boolean | undefined {
+		if (this.view.startsWith('label:')) {
+			return payload.labels?.includes(this.view.slice('label:'.length));
+		}
 		const boxes = payload.mailboxes;
 		if (!boxes) return undefined;
 		if (this.view === 'inbox') {

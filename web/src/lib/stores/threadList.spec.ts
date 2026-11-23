@@ -22,7 +22,8 @@ function row(id: number, lastDate: number): ThreadRowDto {
 		starred: false,
 		hasAttachment: false,
 		senders: [],
-		labels: []
+		labels: [],
+		mailboxIds: [1]
 	};
 }
 

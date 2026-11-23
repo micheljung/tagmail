@@ -16,7 +16,8 @@ const ROW: ThreadRowDto = {
 	starred: false,
 	hasAttachment: false,
 	senders: [],
-	labels: ['b']
+	labels: ['b'],
+	mailboxIds: [1]
 };
 
 const intent = (kind: OpIntent['kind'], extra: Partial<OpIntent> = {}): OpIntent => ({
@@ -71,18 +72,40 @@ describe('list membership', () => {
 
 describe('inverseOf', () => {
 	it('pairs reversible ops', () => {
-		expect(inverseOf(intent('star'), 'inbox', ctx)?.kind).toBe('unstar');
-		expect(inverseOf(intent('label.add', { label: 'x' }), 'inbox', ctx)).toEqual(
+		expect(inverseOf(intent('star'), 'inbox', ctx)?.[0].kind).toBe('unstar');
+		expect(inverseOf(intent('label.add', { label: 'x' }), 'inbox', ctx)).toEqual([
 			intent('label.remove', { label: 'x' })
-		);
-		expect(inverseOf(intent('archive'), 'label:b', ctx)?.kind).toBe('unarchive');
+		]);
+		expect(inverseOf(intent('archive'), 'label:b', ctx)?.[0].kind).toBe('unarchive');
 	});
 
-	it('undoes moves only where the old folder is known', () => {
-		expect(inverseOf(intent('trash'), 'inbox', ctx)?.kind).toBe('unarchive');
-		expect(inverseOf(intent('trash'), 'mailbox:3', ctx)).toEqual(intent('move', { mailboxId: 3 }));
+	it('without origins undoes moves only where the list names the folder', () => {
+		expect(inverseOf(intent('trash'), 'inbox', ctx)?.[0].kind).toBe('unarchive');
+		expect(inverseOf(intent('trash'), 'mailbox:3', ctx)).toEqual([
+			intent('move', { mailboxId: 3 })
+		]);
 		expect(inverseOf(intent('trash'), 'label:b', ctx)).toBeNull();
 		expect(inverseOf(intent('delete'), 'mailbox:4', ctx)).toBeNull();
+	});
+
+	it('with origins returns every thread to where it was', () => {
+		const origins = new Map([
+			[1, [1, 3]],
+			[2, [3]],
+			[3, [6]],
+			[4, [3]]
+		]);
+		const trash: OpIntent = { kind: 'trash', threadIds: [1, 2, 3, 4] };
+		expect(inverseOf(trash, 'search:x', ctx, origins)).toEqual([
+			{ kind: 'unarchive', threadIds: [1] },
+			{ kind: 'move', mailboxId: 3, threadIds: [2, 4] },
+			{ kind: 'move', mailboxId: 6, threadIds: [3] }
+		]);
+		const move: OpIntent = { kind: 'move', mailboxId: 6, threadIds: [3] };
+		expect(inverseOf(move, 'label:b', ctx, new Map([[3, [6, 3]]]))).toEqual([
+			{ kind: 'move', mailboxId: 3, threadIds: [3] }
+		]);
+		expect(inverseOf(trash, 'label:b', ctx, new Map([[1, [1]]]))).toBeNull();
 	});
 });
 

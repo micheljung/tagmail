@@ -26,12 +26,17 @@ function inTrash(view: ViewId | null): boolean {
 	return nav.mailboxes.some((m) => m.id === id && m.specialUse === 'trash');
 }
 
+/** Where the rows' threads live now, so a move can be undone from any list. */
+export function originsOf(rows: readonly ThreadRowDto[]): Map<number, number[]> {
+	return new Map(rows.map((r) => [r.id, r.mailboxIds]));
+}
+
 /** Runs a write shortcut or toolbar action on `target`; returns whether it applied. */
 export function act(action: ShortcutAction, target: ActionTarget): boolean {
 	const { threadIds, rows, view } = target;
 	if (threadIds.length === 0) return false;
 	const run = (kind: Parameters<typeof ops.run>[0]['kind']) =>
-		ops.run({ kind, threadIds }, { view });
+		ops.run({ kind, threadIds }, { view, origins: originsOf(rows) });
 	switch (action) {
 		case 'archive':
 			run('archive');

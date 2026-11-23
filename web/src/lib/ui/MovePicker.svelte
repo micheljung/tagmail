@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { pickers } from '../ops/actions.svelte';
+	import { originsOf, pickers } from '../ops/actions.svelte';
 	import { isInbox, nav, ops } from '../stores';
 	import type { MailboxDto } from '../transport';
 	import Icon, { type IconName } from './Icon.svelte';
@@ -58,7 +58,7 @@
 			kind === 'move'
 				? { kind, mailboxId: m.id, threadIds: t.threadIds }
 				: { kind, threadIds: t.threadIds },
-			{ view: t.view }
+			{ view: t.view, origins: originsOf(t.rows) }
 		);
 		close();
 	}

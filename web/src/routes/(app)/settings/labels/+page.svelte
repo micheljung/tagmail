@@ -2,7 +2,7 @@
 	import { APP_NAME } from '#lib/document-title.ts';
 	import { labelColor } from '#lib/format.ts';
 	import { findByName } from '#lib/ops/labels.ts';
-	import { nav, toasts } from '#lib/stores/index.ts';
+	import { hub, nav, toasts } from '#lib/stores/index.ts';
 	import { api, type LabelDto, type LabelJobDto } from '#lib/transport/index.ts';
 	import { errorText } from '#lib/ui/errors.ts';
 	import Icon from '#lib/ui/Icon.svelte';
@@ -22,7 +22,6 @@
 		'#c2468f',
 		'#7a7f87'
 	];
-	const JOB_POLL_MS = 600;
 
 	let newName = $state('');
 	let newColor = $state<string | null>(null);
@@ -32,32 +31,57 @@
 	let draftName = $state('');
 	let colorFor = $state<string | null>(null);
 	let confirmDelete = $state<string | null>(null);
-	const jobs = new SvelteMap<string, LabelJobDto>();
-	let polling: ReturnType<typeof setTimeout> | null = null;
+	/** Running label jobs by job id; `label_job` change events keep them current. */
+	const jobs = new SvelteMap<number, LabelJobDto>();
 
 	onMount(() => {
 		void nav.load();
-		void pollJobs();
-		return () => {
-			if (polling) clearTimeout(polling);
-		};
+		void loadJobs();
+		return hub.subscribe({
+			changes(page) {
+				for (const c of page.changes) {
+					if (c.entity !== 'label_job' || !c.payload) continue;
+					track(c.payload as LabelJobDto);
+				}
+			},
+			async reset() {
+				await loadJobs();
+				return undefined;
+			}
+		});
 	});
 
-	async function pollJobs() {
-		polling = null;
+	async function loadJobs() {
 		try {
 			const list = await api.labelJobs();
 			jobs.clear();
-			for (const job of list) if (job.status === 'running') jobs.set(job.label, job);
-			if (jobs.size > 0) polling = setTimeout(() => void pollJobs(), JOB_POLL_MS);
-			else await nav.load();
-		} catch {
-			jobs.clear();
+			for (const job of list) track(job);
+		} catch (e) {
+			error = errorText(e);
 		}
 	}
 
-	function watchJobs() {
-		if (!polling) polling = setTimeout(() => void pollJobs(), JOB_POLL_MS);
+	function track(job: LabelJobDto) {
+		if (job.status === 'running') {
+			jobs.set(job.id, job);
+			return;
+		}
+		jobs.delete(job.id);
+		if (job.status === 'failed') {
+			error = `Couldn't ${job.kind} “${nav.labelName(job.label)}”: ${job.error ?? 'the server stopped the job'}`;
+		}
+		void nav.load();
+	}
+
+	/** The job working on the label shown under `key` (a rename's new key). */
+	function jobFor(key: string): LabelJobDto | undefined {
+		for (const job of jobs.values()) if ((job.to ?? job.label) === key) return job;
+		return undefined;
+	}
+
+	/** Several accounts carry a label: one job each, shown summed. */
+	function jobsFor(key: string): LabelJobDto[] {
+		return [...jobs.values()].filter((job) => (job.to ?? job.label) === key);
 	}
 
 	async function create(event: SubmitEvent) {
@@ -71,7 +95,7 @@
 		busy = 'create';
 		error = null;
 		try {
-			const label = await api.createLabel(name, newColor);
+			const label = await api.createLabel(newColor ? { name, color: newColor } : { name });
 			await nav.load();
 			newName = '';
 			newColor = null;
@@ -98,19 +122,8 @@
 		busy = label.key;
 		error = null;
 		try {
-			const { label: renamed, jobId } = await api.updateLabel(label.key, { name });
-			if (jobId != null) {
-				jobs.set(renamed.key, {
-					id: jobId,
-					label: renamed.key,
-					kind: 'rename',
-					done: 0,
-					total: 0,
-					status: 'running'
-				});
-				watchJobs();
-			}
-			await nav.load();
+			await api.updateLabel(label.key, { name });
+			await Promise.all([nav.load(), loadJobs()]);
 		} catch (e) {
 			error = errorText(e);
 		} finally {
@@ -122,7 +135,7 @@
 		colorFor = null;
 		busy = label.key;
 		try {
-			await api.updateLabel(label.key, { color });
+			await api.updateLabel(label.key, { color: color ?? '' });
 			await nav.load();
 		} catch (e) {
 			error = errorText(e);
@@ -137,8 +150,7 @@
 		error = null;
 		try {
 			await api.deleteLabel(label.key);
-			await nav.load();
-			watchJobs();
+			await Promise.all([nav.load(), loadJobs()]);
 			toasts.show(`Deleted label “${label.name}”`);
 		} catch (e) {
 			error = errorText(e);
@@ -147,9 +159,14 @@
 		}
 	}
 
-	function progress(job: LabelJobDto): string {
-		if (job.total === 0) return 'Starting…';
-		return `${Math.round((job.done / job.total) * 100)}%`;
+	function progress(list: LabelJobDto[]): { done: number; total: number; text: string } {
+		const done = list.reduce((n, j) => n + j.done, 0);
+		const total = list.reduce((n, j) => n + j.total, 0);
+		return {
+			done,
+			total,
+			text: total === 0 ? 'Starting…' : `${Math.round((done / total) * 100)}%`
+		};
 	}
 </script>
 
@@ -210,7 +227,8 @@
 		{:else}
 			<ul class="items">
 				{#each nav.labels as label (label.key)}
-					{@const job = jobs.get(label.key)}
+					{@const job = jobFor(label.key)}
+					{@const running = jobsFor(label.key)}
 					<li data-label={label.key}>
 						<div class="pick">
 							<button
@@ -264,9 +282,10 @@
 								<strong>{label.name}</strong>
 							{/if}
 							{#if job}
+								{@const p = progress(running)}
 								<span class="job" role="status">
-									{job.kind === 'rename' ? 'Renaming' : 'Deleting'} on the server · {progress(job)}
-									<progress max={job.total || 1} value={job.done} aria-label="Progress"></progress>
+									{job.kind === 'rename' ? 'Renaming' : 'Deleting'} on the server · {p.text}
+									<progress max={p.total || 1} value={p.done} aria-label="Progress"></progress>
 								</span>
 							{/if}
 						</div>

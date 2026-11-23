@@ -75,7 +75,7 @@
 		busy = true;
 		error = null;
 		try {
-			const label = await api.createLabel(name);
+			const label = await api.createLabel({ name });
 			await nav.load();
 			const final = new Map(current);
 			final.set(label.key, 'all');

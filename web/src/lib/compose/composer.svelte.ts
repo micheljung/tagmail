@@ -1,4 +1,4 @@
-import { toasts } from '../stores';
+import { hub, toasts } from '../stores';
 import { api, type IdentityDto, type ReplyMode } from '../transport';
 import { errorText } from '../ui/errors';
 import { Draft, type DraftInit } from './draft.svelte';
@@ -60,7 +60,16 @@ class Composer {
 		try {
 			await this.loadIdentities().catch(() => undefined);
 			const d = await api.draft(draftId);
-			this.open({ ...d, draftId: d.id, attachments: d.attachments ?? [] });
+			this.open({
+				identityId: d.identityId,
+				to: d.to,
+				cc: d.cc,
+				bcc: d.bcc,
+				subject: d.subject,
+				html: d.html,
+				attachments: d.attachments,
+				draftId: d.id
+			});
 		} catch (e) {
 			toasts.show(`Couldn't reopen the draft: ${errorText(e)}`, { tone: 'error' });
 		}
@@ -96,3 +105,11 @@ class Composer {
 
 export const composer = new Composer();
 export const outbox = new Outbox(api, toasts, (id) => void composer.reopen(id));
+
+hub.subscribe({
+	changes: (page) => outbox.changes(page),
+	async reset() {
+		await outbox.load().catch(() => undefined);
+		return undefined;
+	}
+});

@@ -56,8 +56,8 @@ export async function signIn(page: Page): Promise<void> {
 	expect(resp.ok()).toBe(true);
 }
 
-export function list(page: Page) {
-	return page.getByRole('listbox', { name: 'Inbox' });
+export function list(page: Page, name = 'Inbox') {
+	return page.getByRole('listbox', { name });
 }
 
 export function row(page: Page, index: number) {

@@ -23,18 +23,24 @@ import { CSRF_HEADER, CSRF_VALUE } from './http';
 import type {
 	AttachmentDto,
 	DraftDto,
-	DraftInput,
+	DraftInputDto,
+	IdentitiesDto,
 	IdentityDto,
+	LabelChangeDto,
 	LabelJobDto,
-	LabelUpdateDto,
-	OpAckDto,
+	LabelJobsDto,
+	LabelPatchDto,
+	NewLabelDto,
+	NewOpDto,
 	OpDto,
-	OpRequest,
+	OpsDto,
+	OutboxDto,
 	OutboxItemDto,
 	ReplyDraftDto,
 	ReplyMode,
-	SendAckDto
-} from './write';
+	SendDto,
+	SendStatusDto
+} from '@tagmail/api-types';
 
 export const CURSOR_HEADER = 'x-tagmail-cursor';
 
@@ -204,48 +210,48 @@ export class Api {
 		return this.#post<PairingCodeDto>('/api/pairing');
 	}
 
-	postOp(op: OpRequest): Promise<OpAckDto> {
-		return this.#post<OpAckDto>('/api/ops', op);
+	postOp(op: NewOpDto): Promise<OpDto> {
+		return this.#post<OpDto>('/api/ops', op);
 	}
 
 	async ops(status: 'pending' | 'failed'): Promise<OpDto[]> {
-		return (await this.#json<{ ops: OpDto[] }>(`/api/ops?status=${status}`)).ops;
+		return (await this.#json<OpsDto>(`/api/ops?status=${status}`)).ops;
 	}
 
-	retryOp(opId: string): Promise<OpAckDto> {
-		return this.#post<OpAckDto>(`/api/ops/${encodeURIComponent(opId)}/retry`);
+	retryOp(opId: string): Promise<OpDto> {
+		return this.#post<OpDto>(`/api/ops/${encodeURIComponent(opId)}/retry`);
 	}
 
 	discardOp(opId: string): Promise<void> {
 		return this.#empty(`/api/ops/${encodeURIComponent(opId)}`, 'DELETE');
 	}
 
-	createLabel(name: string, color?: string | null): Promise<LabelDto> {
-		return this.#post<LabelDto>('/api/labels', color ? { name, color } : { name });
+	createLabel(label: NewLabelDto): Promise<LabelDto> {
+		return this.#post<LabelDto>('/api/labels', label);
 	}
 
-	updateLabel(
-		key: string,
-		change: { name?: string; color?: string | null }
-	): Promise<LabelUpdateDto> {
-		return this.#post<LabelUpdateDto>(`/api/labels/${encodeURIComponent(key)}`, change, 'PATCH');
+	/** A new name may change the key (`label.key` of the answer); `color: ''` clears it. */
+	updateLabel(key: string, change: LabelPatchDto): Promise<LabelChangeDto> {
+		return this.#post<LabelChangeDto>(`/api/labels/${encodeURIComponent(key)}`, change, 'PATCH');
 	}
 
-	deleteLabel(key: string): Promise<void> {
-		return this.#empty(`/api/labels/${encodeURIComponent(key)}`, 'DELETE');
+	deleteLabel(key: string): Promise<LabelChangeDto> {
+		return this.#post<LabelChangeDto>(
+			`/api/labels/${encodeURIComponent(key)}`,
+			undefined,
+			'DELETE'
+		);
 	}
 
 	async labelJobs(): Promise<LabelJobDto[]> {
-		const body = await this.#json<LabelJobDto[] | { jobs: LabelJobDto[] }>('/api/label-jobs');
-		return Array.isArray(body) ? body : body.jobs;
+		return (await this.#json<LabelJobsDto>('/api/label-jobs')).jobs;
 	}
 
 	async identities(): Promise<IdentityDto[]> {
-		const body = await this.#json<IdentityDto[] | { identities: IdentityDto[] }>('/api/identities');
-		return Array.isArray(body) ? body : body.identities;
+		return (await this.#json<IdentitiesDto>('/api/identities')).identities;
 	}
 
-	/** Multipart upload with progress; `fetch` cannot report upload progress. */
+	/** Multipart upload (field `file`) with progress; `fetch` cannot report upload progress. */
 	uploadAttachment(
 		file: File,
 		onProgress: (loaded: number, total: number) => void,
@@ -281,12 +287,12 @@ export class Api {
 		return this.#empty(`/api/attachments/${encodeURIComponent(id)}`, 'DELETE');
 	}
 
-	createDraft(draft: DraftInput): Promise<{ id: number }> {
-		return this.#post<{ id: number }>('/api/drafts', draft);
+	createDraft(draft: DraftInputDto): Promise<DraftDto> {
+		return this.#post<DraftDto>('/api/drafts', draft);
 	}
 
-	updateDraft(id: number, draft: DraftInput): Promise<void> {
-		return this.#empty(`/api/drafts/${id}`, 'PUT', draft);
+	updateDraft(id: number, draft: DraftInputDto): Promise<DraftDto> {
+		return this.#post<DraftDto>(`/api/drafts/${id}`, draft, 'PUT');
 	}
 
 	draft(id: number): Promise<DraftDto> {
@@ -297,17 +303,20 @@ export class Api {
 		return this.#empty(`/api/drafts/${id}`, 'DELETE');
 	}
 
-	send(opId: string, draftId: number): Promise<SendAckDto> {
-		return this.#post<SendAckDto>('/api/send', { opId, draftId });
+	send(body: SendDto): Promise<SendStatusDto> {
+		return this.#post<SendStatusDto>('/api/send', body);
 	}
 
 	async outbox(): Promise<OutboxItemDto[]> {
-		const body = await this.#json<OutboxItemDto[] | { items: OutboxItemDto[] }>('/api/outbox');
-		return Array.isArray(body) ? body : body.items;
+		return (await this.#json<OutboxDto>('/api/outbox')).items;
 	}
 
-	cancelOutbox(id: number): Promise<void> {
-		return this.#empty(`/api/outbox/${id}`, 'DELETE');
+	cancelOutbox(id: number): Promise<OutboxItemDto> {
+		return this.#post<OutboxItemDto>(`/api/outbox/${id}`, undefined, 'DELETE');
+	}
+
+	retryOutbox(id: number): Promise<OutboxItemDto> {
+		return this.#post<OutboxItemDto>(`/api/outbox/${id}/retry`);
 	}
 
 	replyDraft(messageId: number, mode: ReplyMode): Promise<ReplyDraftDto> {

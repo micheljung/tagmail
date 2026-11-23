@@ -54,6 +54,8 @@
 			void goto(error.code === 'setup_required' ? '/setup' : `/login?next=${next}`);
 		};
 		void nav.load();
+		// Outbox and op events matter on every page, not only once a list loaded.
+		if (!hub.running) hub.start(undefined);
 		void ops.load().catch(() => undefined);
 		void outbox.load().catch(() => undefined);
 		void composer.loadIdentities().catch(() => undefined);

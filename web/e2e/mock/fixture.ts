@@ -22,6 +22,8 @@ export interface Row {
 	hasAttachment: boolean;
 	senders: Address[];
 	labels: string[];
+	/** Mailboxes whose list shows the thread. */
+	mailboxIds: number[];
 }
 
 export const LABELS = [
@@ -146,7 +148,8 @@ export function rowAt(i: number): Row {
 		starred: r() < 0.06,
 		hasAttachment: r() < 0.12,
 		senders,
-		labels: labels.sort()
+		labels: labels.sort(),
+		mailboxIds: [1]
 	};
 }
 
