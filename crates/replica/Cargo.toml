@@ -11,20 +11,26 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-reqwest = { workspace = true, features = ["rustls-no-provider"] }
+base64.workspace = true
+futures-util.workspace = true
+reqwest = { workspace = true, features = ["rustls-no-provider", "stream"] }
 rusqlite.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tagmail-api-core.workspace = true
+tagmail-api-core = { workspace = true, features = ["sqlite"] }
 tagmail-core.workspace = true
 tagmail-store.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing.workspace = true
 url.workspace = true
 webpki-roots.workspace = true
+zeroize.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
+reqwest = { workspace = true, features = ["rustls-no-provider", "json"] }
+tagmail-api-server = { path = "../api-server" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util"] }

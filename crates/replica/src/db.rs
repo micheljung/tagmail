@@ -7,8 +7,11 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use tagmail_api_core::replica_dto::SNAPSHOT_FORMAT;
+use tagmail_api_core::sqlite_store::SqliteStore;
 use tagmail_core::{CacheEpoch, ChangeCursor};
-use tagmail_store::{CacheDb, ConfigDb};
+use tagmail_store::credentials::KEY_LEN;
+use tagmail_store::{BlobStore, CacheDb, ConfigDb, MasterKey};
+use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
 
@@ -18,6 +21,7 @@ const OLD_DIR: &str = "replica.old";
 const DURABLE_FILE: &str = "replica-durable.db";
 const CACHE_FILE: &str = "cache.db";
 const CONFIG_FILE: &str = "config.db";
+const BLOBS_DIR: &str = "blobs";
 
 const KEY_FORMAT: &str = "replica_snapshot_format";
 const KEY_SERVER_EPOCH: &str = "replica_server_epoch";
@@ -62,6 +66,10 @@ impl Layout {
 
     pub fn discard(&self) -> Result<()> {
         remove_dir(&self.replica())?;
+        self.discard_tmp()
+    }
+
+    pub fn discard_tmp(&self) -> Result<()> {
         remove_dir(&self.replica_tmp())
     }
 }
@@ -136,10 +144,20 @@ pub enum Discard {
 pub struct LocalDbs {
     pub cache: CacheDb,
     pub config: ConfigDb,
+    pub blobs: BlobStore,
     pub meta: ReplicaMeta,
 }
 
 impl LocalDbs {
+    /// The same store the server reads through, over the replica.
+    pub async fn into_store(self) -> Result<(SqliteStore, ReplicaMeta)> {
+        // The replica's config holds no account secrets, so its vault key
+        // protects nothing and need not be kept anywhere.
+        let master = MasterKey::from_bytes(Zeroizing::new([0; KEY_LEN]));
+        let store = SqliteStore::open(self.config, self.cache, self.blobs, &master).await?;
+        Ok((store, self.meta))
+    }
+
     pub async fn close(self) -> Result<()> {
         self.cache.close().await?;
         self.config.close().await?;
@@ -172,17 +190,19 @@ pub fn open(
     Ok(Opened::Ready(LocalDbs {
         cache: CacheDb::open(&dir.join(CACHE_FILE))?,
         config: ConfigDb::open(&dir.join(CONFIG_FILE))?,
+        blobs: BlobStore::open(&dir.join(BLOBS_DIR))?,
         meta,
     }))
 }
 
 /// Opens fresh databases in `dir` for an import.
-pub fn create(dir: &Path) -> Result<(CacheDb, ConfigDb)> {
+pub fn create(dir: &Path) -> Result<(CacheDb, ConfigDb, BlobStore)> {
     remove_dir(dir)?;
     std::fs::create_dir_all(dir)?;
     Ok((
         CacheDb::open(&dir.join(CACHE_FILE))?,
         ConfigDb::open(&dir.join(CONFIG_FILE))?,
+        BlobStore::open(&dir.join(BLOBS_DIR))?,
     ))
 }
 
@@ -271,7 +291,7 @@ mod tests {
     }
 
     async fn bootstrapped(layout: &Layout, meta: Option<ReplicaMeta>) {
-        let (cache, config) = create(&layout.replica()).unwrap();
+        let (cache, config, _) = create(&layout.replica()).unwrap();
         if let Some(meta) = meta {
             cache.write(move |tx| meta.write(tx)).await.unwrap();
         }
@@ -389,7 +409,7 @@ mod tests {
             },
             ..meta()
         };
-        let (cache, config) = create(&layout.replica_tmp()).unwrap();
+        let (cache, config, _) = create(&layout.replica_tmp()).unwrap();
         cache.write(move |tx| newer.write(tx)).await.unwrap();
         cache.close().await.unwrap();
         config.close().await.unwrap();
