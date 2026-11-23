@@ -333,6 +333,22 @@ pub trait Store: Send + Sync + 'static {
         id: MessageRowId,
     ) -> impl Future<Output = StoreResult<Option<Vec<u8>>>> + Send;
 
+    /// The cached message as rendering reads it: [`crate::mime::reduce`]
+    /// of the raw message, with the same part ids. Stores that can stream
+    /// the raw message reduce it without holding it whole.
+    fn render_source(
+        &self,
+        id: MessageRowId,
+    ) -> impl Future<Output = StoreResult<Option<Vec<u8>>>> + Send {
+        let raw = self.raw_message(id);
+        async move {
+            Ok(match raw.await? {
+                Some(raw) => Some(crate::mime::reduce::reduce(raw.as_slice())?),
+                None => None,
+            })
+        }
+    }
+
     /// Keys for signed part and proxy URLs, created on first use and
     /// rotated by the store when due.
     fn url_keys(&self) -> impl Future<Output = StoreResult<UrlKeys>> + Send;

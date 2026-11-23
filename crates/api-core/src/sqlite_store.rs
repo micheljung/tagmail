@@ -1,7 +1,7 @@
 //! [`Store`] over the server's `config.db` and `cache.db`.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::io::Read;
+use std::io::{BufReader, Read};
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -896,6 +896,35 @@ impl Store for SqliteStore {
         })
         .await??;
         Ok(raw)
+    }
+
+    async fn render_source(&self, id: MessageRowId) -> StoreResult<Option<Vec<u8>>> {
+        let identity: Option<(i64, String)> = self
+            .cache
+            .read(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT account_id, email_id FROM message WHERE id = ?1",
+                        [id.0],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?)
+            })
+            .await?;
+        let Some((account, email_id)) = identity else {
+            return Ok(None);
+        };
+        let email_id = EmailId::parse(&email_id)?;
+        let key = BlobKey::for_message(AccountId(account), &email_id);
+        let blobs = self.blobs.clone();
+        Ok(tokio::task::spawn_blocking(move || {
+            let Some(reader) = blobs.open_raw(&key)? else {
+                return Ok(None);
+            };
+            let reduced = crate::mime::reduce::reduce(BufReader::new(reader))?;
+            Ok::<_, tagmail_store::Error>(Some(reduced))
+        })
+        .await??)
     }
 
     async fn url_keys(&self) -> StoreResult<UrlKeys> {

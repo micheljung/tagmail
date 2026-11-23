@@ -31,6 +31,7 @@ mail-builder = "2"
 mail-parser = "1"
 multer = "3"
 passkey = "0.6"
+peak_alloc = "0.3"
 percent-encoding = "2"
 proptest = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json"] }

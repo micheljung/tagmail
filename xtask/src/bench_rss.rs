@@ -354,7 +354,7 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
 
     let sse = SseClient::open(&running)?;
     let searched = bench_search::search(&running, SEARCH_QUERY)?;
-    let render = render_huge(&running)?;
+    let render = render_huge(&running, pid)?;
     println!(
         "SSE connected; search {SEARCH_QUERY:?}: {} threads in {:.1} ms; \
          {HUGE_SUBJECT} opened and rendered ({} bytes of HTML) in {:.1} ms; idling {} s",
@@ -414,6 +414,8 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
         "searchMs": ms(searched.elapsed),
         "renderMs": ms(render.elapsed),
         "renderedHtmlBytes": render.html_bytes,
+        "renderPeakMib": round(mib(render.peak_kib)),
+        "renderPeakDeltaMib": round(mib(render.peak_kib.saturating_sub(render.before_kib))),
         "idleRssKib": samples.iter().map(|(_, kib)| kib).collect::<Vec<_>>(),
     });
     if let Some(dir) = opts.out.parent() {
@@ -425,7 +427,7 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
     println!(
         "{SCENARIO}\n  idle max RSS, last {} s: {:.1} MB = {:.1} MiB (limit {} MB = {limit_mib:.2} MiB) \
          {verdict}\n  idle max RSS: {:.1} MiB\n  peak RSS during sync: {:.1} MiB (not gated)\n  \
-         VmHWM: {:.1} MiB\n  sync: {:.0} s\n  SSE connected through the idle period: {sse_connected}",
+         VmHWM since the render: {:.1} MiB\n  sync: {:.0} s\n  SSE connected through the idle period: {sse_connected}",
         opts.window.as_secs(),
         mb(window_max_kib),
         mib(window_max_kib),
@@ -442,10 +444,11 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
          | Limit | {} MB ({limit_mib:.2} MiB) |\n\
          | Idle max RSS | {:.1} MiB |\n\
          | Peak RSS during sync (not gated) | {:.1} MiB |\n\
-         | VmHWM | {:.1} MiB |\n\
+         | VmHWM since the render | {:.1} MiB |\n\
          | Sync | {:.0} s |\n\
          | Search `{SEARCH_QUERY}` | {:.1} ms |\n\
          | Open + render {HUGE_SUBJECT} | {:.1} ms |\n\
+         | Peak RSS during render (not gated) | {:.1} MiB (+{:.1} MiB) |\n\
          | SSE connected through idle | {sse_connected} |\n",
         opts.window.as_secs(),
         mb(window_max_kib),
@@ -457,6 +460,8 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
         sync_duration.as_secs_f64(),
         ms(searched.elapsed),
         ms(render.elapsed),
+        mib(render.peak_kib),
+        mib(render.peak_kib.saturating_sub(render.before_kib)),
     ))?;
     if !sse_connected {
         bail!("the SSE stream closed during the idle period");
@@ -585,10 +590,13 @@ impl SseClient {
 struct Render {
     html_bytes: usize,
     elapsed: Duration,
+    /// VmRSS before and VmHWM after, the high-water mark reset first.
+    before_kib: u64,
+    peak_kib: u64,
 }
 
 /// Opens and renders the `seed --huge-mb` message, as the reader does.
-fn render_huge(running: &Running) -> Result<Render> {
+fn render_huge(running: &Running, pid: u32) -> Result<Render> {
     let ids = bench_search::search_ids(running, &format!("subject:{HUGE_SUBJECT}"))?;
     let [thread] = ids[..] else {
         bail!("expected one {HUGE_SUBJECT} thread, found {}", ids.len());
@@ -599,16 +607,23 @@ fn render_huge(running: &Running) -> Result<Render> {
         .and_then(|m| m.iter().find(|m| m["subject"] == HUGE_SUBJECT))
         .and_then(|m| m["id"].as_i64())
         .with_context(|| format!("no {HUGE_SUBJECT} message in {thread}"))?;
+    let reset_peak_rss = "5";
+    fs::write(format!("/proc/{pid}/clear_refs"), reset_peak_rss)
+        .context("resetting VmHWM before the render")?;
+    let before_kib = proc_status_kib(pid, "VmRSS")?;
     let started = Instant::now();
     get_json(running, &format!("/api/messages/{message}"))?;
     let (status, html) = running.get(&format!("/api/messages/{message}/render"))?;
     let elapsed = started.elapsed();
+    let peak_kib = proc_status_kib(pid, "VmHWM")?;
     if status != 200 || html.is_empty() {
         bail!("render {message}: {status}, {} bytes", html.len());
     }
     Ok(Render {
         html_bytes: html.len(),
         elapsed,
+        before_kib,
+        peak_kib,
     })
 }
 

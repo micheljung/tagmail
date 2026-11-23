@@ -2,8 +2,10 @@
 //! HTML (sanitized HTML, or plain text turned into HTML), and the parts a
 //! reader can download.
 
+pub mod reduce;
 pub mod sanitize;
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
@@ -81,6 +83,14 @@ pub struct PartInfo {
     pub inline: bool,
 }
 
+/// Decoded size of a part, also of one whose body [`reduce::reduce`] cut.
+fn decoded_size(part: &MessagePart<'_>) -> u64 {
+    part.headers()
+        .get(reduce::SIZE_HEADER)
+        .and_then(|h| std::str::from_utf8(h.raw_value()).ok()?.trim().parse().ok())
+        .unwrap_or(part.decoded_len() as u64)
+}
+
 fn is_body_text(part: &MessagePart<'_>) -> bool {
     matches!(part.kind(), PartKind::Text | PartKind::Html)
         && (part.in_html_body() || part.in_text_body())
@@ -100,7 +110,7 @@ pub fn parts(message: &Message<'_>, referenced_cids: &[String]) -> Vec<PartInfo>
                 id: p.id(),
                 content_type: content_type(&p),
                 name: p.attachment_name().map(str::to_owned),
-                size: p.decoded_len() as u64,
+                size: decoded_size(&p),
                 content_id,
                 inline: referenced || (p.in_html_body() && !p.is_attachment()),
             }
@@ -208,15 +218,23 @@ pub fn body(
         match part.kind() {
             PartKind::Html => {
                 kind = BodyKind::Html;
-                source.push_str(&part.text().unwrap_or_default());
+                let (text, truncated) = capped_text(&part);
+                source.push_str(&text);
+                if truncated {
+                    source.push_str(TRUNCATED_NOTICE);
+                }
             }
             PartKind::Text => {
                 if kind == BodyKind::None {
                     kind = BodyKind::Text;
                 }
-                source.push_str(&text_to_html(&part.text().unwrap_or_default()));
+                let (text, truncated) = capped_text(&part);
+                source.push_str(&text_to_html(&text));
+                if truncated {
+                    source.push_str(TRUNCATED_NOTICE);
+                }
             }
-            PartKind::InlineBinary | PartKind::Binary if sniff_image(&part.decoded()).is_some() => {
+            PartKind::InlineBinary | PartKind::Binary if sniff_image(&head(&part)).is_some() => {
                 let _ = write!(source, "<img src=\"{}\">", part_url(part.id()));
             }
             _ => {}
@@ -238,6 +256,41 @@ pub fn body(
         stats,
         cids: referenced,
     }
+}
+
+/// Bytes of a body text part decoded for display; the rest is cut.
+pub const BODY_TEXT_CAP: usize = 1 << 20;
+
+const TRUNCATED_NOTICE: &str = "<p><em>Message too large to display fully</em></p>";
+
+/// The part's text up to [`BODY_TEXT_CAP`] bytes, and whether it was cut.
+fn capped_text<'m>(part: &MessagePart<'m>) -> (Cow<'m, str>, bool) {
+    let longest_char = 4;
+    let Some(text) = part.text_prefix_bytes(BODY_TEXT_CAP + longest_char) else {
+        return (Cow::Borrowed(""), false);
+    };
+    if text.len() <= BODY_TEXT_CAP {
+        return (text, false);
+    }
+    let end = text.floor_char_boundary(BODY_TEXT_CAP);
+    let cut = match text {
+        Cow::Borrowed(t) => Cow::Borrowed(&t[..end]),
+        Cow::Owned(mut t) => {
+            t.truncate(end);
+            Cow::Owned(t)
+        }
+    };
+    (cut, true)
+}
+
+/// The first decoded bytes of a part, enough to sniff an image type
+/// without decoding the whole part.
+fn head(part: &MessagePart<'_>) -> Vec<u8> {
+    let sniff_raw_bytes = 64;
+    let raw = part.raw_body();
+    part.encoding()
+        .decode(&raw[..raw.len().min(sniff_raw_bytes)])
+        .into_owned()
 }
 
 fn contains_cid(html: &str, cid: &str) -> bool {

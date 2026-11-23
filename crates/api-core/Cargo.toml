@@ -35,6 +35,7 @@ ts-rs.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+peak_alloc.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }

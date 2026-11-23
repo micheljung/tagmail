@@ -204,14 +204,17 @@ impl<S: Store> Api<S> {
         record: &MessageRecord,
         images: bool,
     ) -> Result<Result<Rendered, Response>, StoreError> {
-        let raw = match self.raw(record).await? {
-            Ok(raw) => raw,
-            Err(resp) => return Ok(Err(resp)),
+        let source = match self.store.render_source(record.id).await? {
+            Some(source) => source,
+            None => match self.raw(record).await? {
+                Ok(raw) => blocking(move || mime::reduce::reduce(raw.as_slice())).await??,
+                Err(resp) => return Ok(Err(resp)),
+            },
         };
         let keys = self.url_keys().await?;
         let id = record.id;
         let at = now();
-        Ok(blocking(move || render(&raw, id, keys, at, images))
+        Ok(blocking(move || render(&source, id, keys, at, images))
             .await?
             .ok_or_else(|| Response::error(422, "unparsable", "the message cannot be parsed")))
     }
