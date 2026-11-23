@@ -8,6 +8,7 @@ pub(crate) const CONFIG: &[&str] = &[
     include_str!("../migrations/config/V3__compose.sql"),
     include_str!("../migrations/config/V4__outbox_file.sql"),
     include_str!("../migrations/config/V5__multi_account.sql"),
+    include_str!("../migrations/config/V6__default_identity.sql"),
 ];
 pub(crate) const CACHE: &[&str] = &[
     include_str!("../migrations/cache/V1__init.sql"),
