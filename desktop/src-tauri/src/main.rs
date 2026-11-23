@@ -1,15 +1,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use serde_json::Value;
-use tagmail_api_core::api::Api;
-use tagmail_api_core::events::EventSource;
-use tagmail_api_core::sqlite_store::SqliteStore;
+use tagmail_desktop::backend::Backend;
+use tagmail_desktop::desktop::Desktop;
 use tagmail_desktop::events::{self, Emit, EventControl};
-use tagmail_desktop::protocol::{Asset, Assets, Shell};
-use tagmail_desktop::state;
+use tagmail_desktop::protocol::{Asset, Assets, HttpResponse, Shell};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, Wry};
 
 #[cfg(windows)]
@@ -28,6 +28,7 @@ impl Assets for TauriAssets {
     }
 }
 
+#[derive(Clone)]
 struct AppEmit(AppHandle);
 
 impl Emit for AppEmit {
@@ -38,8 +39,21 @@ impl Emit for AppEmit {
     }
 }
 
+type Handled<'a> = Pin<Box<dyn Future<Output = HttpResponse> + Send + 'a>>;
+
+/// The protocol handler, whichever backend serves it.
+trait Handler: Send + Sync {
+    fn handle<'a>(&'a self, req: &'a http::Request<Vec<u8>>) -> Handled<'a>;
+}
+
+impl<B: Backend> Handler for Shell<B> {
+    fn handle<'a>(&'a self, req: &'a http::Request<Vec<u8>>) -> Handled<'a> {
+        Box::pin(Shell::handle(self, req))
+    }
+}
+
 struct AppState {
-    shell: Shell<SqliteStore>,
+    shell: Box<dyn Handler>,
     #[cfg(feature = "test-hooks")]
     selftest: Option<tagmail_desktop::selftest::SelfTest>,
 }
@@ -52,32 +66,54 @@ fn data_dir(app: &AppHandle) -> tauri::Result<PathBuf> {
     app.path().app_data_dir()
 }
 
+/// Wires a backend to the protocol and the event loop.
+fn shell<B: Backend>(app: &tauri::App, backend: Arc<B>) -> Shell<B> {
+    let (control, starts) = EventControl::new();
+    tauri::async_runtime::spawn(events::run(
+        Arc::clone(&backend),
+        starts,
+        AppEmit(app.handle().clone()),
+    ));
+    Shell::new(
+        backend,
+        Box::new(TauriAssets(app.asset_resolver())),
+        control,
+    )
+}
+
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
-    let local = tauri::async_runtime::block_on(state::open(&data_dir(&handle)?))?;
-    let (control, starts) = EventControl::new();
-    let source: Arc<dyn EventSource> = local.feed.clone();
-    tauri::async_runtime::spawn(events::run(
-        local.store.clone(),
-        source,
-        starts,
-        AppEmit(handle.clone()),
-    ));
-    let api = Api::new(local.store.clone(), None);
-    #[allow(unused_mut)]
-    let mut shell = Shell::new(api, Box::new(TauriAssets(app.asset_resolver())), control);
+    let dir = data_dir(&handle)?;
     #[cfg(feature = "test-hooks")]
-    let selftest = if std::env::var_os("TAGMAIL_DESKTOP_SELFTEST").is_some() {
-        shell = shell.with_index_head(tagmail_desktop::selftest::INDEX_HEAD.to_owned());
-        Some(selftest::start(&handle, local)?)
-    } else {
-        None
-    };
-    app.manage(Arc::new(AppState {
-        shell,
-        #[cfg(feature = "test-hooks")]
-        selftest,
-    }));
+    if std::env::var_os("TAGMAIL_DESKTOP_SELFTEST").is_some() {
+        let (shell, test) = selftest::start(app, &dir)?;
+        return open(
+            app,
+            AppState {
+                shell: Box::new(shell),
+                selftest: Some(test),
+            },
+        );
+    }
+    // Test builds keep the token in a file so CI needs no keychain.
+    let keychain = !cfg!(feature = "test-hooks");
+    let emit = Arc::new(AppEmit(handle.clone()));
+    let desktop = tauri::async_runtime::block_on(Desktop::open(&dir, keychain, emit))?;
+    #[cfg(feature = "test-hooks")]
+    selftest::auto_pair(&desktop);
+    let shell = shell(app, desktop);
+    open(
+        app,
+        AppState {
+            shell: Box::new(shell),
+            #[cfg(feature = "test-hooks")]
+            selftest: None,
+        },
+    )
+}
+
+fn open(app: &mut tauri::App, state: AppState) -> Result<(), Box<dyn std::error::Error>> {
+    app.manage(Arc::new(state));
     WebviewWindowBuilder::new(app, "main", WebviewUrl::CustomProtocol(ORIGIN.parse()?))
         .title("Tagmail")
         .inner_size(1200.0, 800.0)
@@ -87,20 +123,33 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(feature = "test-hooks")]
 mod selftest {
+    use std::path::Path;
+    use std::sync::Arc;
     use std::time::Duration;
 
-    use tagmail_desktop::selftest::{SelfTest, seed};
-    use tagmail_desktop::state::Local;
-    use tauri::AppHandle;
+    use tagmail_desktop::backend::{Backend, LocalBackend};
+    use tagmail_desktop::desktop::Desktop;
+    use tagmail_desktop::protocol::Shell;
+    use tagmail_desktop::selftest::{INDEX_HEAD, SelfTest, seed};
+    use tagmail_desktop::state;
 
     const TIMEOUT: Duration = Duration::from_secs(90);
 
-    /// Seeds the fixture and exits with the report's verdict: 0 ok, 1 a
+    /// Seeds a fixture store and exits with the report's verdict: 0 ok, 1 a
     /// check failed, 2 no report in time.
-    pub fn start(app: &AppHandle, local: Local) -> Result<SelfTest, Box<dyn std::error::Error>> {
-        tauri::async_runtime::block_on(seed(&local))?;
-        let (test, mut reports) = SelfTest::new(local);
-        let handle = app.clone();
+    pub fn start(
+        app: &tauri::App,
+        dir: &Path,
+    ) -> Result<(Shell<LocalBackend>, SelfTest), Box<dyn std::error::Error>> {
+        let local = tauri::async_runtime::block_on(async {
+            let local = state::open(dir).await?;
+            seed(&local).await?;
+            Ok::<_, tagmail_store::Error>(local)
+        })?;
+        let (test, mut reports) = SelfTest::new(local.clone());
+        let shell = super::shell(app, Arc::new(LocalBackend::new(local)))
+            .with_index_head(INDEX_HEAD.to_owned());
+        let handle = app.handle().clone();
         tauri::async_runtime::spawn(async move {
             match tokio::time::timeout(TIMEOUT, reports.recv()).await {
                 Ok(Some(report)) => {
@@ -114,7 +163,32 @@ mod selftest {
                 }
             }
         });
-        Ok(test)
+        Ok((shell, test))
+    }
+
+    /// `TAGMAIL_DESKTOP_PAIR=<server>,<code>` pairs an unpaired app on start.
+    pub fn auto_pair(desktop: &Arc<Desktop>) {
+        let Ok(spec) = std::env::var("TAGMAIL_DESKTOP_PAIR") else {
+            return;
+        };
+        if desktop.paired() {
+            return;
+        }
+        let Some((server, code)) = spec.split_once(',') else {
+            eprintln!("TAGMAIL_DESKTOP_PAIR must be <server>,<code>");
+            return;
+        };
+        let (server, code) = (server.to_owned(), code.to_owned());
+        let desktop = Arc::clone(desktop);
+        tauri::async_runtime::spawn(async move {
+            if let Err(resp) = desktop.pair(server, code).await {
+                eprintln!(
+                    "DESKTOP_PAIR_FAILED {} {}",
+                    resp.status,
+                    String::from_utf8_lossy(&resp.body)
+                );
+            }
+        });
     }
 }
 

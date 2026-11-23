@@ -2,14 +2,16 @@
 //! (spike 4). Static files come from [`Assets`] with the SPA's CSP, desktop
 //! routes are answered here, everything else goes to the api-core [`Api`].
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use http::{Method, StatusCode, header};
-use tagmail_api_core::api::{self, API_CSP, APP_CSP, Api};
+use serde::de::DeserializeOwned;
+use tagmail_api_core::api::{self, API_CSP, APP_CSP};
 use tagmail_api_core::auth_dto::{AuthVia, CurrentAuthDto};
-use tagmail_api_core::store::Store;
+use tagmail_api_core::desktop_dto::{DesktopPairDto, DesktopSettingsPatchDto};
 use tagmail_core::ChangeCursor;
 
+use crate::backend::Backend;
 use crate::events::EventControl;
 
 pub const INDEX: &str = "index.html";
@@ -57,64 +59,54 @@ pub trait Assets: Send + Sync {
 
 pub type HttpResponse = http::Response<Vec<u8>>;
 
-pub struct Shell<S> {
-    pub api: Api<S>,
+pub struct Shell<B> {
+    backend: Arc<B>,
     assets: Box<dyn Assets>,
     events: EventControl,
-    paired: AtomicBool,
     index_suffix: Option<String>,
 }
 
-impl<S: Store> Shell<S> {
-    pub fn new(api: Api<S>, assets: Box<dyn Assets>, events: EventControl) -> Shell<S> {
+impl<B: Backend> Shell<B> {
+    pub fn new(backend: Arc<B>, assets: Box<dyn Assets>, events: EventControl) -> Shell<B> {
         Shell {
-            api,
+            backend,
             assets,
             events,
-            paired: AtomicBool::new(true),
             index_suffix: None,
         }
     }
 
     /// Appended to the `<head>` of HTML assets (the SPA has only
     /// `index.html`), e.g. the self-test script.
-    pub fn with_index_head(mut self, html: String) -> Shell<S> {
+    pub fn with_index_head(mut self, html: String) -> Shell<B> {
         self.index_suffix = Some(html);
         self
-    }
-
-    pub fn set_paired(&self, paired: bool) {
-        self.paired.store(paired, Ordering::Relaxed);
     }
 
     pub async fn handle(&self, req: &http::Request<Vec<u8>>) -> HttpResponse {
         let path = req.uri().path();
         let query = req.uri().query().unwrap_or("");
-        match classify(path) {
-            Route::Asset => self.asset(req.method(), path),
-            Route::Desktop => self.desktop(req.method(), path, query),
+        to_http(match classify(path) {
+            Route::Asset => return self.asset(req.method(), path),
+            Route::Desktop => match self.desktop(req.method(), path, query, req.body()).await {
+                Some(resp) => resp,
+                None => return plain(StatusCode::NO_CONTENT),
+            },
             Route::Session => self.session(),
-            Route::ServerOnly => to_http(api::Response::error(
-                404,
-                "not_found",
-                "manage this on the web",
-            )),
-            Route::Api => {
-                let resp = self
-                    .api
-                    .handle(api::Request {
+            Route::ServerOnly => api::Response::error(404, "not_found", "manage this on the web"),
+            Route::Api => match self.backend.api() {
+                Ok(api) => {
+                    api.handle(api::Request {
                         method: method(req.method()),
                         path,
                         query,
                         body: req.body(),
                     })
-                    .await;
-                if resp.status == 401 {
-                    self.set_paired(false);
+                    .await
                 }
-                to_http(resp)
-            }
-        }
+                Err(resp) => resp,
+            },
+        })
     }
 
     fn asset(&self, method: &Method, path: &str) -> HttpResponse {
@@ -146,49 +138,76 @@ impl<S: Store> Shell<S> {
             .expect("valid response")
     }
 
-    fn desktop(&self, method: &Method, path: &str, query: &str) -> HttpResponse {
-        match (method, path) {
-            (&Method::GET, "/api/desktop/events/start") => {
+    /// `None` is `204 No Content`.
+    async fn desktop(
+        &self,
+        method: &Method,
+        path: &str,
+        query: &str,
+        body: &[u8],
+    ) -> Option<api::Response> {
+        let backend = &self.backend;
+        Some(match (method, path.trim_start_matches("/api/desktop/")) {
+            (&Method::GET, "events/start") => {
                 let since = form_urlencoded::parse(query.as_bytes())
                     .find(|(k, _)| k == "since")
                     .map(|(_, v)| v.parse::<ChangeCursor>());
                 match since {
-                    Some(Err(_)) => to_http(api::Response::error(
-                        400,
-                        "bad_request",
-                        "since is not a cursor",
-                    )),
+                    Some(Err(_)) => {
+                        api::Response::error(400, "bad_request", "since is not a cursor")
+                    }
                     Some(Ok(cursor)) => {
                         self.events.start(Some(cursor));
-                        plain(StatusCode::NO_CONTENT)
+                        return None;
                     }
                     None => {
                         self.events.start(None);
-                        plain(StatusCode::NO_CONTENT)
+                        return None;
                     }
                 }
             }
-            _ => to_http(api::Response::error(404, "not_found", "no such route")),
-        }
+            (&Method::GET, "status") => api::Response::json(200, &backend.status()),
+            (&Method::POST, "pair") => match parse::<DesktopPairDto>(body) {
+                Ok(dto) => match backend.pair(dto.server, dto.code).await {
+                    Ok(status) => api::Response::json(200, &status),
+                    Err(resp) => resp,
+                },
+                Err(resp) => resp,
+            },
+            (&Method::POST, "unpair") => {
+                backend.unpair().await;
+                return None;
+            }
+            (&Method::GET, "settings") => api::Response::json(200, &backend.settings()),
+            (&Method::PATCH, "settings") => match parse::<DesktopSettingsPatchDto>(body) {
+                Ok(patch) => match backend.update_settings(patch) {
+                    Ok(settings) => api::Response::json(200, &settings),
+                    Err(resp) => resp,
+                },
+                Err(resp) => resp,
+            },
+            _ => api::Response::error(404, "not_found", "no such route"),
+        })
     }
 
-    fn session(&self) -> HttpResponse {
-        if !self.paired.load(Ordering::Relaxed) {
-            return to_http(api::Response::error(
-                401,
-                "unpaired",
-                "pair this device with your server",
-            ));
+    fn session(&self) -> api::Response {
+        if !self.backend.paired() {
+            return api::Response::error(401, "unpaired", "pair this device with your server");
         }
-        to_http(api::Response::json(
+        api::Response::json(
             200,
             &CurrentAuthDto {
                 via: AuthVia::Device,
                 session: None,
                 device_id: None,
             },
-        ))
+        )
     }
+}
+
+fn parse<T: DeserializeOwned>(body: &[u8]) -> Result<T, api::Response> {
+    serde_json::from_slice(body)
+        .map_err(|e| api::Response::error(400, "bad_request", format!("invalid JSON: {e}")))
 }
 
 fn inject_head(html: &[u8], extra: &str) -> Vec<u8> {
@@ -232,11 +251,12 @@ mod tests {
     use std::sync::Arc;
 
     use serde_json::Value;
-    use tagmail_api_core::sqlite_store::SqliteStore;
     use tempfile::TempDir;
 
     use super::*;
-    use crate::events::Starts;
+    use crate::backend::LocalBackend;
+    use crate::desktop::Desktop;
+    use crate::events::{Emit, Starts};
     use crate::state;
 
     struct MapAssets(HashMap<&'static str, (&'static str, &'static str)>);
@@ -250,28 +270,55 @@ mod tests {
         }
     }
 
-    async fn shell() -> (TempDir, Shell<SqliteStore>, Starts) {
-        let dir = TempDir::new().unwrap();
-        let local = state::open(dir.path()).await.unwrap();
-        let assets = MapAssets(HashMap::from([
+    fn assets() -> Box<MapAssets> {
+        Box::new(MapAssets(HashMap::from([
             (
                 INDEX,
                 ("text/html", "<html><head></head><body>spa</body></html>"),
             ),
             ("_app/app.js", ("text/javascript", "app()")),
-        ]));
-        let (control, starts) = EventControl::new();
-        let api = Api::new(Arc::clone(&local.store), None);
-        (dir, Shell::new(api, Box::new(assets), control), starts)
+        ])))
     }
 
-    async fn call(shell: &Shell<SqliteStore>, method: Method, uri: &str) -> HttpResponse {
+    async fn shell() -> (TempDir, Shell<LocalBackend>, Starts) {
+        let dir = TempDir::new().unwrap();
+        let local = state::open(dir.path()).await.unwrap();
+        let (control, starts) = EventControl::new();
+        let backend = Arc::new(LocalBackend::new(local));
+        (dir, Shell::new(backend, assets(), control), starts)
+    }
+
+    struct NoEmit;
+
+    impl Emit for NoEmit {
+        fn emit(&self, _event: &str, _payload: Value) {}
+    }
+
+    async fn unpaired_shell() -> (TempDir, Shell<Desktop>) {
+        let dir = TempDir::new().unwrap();
+        let desktop = Desktop::open(dir.path(), false, Arc::new(NoEmit))
+            .await
+            .unwrap();
+        let (control, _) = EventControl::new();
+        (dir, Shell::new(desktop, assets(), control))
+    }
+
+    async fn request<B: Backend>(
+        shell: &Shell<B>,
+        method: Method,
+        uri: &str,
+        body: &str,
+    ) -> HttpResponse {
         let req = http::Request::builder()
             .method(method)
             .uri(format!("app://localhost{uri}"))
-            .body(Vec::new())
+            .body(body.as_bytes().to_vec())
             .unwrap();
         shell.handle(&req).await
+    }
+
+    async fn call<B: Backend>(shell: &Shell<B>, method: Method, uri: &str) -> HttpResponse {
+        request(shell, method, uri, "").await
     }
 
     fn json(resp: &HttpResponse) -> Value {
@@ -357,10 +404,60 @@ mod tests {
         let paired = call(&shell, Method::GET, "/api/auth/session").await;
         assert_eq!(paired.status(), 200);
         assert_eq!(json(&paired)["via"], "device");
-        shell.set_paired(false);
-        let unpaired = call(&shell, Method::GET, "/api/auth/session").await;
-        assert_eq!(unpaired.status(), 401);
-        assert_eq!(json(&unpaired)["error"], "unpaired");
+        let (_dir, unpaired) = unpaired_shell().await;
+        for path in ["/api/auth/session", "/api/views/inbox/index"] {
+            let resp = call(&unpaired, Method::GET, path).await;
+            assert_eq!(resp.status(), 401, "{path}");
+            assert_eq!(json(&resp)["error"], "unpaired");
+        }
+        let status = call(&unpaired, Method::GET, "/api/desktop/status").await;
+        assert_eq!(json(&status)["paired"], false);
+        assert_eq!(json(&status)["phase"]["kind"], "unpaired");
+    }
+
+    #[tokio::test]
+    async fn validates_pairing_and_settings_requests() {
+        let (_dir, shell) = unpaired_shell().await;
+        let bad_server = request(
+            &shell,
+            Method::POST,
+            "/api/desktop/pair",
+            r#"{"server":"ftp://x","code":"K7QD2XPM"}"#,
+        )
+        .await;
+        assert_eq!(bad_server.status(), 422);
+        assert_eq!(json(&bad_server)["field"], "server");
+        let unknown_field = request(
+            &shell,
+            Method::POST,
+            "/api/desktop/pair",
+            r#"{"server":"x"}"#,
+        )
+        .await;
+        assert_eq!(unknown_field.status(), 400);
+
+        let settings = call(&shell, Method::GET, "/api/desktop/settings").await;
+        assert_eq!(json(&settings)["windowDays"], 90);
+        let patched = request(
+            &shell,
+            Method::PATCH,
+            "/api/desktop/settings",
+            r#"{"notify":false,"windowDays":30}"#,
+        )
+        .await;
+        assert_eq!(patched.status(), 200);
+        assert_eq!(json(&patched)["notify"], false);
+        assert_eq!(json(&patched)["windowDays"], 30);
+        let rejected = request(
+            &shell,
+            Method::PATCH,
+            "/api/desktop/settings",
+            r#"{"windowDays":0}"#,
+        )
+        .await;
+        assert_eq!(json(&rejected)["field"], "windowDays");
+        let unpair = call(&shell, Method::POST, "/api/desktop/unpair").await;
+        assert_eq!(unpair.status(), 204);
     }
 
     #[tokio::test]

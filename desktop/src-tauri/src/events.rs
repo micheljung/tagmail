@@ -8,10 +8,11 @@ use std::sync::Arc;
 use serde_json::Value;
 use tagmail_api_core::api::gone_error;
 use tagmail_api_core::dto::ApiErrorDto;
-use tagmail_api_core::events::{Event, EventSession, EventSource, OpenError};
-use tagmail_api_core::store::Store;
+use tagmail_api_core::events::{Event, EventSession, OpenError};
 use tagmail_core::ChangeCursor;
 use tokio::sync::watch;
+
+use crate::backend::Backend;
 
 pub const CHANGES: &str = "api:changes";
 pub const RESET: &str = "api:reset";
@@ -59,13 +60,10 @@ fn internal_error() -> ApiErrorDto {
     }
 }
 
-/// Serves starts until the [`EventControl`] is dropped.
-pub async fn run<S: Store>(
-    store: Arc<S>,
-    source: Arc<dyn EventSource>,
-    mut starts: Starts,
-    emit: impl Emit,
-) {
+/// Serves starts until the [`EventControl`] is dropped. Without a local
+/// store yet a start waits for the next one; the replica emits a reset once
+/// its first bootstrap is in.
+pub async fn run<B: Backend>(backend: Arc<B>, mut starts: Starts, emit: impl Emit) {
     let mut restart = false;
     loop {
         if !restart && starts.changed().await.is_err() {
@@ -75,7 +73,10 @@ pub async fn run<S: Store>(
         let Some(start) = *starts.borrow_and_update() else {
             continue;
         };
-        let mut session = match EventSession::open(store.clone(), &*source, start.since).await {
+        let Some((store, source)) = backend.events() else {
+            continue;
+        };
+        let mut session = match EventSession::open(store, &*source, start.since).await {
             Ok(Ok(session)) => session,
             Ok(Err(OpenError::Gone)) => {
                 emit.emit(RESET, reset_payload(&gone_error()));
@@ -128,6 +129,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::backend::LocalBackend;
     use crate::state::{self, Local};
 
     struct Channel(Mutex<mpsc::UnboundedSender<(String, Value)>>);
@@ -183,17 +185,13 @@ mod tests {
         let local = state::open(dir.path()).await.unwrap();
         let (control, starts) = EventControl::new();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let source: Arc<dyn EventSource> = local.feed.clone();
-        tokio::spawn(run(
-            local.store.clone(),
-            source,
-            starts,
-            Channel(Mutex::new(tx)),
-        ));
+        let backend = Arc::new(LocalBackend::new(local));
+        tokio::spawn(run(Arc::clone(&backend), starts, Channel(Mutex::new(tx))));
+        let local = backend.local();
 
-        let before = append(&local, 1).await;
+        let before = append(local, 1).await;
         control.start(Some(before));
-        append(&local, 2).await;
+        append(local, 2).await;
         let (name, payload) = next(&mut rx).await;
         assert_eq!(name, CHANGES);
         assert_eq!(ids(&payload), [2]);

@@ -1,0 +1,147 @@
+//! Pairing, syncing and unpairing through the desktop's local routes against
+//! an in-process server, without the webview.
+
+mod common;
+
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use common::{Env, SEEDED_THREADS, eventually};
+use http::Method;
+use serde_json::{Value, json};
+use tagmail_api_core::id_index;
+use tagmail_desktop::desktop::{Desktop, STATUS};
+use tagmail_desktop::events::{Emit, EventControl};
+use tagmail_desktop::protocol::{Asset, Assets, HttpResponse, Shell};
+
+const SYNC: Duration = Duration::from_secs(10);
+
+struct NoAssets;
+
+impl Assets for NoAssets {
+    fn get(&self, _path: &str) -> Option<Asset> {
+        None
+    }
+}
+
+#[derive(Clone, Default)]
+struct Recorder(Arc<Mutex<Vec<(String, Value)>>>);
+
+impl Emit for Recorder {
+    fn emit(&self, event: &str, payload: Value) {
+        self.0.lock().unwrap().push((event.to_owned(), payload));
+    }
+}
+
+async fn call(shell: &Shell<Desktop>, method: Method, path: &str, body: Value) -> HttpResponse {
+    let req = http::Request::builder()
+        .method(method)
+        .uri(format!("app://localhost{path}"))
+        .body(if body.is_null() {
+            Vec::new()
+        } else {
+            body.to_string().into_bytes()
+        })
+        .unwrap();
+    shell.handle(&req).await
+}
+
+fn json_of(resp: &HttpResponse) -> Value {
+    serde_json::from_slice(resp.body()).unwrap()
+}
+
+async fn open(env: &Env, emitted: &Recorder) -> Shell<Desktop> {
+    let desktop = Desktop::open(env.desktop.path(), false, Arc::new(emitted.clone()))
+        .await
+        .unwrap();
+    let (control, _) = EventControl::new();
+    Shell::new(desktop, Box::new(NoAssets), control)
+}
+
+async fn inbox(shell: &Shell<Desktop>) -> Option<Vec<i64>> {
+    let resp = call(shell, Method::GET, "/api/views/inbox/index", Value::Null).await;
+    (resp.status() == 200).then(|| id_index::decode(resp.body()).unwrap())
+}
+
+#[tokio::test]
+async fn pairs_syncs_resumes_and_unpairs() {
+    let env = Env::new();
+    let owner = env.start().await;
+    let emitted = Recorder::default();
+    let shell = open(&env, &emitted).await;
+
+    let before = call(&shell, Method::GET, "/api/views/inbox/index", Value::Null).await;
+    assert_eq!(json_of(&before)["error"], "unpaired");
+
+    let wrong = call(
+        &shell,
+        Method::POST,
+        "/api/desktop/pair",
+        json!({ "server": owner.url(), "code": "WRONG123" }),
+    )
+    .await;
+    assert_eq!(wrong.status(), 400, "{:?}", json_of(&wrong));
+    assert_eq!(json_of(&wrong)["error"], "invalid_code");
+
+    let code = owner.pairing_code().await;
+    let paired = call(
+        &shell,
+        Method::POST,
+        "/api/desktop/pair",
+        json!({ "server": owner.url(), "code": code }),
+    )
+    .await;
+    assert_eq!(paired.status(), 200, "{:?}", json_of(&paired));
+    assert_eq!(json_of(&paired)["paired"], true);
+    assert_eq!(json_of(&paired)["server"], owner.url());
+    assert_eq!(owner.devices().await.len(), 1);
+
+    eventually("the bootstrap", SYNC, || async {
+        inbox(&shell)
+            .await
+            .is_some_and(|ids| ids.len() == SEEDED_THREADS as usize)
+    })
+    .await;
+    let status = json_of(&call(&shell, Method::GET, "/api/desktop/status", Value::Null).await);
+    assert_eq!(status["phase"]["kind"], "live");
+    assert_eq!(status["online"], true);
+    assert_eq!(
+        status["warnings"][0],
+        "No system keychain is available, so the device token is kept in a file only you can read."
+    );
+    assert!(emitted.0.lock().unwrap().iter().any(|(e, _)| e == STATUS));
+
+    owner.arrive(50, "Fresh", "bob@x.example").await;
+    eventually("the pulled thread", SYNC, || async {
+        inbox(&shell)
+            .await
+            .is_some_and(|ids| ids.first() == Some(&50))
+    })
+    .await;
+
+    let op = call(
+        &shell,
+        Method::POST,
+        "/api/ops",
+        json!({ "opId": "7a1c9a52-50a4-4f63-9d3e-8f3f8f7c0b11", "kind": "star", "threadIds": [1] }),
+    )
+    .await;
+    assert!(op.status().is_success(), "{:?}", json_of(&op));
+    let rows = json_of(&call(&shell, Method::GET, "/api/threads?ids=1", Value::Null).await);
+    assert_eq!(rows["threads"][0]["starred"], true);
+
+    drop(shell);
+    let resumed = open(&env, &emitted).await;
+    eventually("the resumed replica", SYNC, || async {
+        inbox(&resumed)
+            .await
+            .is_some_and(|ids| ids.len() == SEEDED_THREADS as usize + 1)
+    })
+    .await;
+
+    let unpaired = call(&resumed, Method::POST, "/api/desktop/unpair", Value::Null).await;
+    assert_eq!(unpaired.status(), 204);
+    assert!(!env.desktop.path().join("device-token").exists());
+    let session = call(&resumed, Method::GET, "/api/auth/session", Value::Null).await;
+    assert_eq!(json_of(&session)["error"], "unpaired");
+}

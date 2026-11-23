@@ -11,6 +11,7 @@ use tagmail_store::{BlobStore, CacheDb, ConfigDb, MasterKey};
 
 pub const REPLICA_DIR: &str = "replica";
 
+#[derive(Clone)]
 pub struct Local {
     pub store: Arc<SqliteStore>,
     pub feed: Arc<ChangeFeed>,

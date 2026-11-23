@@ -28,19 +28,25 @@ test-hooks = []
 [dependencies]
 form_urlencoded.workspace = true
 http = "1"
+keyring = { version = "4", default-features = false, features = ["v1"] }
+reqwest = { workspace = true, features = ["rustls-no-provider", "json"] }
 serde.workspace = true
 serde_json.workspace = true
 tagmail-api-core = { workspace = true, features = ["sqlite"] }
 tagmail-core.workspace = true
+tagmail-replica = { path = "../../crates/replica" }
 tagmail-store.workspace = true
 tauri = { version = "2.12", optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, optional = true }
+url.workspace = true
 zeroize.workspace = true
 
 [build-dependencies]
 tauri-build = { version = "2.7", optional = true }
 
 [dev-dependencies]
+reqwest = { workspace = true, features = ["rustls-no-provider", "json"] }
+tagmail-api-server = { path = "../../crates/api-server" }
 tempfile.workspace = true
