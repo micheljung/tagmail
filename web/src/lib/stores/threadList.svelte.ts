@@ -40,6 +40,8 @@ export class ThreadList implements ChangeListener, OpList {
 	count = $state(0);
 	status = $state<ListStatus>('loading');
 	error = $state<string | null>(null);
+	/** Answered offline from local mail only (desktop search). */
+	partial = $state(false);
 	selectedId = $state<number | null>(null);
 	/** Threads ticked for a bulk action (`x`, checkboxes). */
 	readonly checked = new SvelteSet<number>();
@@ -82,8 +84,9 @@ export class ThreadList implements ChangeListener, OpList {
 	async load(): Promise<string | undefined> {
 		if (!this.#loadedOnce) this.status = 'loading';
 		try {
-			const { ids, cursor } = await this.#api.viewIndex(this.view);
+			const { ids, cursor, partial } = await this.#api.viewIndex(this.view);
 			this.index = new ThreadIndex(ids);
+			this.partial = partial;
 			this.#cursor = parseCursor(cursor);
 			this.#loadedOnce = true;
 			this.#indexChanged();

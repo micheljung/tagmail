@@ -6,6 +6,7 @@
 	import { shortcuts, type ShortcutAction } from '../shortcuts';
 	import { accounts, nav, ops, type ThreadList } from '../stores';
 	import type { ThreadRowDto } from '../transport';
+	import { PARTIAL_TEXT } from '../desktop/desktop.svelte';
 	import { viewScope } from '../views';
 	import Icon, { type IconName } from './Icon.svelte';
 	import ThreadRow from './ThreadRow.svelte';
@@ -105,6 +106,11 @@
 </script>
 
 <section class="list" aria-label={label}>
+	{#if list.partial}
+		<p class="partial" role="status" data-partial>
+			<Icon name="alert" size={16} />{PARTIAL_TEXT}
+		</p>
+	{/if}
 	{#if list.status === 'loading'}
 		<div class="state" role="status">
 			<span class="spinner" aria-hidden="true"></span>
@@ -294,6 +300,17 @@
 
 	.warn {
 		color: var(--danger);
+	}
+
+	.partial {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		margin: 0;
+		padding: 8px 16px;
+		background: var(--surface-2);
+		color: var(--muted);
+		font-size: 13px;
 	}
 
 	.viewport {

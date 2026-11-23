@@ -14,6 +14,7 @@
 		resetAppState
 	} from '#lib/stores/index.ts';
 	import { api } from '#lib/transport/index.ts';
+	import DesktopBanners from '#lib/ui/DesktopBanners.svelte';
 	import HelpOverlay from '#lib/ui/HelpOverlay.svelte';
 	import Icon from '#lib/ui/Icon.svelte';
 	import LabelJump from '#lib/ui/LabelJump.svelte';
@@ -60,7 +61,8 @@
 		api.onUnauthorized = (error) => {
 			resetAppState();
 			const next = encodeURIComponent(location.pathname + location.search);
-			void goto(error.code === 'setup_required' ? '/setup' : `/login?next=${next}`);
+			if (error.code === 'unpaired') void goto('/pair');
+			else void goto(error.code === 'setup_required' ? '/setup' : `/login?next=${next}`);
 		};
 		void nav.load();
 		void accounts.load();
@@ -170,6 +172,7 @@
 	<button class="scrim" tabindex="-1" aria-label="Close menu" onclick={() => (drawerOpen = false)}
 	></button>
 	<main id="main">
+		<DesktopBanners />
 		{#if accounts.notices.length > 0}
 			<ul class="banners">
 				{#each accounts.notices as notice (`${notice.accountId}:${notice.code}`)}

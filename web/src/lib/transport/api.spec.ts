@@ -1,7 +1,7 @@
 import type { ApiTransport } from '@tagmail/api-types';
 import { describe, expect, it, vi } from 'vitest';
 import { encodeIdIndex } from '../../../e2e/mock/idIndex';
-import { Api, ApiError, CURSOR_HEADER, downloadUrl, renderUrl } from './api';
+import { Api, ApiError, CURSOR_HEADER, PARTIAL_HEADER, downloadUrl, renderUrl } from './api';
 
 function api(handler: (path: string, init?: RequestInit) => Response) {
 	const transport: ApiTransport = {
@@ -21,7 +21,18 @@ describe('Api', () => {
 		const index = await client.viewIndex('search:after:2026/01/01 "a b"');
 		expect(Array.from(index.ids)).toEqual([9, 4, 7]);
 		expect(index.cursor).toBe('e:3');
+		expect(index.partial).toBe(false);
 		expect(seen[0]).toBe('/api/views/search%3Aafter%3A2026%2F01%2F01%20%22a%20b%22/index');
+	});
+
+	it('flags a search the desktop answered from local mail only', async () => {
+		const client = api(
+			() =>
+				new Response(encodeIdIndex([2]), {
+					headers: { [CURSOR_HEADER]: 'e:3', [PARTIAL_HEADER]: 'offline' }
+				})
+		);
+		expect((await client.viewIndex('search:old')).partial).toBe(true);
 	});
 
 	it('turns error bodies into ApiError and reports 401 outside auth routes', async () => {

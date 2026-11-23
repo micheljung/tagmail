@@ -20,6 +20,7 @@ import {
 	rowAt,
 	type Row
 } from './fixture.ts';
+import { desktopApi, desktopHeaders, desktopMock, resetDesktop } from './desktop.ts';
 import { encodeIdIndex } from './idIndex.ts';
 import { RENDER_CSP, WEB_APP_CSP, renderMessage } from './render.ts';
 import {
@@ -244,6 +245,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
 	if (method !== 'GET' && method !== 'HEAD' && req.headers['x-requested-with'] !== 'tagmail') {
 		return error(res, 403, 'csrf', 'missing X-Requested-With');
 	}
+	if (await desktopApi(req, res, url, writeContext)) return;
 	if (path === '/api/auth/login' && method === 'POST') {
 		const { password } = await body(req);
 		if (!ownerExists) return error(res, 401, 'setup_required', 'set up the owner first');
@@ -317,7 +319,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
 					? encodeIdIndex(allIds())
 					: inboxIndex
 				: encodeIdIndex(ids);
-		return send(res, 200, bytes, { 'x-tagmail-cursor': cursor() });
+		return send(res, 200, bytes, { 'x-tagmail-cursor': cursor(), ...desktopHeaders(view) });
 	}
 	if (path === '/api/threads') {
 		const ids = (url.searchParams.get('ids') ?? '').split(',').map(Number);
@@ -437,6 +439,7 @@ async function mock(req: IncomingMessage, res: ServerResponse, url: URL) {
 	}
 	if (url.pathname === '/__mock/reset' && req.method === 'POST') {
 		setScenario('single');
+		resetDesktop();
 		ownerExists = true;
 		sessions = initialSessions();
 		devices = initialDevices();
@@ -450,6 +453,7 @@ async function mock(req: IncomingMessage, res: ServerResponse, url: URL) {
 		ownerExists = false;
 		return send(res, 204, '');
 	}
+	if (await desktopMock(req, res, url, writeContext)) return;
 	if (await writeMock(req, res, url, writeContext)) return;
 	if (await accountsMock(req, res, url, writeContext)) return;
 	return error(res, 404, 'not_found', 'no such mock hook');

@@ -7,6 +7,10 @@ import type {
 	ApiErrorDto,
 	ApiTransport,
 	CurrentAuthDto,
+	DesktopPairDto,
+	DesktopSettingsDto,
+	DesktopSettingsPatchDto,
+	DesktopStatusDto,
 	DeviceDto,
 	DevicesDto,
 	ImageSendersDto,
@@ -52,6 +56,8 @@ import type {
 } from '@tagmail/api-types';
 
 export const CURSOR_HEADER = 'x-tagmail-cursor';
+/** `offline` when the desktop answered a search from local mail only. */
+export const PARTIAL_HEADER = 'x-tagmail-partial';
 
 export class ApiError extends Error {
 	readonly status: number;
@@ -69,6 +75,8 @@ export class ApiError extends Error {
 export interface ViewIndexResult {
 	ids: Float64Array;
 	cursor: string;
+	/** Offline desktop search: older results need a connection. */
+	partial: boolean;
 }
 
 /** A view that spans every account unless scoped to one. */
@@ -91,6 +99,8 @@ export class Api {
 	readonly transport: ApiTransport;
 	/** Called on every 401 so the shell can send the player to the login page. */
 	onUnauthorized: (error: ApiError) => void = () => {};
+	/** Called when the desktop app could not reach the server for a request. */
+	onOffline: (error: ApiError) => void = () => {};
 
 	constructor(transport: ApiTransport) {
 		this.transport = transport;
@@ -101,6 +111,7 @@ export class Api {
 		if (resp.ok) return resp;
 		const err = await errorOf(resp);
 		if (resp.status === 401 && !path.startsWith('/api/auth/')) this.onUnauthorized(err);
+		if (resp.status === 503 && err.code === 'offline') this.onOffline(err);
 		throw err;
 	}
 
@@ -130,7 +141,8 @@ export class Api {
 		const bytes = new Uint8Array(await resp.arrayBuffer());
 		return {
 			ids: Float64Array.from(decodeIdIndex(bytes)),
-			cursor: resp.headers.get(CURSOR_HEADER) ?? ''
+			cursor: resp.headers.get(CURSOR_HEADER) ?? '',
+			partial: resp.headers.get(PARTIAL_HEADER) === 'offline'
 		};
 	}
 
@@ -161,6 +173,26 @@ export class Api {
 
 	status(): Promise<StatusDto> {
 		return this.#json<StatusDto>('/api/status');
+	}
+
+	desktopStatus(): Promise<DesktopStatusDto> {
+		return this.#json<DesktopStatusDto>('/api/desktop/status');
+	}
+
+	pair(pairing: DesktopPairDto): Promise<DesktopStatusDto> {
+		return this.#post<DesktopStatusDto>('/api/desktop/pair', pairing);
+	}
+
+	unpair(): Promise<void> {
+		return this.#empty('/api/desktop/unpair', 'POST');
+	}
+
+	desktopSettings(): Promise<DesktopSettingsDto> {
+		return this.#json<DesktopSettingsDto>('/api/desktop/settings');
+	}
+
+	updateDesktopSettings(patch: DesktopSettingsPatchDto): Promise<DesktopSettingsDto> {
+		return this.#post<DesktopSettingsDto>('/api/desktop/settings', patch, 'PATCH');
 	}
 
 	session(): Promise<CurrentAuthDto> {

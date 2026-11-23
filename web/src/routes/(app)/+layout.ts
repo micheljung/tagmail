@@ -8,6 +8,7 @@ export const load: LayoutLoad = async ({ url }) => {
 	} catch (e) {
 		if (e instanceof ApiError && e.status === 401) {
 			if (e.code === 'setup_required') redirect(307, '/setup');
+			if (e.code === 'unpaired') redirect(307, '/pair');
 			const next = url.pathname + url.search;
 			redirect(307, `/login?next=${encodeURIComponent(next)}`);
 		}

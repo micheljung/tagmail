@@ -3,10 +3,12 @@
 	import { SvelteSet } from 'svelte/reactivity';
 	import { labelColor } from '../format';
 	import { accounts, isInbox, mailboxLabel, nav, theme } from '../stores';
-	import type { MailboxDto } from '../transport';
+	import { isDesktop, type MailboxDto } from '../transport';
 	import { accountParam, withAccount } from '../views';
 	import AccountMarker from './AccountMarker.svelte';
 	import Icon, { type IconName } from './Icon.svelte';
+
+	const inApp = isDesktop();
 
 	let {
 		open = false,
@@ -246,14 +248,25 @@
 			</a>
 		</li>
 		<li>
-			<a
-				href="/settings/devices"
-				aria-current={page.url.pathname === '/settings/devices' ? 'page' : undefined}
-				onclick={onnavigate}
-			>
-				<Icon name="devices" />
-				<span>Devices &amp; sessions</span>
-			</a>
+			{#if inApp}
+				<a
+					href="/settings/desktop"
+					aria-current={page.url.pathname === '/settings/desktop' ? 'page' : undefined}
+					onclick={onnavigate}
+				>
+					<Icon name="devices" />
+					<span>This device</span>
+				</a>
+			{:else}
+				<a
+					href="/settings/devices"
+					aria-current={page.url.pathname === '/settings/devices' ? 'page' : undefined}
+					onclick={onnavigate}
+				>
+					<Icon name="devices" />
+					<span>Devices &amp; sessions</span>
+				</a>
+			{/if}
 		</li>
 		<li class="tools">
 			<button onclick={() => theme.cycle()} aria-label="Switch light or dark theme" title="Theme">
@@ -262,9 +275,11 @@
 			<button onclick={onhelp} aria-label="Keyboard shortcuts" title="Keyboard shortcuts (?)">
 				<Icon name="keyboard" size={18} />
 			</button>
-			<button onclick={onlogout} aria-label="Sign out" title="Sign out">
-				<Icon name="logout" size={18} />
-			</button>
+			{#if !inApp}
+				<button onclick={onlogout} aria-label="Sign out" title="Sign out">
+					<Icon name="logout" size={18} />
+				</button>
+			{/if}
 		</li>
 	</ul>
 </nav>
