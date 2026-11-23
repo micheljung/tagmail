@@ -9,6 +9,7 @@
 //! never exempt, since a login request carries no proof of who sends it.
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::net::{IpAddr, Ipv6Addr};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -39,6 +40,16 @@ pub const ACCOUNT_TESTS: Rate = Rate {
     burst: 10,
     refill: Duration::from_secs(6),
 };
+/// Remote images fetched for one desktop: 120 a minute, burst 60, with a
+/// backstop of 600 a minute over all devices.
+pub const REPLICA_IMAGES: Rate = Rate {
+    burst: 60,
+    refill: Duration::from_millis(500),
+};
+pub const REPLICA_IMAGES_GLOBAL: Rate = Rate {
+    burst: 300,
+    refill: Duration::from_millis(100),
+};
 /// Tracked clients; beyond this, full buckets are dropped first, and new
 /// clients that still do not fit only count against the global bucket.
 const MAX_CLIENTS: usize = 4096;
@@ -68,14 +79,22 @@ impl Bucket {
     }
 }
 
-pub struct RateLimiter {
+/// Buckets per client (an IP address, or a device id) plus a global one.
+pub struct RateLimiter<K = IpAddr> {
     per_ip: Rate,
     global: Rate,
-    state: Mutex<(Bucket, HashMap<IpAddr, Bucket>)>,
+    state: Mutex<(Bucket, HashMap<K, Bucket>)>,
 }
 
-impl RateLimiter {
-    pub fn new(per_ip: Rate, global: Rate) -> RateLimiter {
+impl RateLimiter<IpAddr> {
+    /// Takes one attempt for `ip`, or returns how long to wait.
+    pub fn check(&self, ip: IpAddr) -> Result<(), Duration> {
+        self.check_at(client_key(ip), Instant::now())
+    }
+}
+
+impl<K: Copy + Eq + Hash> RateLimiter<K> {
+    pub fn new(per_ip: Rate, global: Rate) -> RateLimiter<K> {
         RateLimiter {
             per_ip,
             global,
@@ -83,13 +102,12 @@ impl RateLimiter {
         }
     }
 
-    /// Takes one attempt for `ip`, or returns how long to wait.
-    pub fn check(&self, ip: IpAddr) -> Result<(), Duration> {
-        self.check_at(ip, Instant::now())
+    /// Takes one attempt for `key`, or returns how long to wait.
+    pub fn check_key(&self, key: K) -> Result<(), Duration> {
+        self.check_at(key, Instant::now())
     }
 
-    fn check_at(&self, ip: IpAddr, now: Instant) -> Result<(), Duration> {
-        let key = client_key(ip);
+    fn check_at(&self, key: K, now: Instant) -> Result<(), Duration> {
         let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let (global, clients) = &mut *guard;
         if clients.len() >= MAX_CLIENTS && !clients.contains_key(&key) {

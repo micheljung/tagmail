@@ -36,6 +36,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 
 use crate::auth::{Principal, error, invalid};
 use crate::http::{AppState, to_http};
+use crate::ratelimit::{REPLICA_IMAGES, REPLICA_IMAGES_GLOBAL, RateLimiter};
 
 /// Snapshots streaming at once over all devices; one per device.
 pub const MAX_SNAPSHOTS: usize = 2;
@@ -52,6 +53,7 @@ const MAX_ROWS_BODY: usize = 256 * 1024;
 /// Shared state of the replica routes.
 pub struct Replica {
     cache_path: PathBuf,
+    images: RateLimiter<i64>,
     snapshots: Arc<Semaphore>,
     streaming: Arc<Mutex<HashSet<i64>>>,
 }
@@ -60,6 +62,7 @@ impl Replica {
     pub fn new(cache_path: PathBuf) -> Replica {
         Replica {
             cache_path,
+            images: RateLimiter::new(REPLICA_IMAGES, REPLICA_IMAGES_GLOBAL),
             snapshots: Arc::new(Semaphore::new(MAX_SNAPSHOTS)),
             streaming: Arc::new(Mutex::new(HashSet::new())),
         }
@@ -283,8 +286,15 @@ pub async fn image(
     Extension(principal): Extension<Principal>,
     body: Bytes,
 ) -> HttpResponse {
-    if let Err(resp) = device(&principal) {
-        return *resp;
+    let device = match device(&principal) {
+        Ok(id) => id,
+        Err(resp) => return *resp,
+    };
+    if let Err(wait) = state.replica.images.check_key(device) {
+        let mut resp = Response::error(429, "rate_limited", "too many images; try again later");
+        resp.headers
+            .push(("retry-after", wait.as_secs().max(1).to_string()));
+        return to_http(resp);
     }
     let req: ReplicaImageDto = match serde_json::from_slice(&body) {
         Ok(req) => req,

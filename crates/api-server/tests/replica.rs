@@ -611,3 +611,33 @@ async fn the_image_route_keeps_the_proxy_ssrf_checks() {
     }
     server.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn remote_images_are_rate_limited_per_device() {
+    let (_dirs, server, owner) = start().await;
+    let (a, b) = (
+        device(&server, &owner, "A").await,
+        device(&server, &owner, "B").await,
+    );
+    let fetch = |client: &reqwest::Client| {
+        client
+            .post(url(&server, "/api/replica/image"))
+            .json(&json!({ "url": "http://127.0.0.1/a.png" }))
+            .send()
+    };
+    let burst = tagmail_api_server::ratelimit::REPLICA_IMAGES.burst;
+    for _ in 0..burst {
+        assert_eq!(fetch(&a).await.unwrap().status(), 403);
+    }
+    let limited = fetch(&a).await.unwrap();
+    assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(limited.headers()["retry-after"], "1");
+    let body: Value = limited.json().await.unwrap();
+    assert_eq!(body["error"], "rate_limited");
+    assert_eq!(
+        fetch(&b).await.unwrap().status(),
+        403,
+        "other devices go on"
+    );
+    server.shutdown().await.unwrap();
+}
