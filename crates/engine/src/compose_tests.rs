@@ -482,6 +482,34 @@ async fn server_that_saves_sent_gets_no_second_copy() {
     }
 }
 
+#[tokio::test]
+async fn sent_probe_reads_each_sent_header_once() {
+    let f = fixture(None, FakeSmtp::default()).await;
+    lock(&f.srv).header_search_empty = true;
+    for i in 0..3 {
+        let id = format!("old{i}@x.example");
+        lock(&f.srv).append("Sent", FakeMsg::new(&id, "Old", ME, "a@x", 1));
+    }
+    let identity = f.identity().await;
+    let draft = f
+        .engine
+        .create_draft(input(identity, "Probe"))
+        .await
+        .unwrap();
+    f.engine.send("op-p".to_owned(), draft.id).await.unwrap();
+    eventually("sent and completed", || f.settled()).await;
+    assert_eq!(f.messages("Sent").len(), 4);
+    let mut scanned: Vec<u32> = lock(&f.srv)
+        .header_fetches
+        .iter()
+        .filter(|(mailbox, _)| mailbox == "Sent")
+        .flat_map(|(_, uids)| uids.clone())
+        .collect();
+    scanned.sort_unstable();
+    assert_eq!(scanned, [1, 2, 3], "each Sent header read once");
+    f.engine.shutdown().await;
+}
+
 async fn insert_sending(f: &Fixture, op: &'static str, msgid: &'static str, mime: Vec<u8>) {
     let name = format!("{op}.eml");
     std::fs::write(f.dir.path().join("outbox").join(&name), &mime).unwrap();

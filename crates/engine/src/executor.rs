@@ -1271,6 +1271,7 @@ async fn search_locations<S: ImapSession>(
 ) -> std::result::Result<Vec<Loc>, OpError> {
     let mut out = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut finder = msgid_search::Finder::default();
     for l in cached {
         if !seen.insert(l.email_id.clone()) {
             continue;
@@ -1280,7 +1281,7 @@ async fn search_locations<S: ImapSession>(
         };
         let (uids, verify) = match ops::message_search(&email_id, l.msgid.as_deref()) {
             MessageSearch::EmailId(id) => (s.uid_search(SearchCriteria::EmailId(id)).await?, false),
-            MessageSearch::MessageId(m) => (msgid_search::find(s, sel, &m).await?, true),
+            MessageSearch::MessageId(m) => (finder.find(s, sel, &m).await?, true),
             MessageSearch::Unsearchable => continue,
         };
         if uids.is_empty() {

@@ -37,7 +37,7 @@ use crate::compose::{
 };
 use crate::error::{Error, Result};
 use crate::jobs::Priority;
-use crate::msgid_search;
+use crate::msgid_search::Finder;
 use crate::outgoing::Purpose;
 use crate::smtp;
 use crate::supervisor::{ConnectorFactory, Engine};
@@ -72,13 +72,18 @@ pub(crate) async fn special_mailbox<S: ImapSession>(
 }
 
 /// UIDs in `mailbox` whose Message-ID is `msgid`.
-async fn find_message<S: ImapSession>(s: &mut S, mailbox: &str, msgid: &str) -> Result<UidSet> {
+async fn find_message<S: ImapSession>(
+    s: &mut S,
+    mailbox: &str,
+    msgid: &str,
+    finder: &mut Finder,
+) -> Result<UidSet> {
     let read_only = SelectOptions {
         read_only: true,
         qresync: None,
     };
     let sel = s.select(mailbox, read_only).await?;
-    msgid_search::find(s, &sel, msgid).await
+    finder.find(s, &sel, msgid).await
 }
 
 /// APPENDs a draft version to Drafts; the previous version is expunged
@@ -89,7 +94,7 @@ async fn save_draft<S: ImapSession>(s: &mut S, mime: &Path, msgid: &str) -> Resu
     let uid = match appended.uid {
         Some(uid) => uid.0,
         // Without UIDPLUS: the newest copy with this Message-ID.
-        None => find_message(s, &mailbox, msgid)
+        None => find_message(s, &mailbox, msgid, &mut Finder::default())
             .await?
             .iter()
             .map(|u| u.0)
@@ -129,14 +134,19 @@ async fn purge<S: ImapSession>(s: &mut S, at: &SavedAt) -> Result<()> {
 }
 
 /// Whether Sent has the message.
-async fn in_sent<S: ImapSession>(s: &mut S, msgid: &str) -> Result<bool> {
+async fn in_sent<S: ImapSession>(s: &mut S, msgid: &str, finder: &mut Finder) -> Result<bool> {
     let sent = special_mailbox(s, SpecialUse::Sent, "Sent").await?;
-    Ok(!find_message(s, &sent, msgid).await?.is_empty())
+    Ok(!find_message(s, &sent, msgid, finder).await?.is_empty())
 }
 
 /// Copies a sent message to Sent unless it is already there.
-async fn copy_to_sent<S: ImapSession>(s: &mut S, mime: &Path, msgid: &str) -> Result<()> {
-    if in_sent(s, msgid).await? {
+async fn copy_to_sent<S: ImapSession>(
+    s: &mut S,
+    mime: &Path,
+    msgid: &str,
+    finder: &mut Finder,
+) -> Result<()> {
+    if in_sent(s, msgid, finder).await? {
         return Ok(());
     }
     let sent = special_mailbox(s, SpecialUse::Sent, "Sent").await?;
@@ -449,7 +459,7 @@ impl<F: ConnectorFactory> Engine<F> {
         let msgid = row.msgid.clone();
         let found = self
             .run_job(row.account, Priority::Write, move |s, _| {
-                Box::pin(async move { in_sent(s, &msgid).await })
+                Box::pin(async move { in_sent(s, &msgid, &mut Finder::default()).await })
             })
             .await;
         match found {
@@ -593,24 +603,33 @@ impl<F: ConnectorFactory> Engine<F> {
         if saves == Some(true) {
             return self.finish(row).await;
         }
+        let mut finder = Finder::default();
         if saves.is_none() {
             let deadline = Instant::now() + self.inner.config.sent_probe;
             loop {
                 let msgid = row.msgid.clone();
+                let mut lookup = std::mem::take(&mut finder);
                 let found = self
                     .run_job(account, Priority::Write, move |s, _| {
-                        Box::pin(async move { in_sent(s, &msgid).await })
+                        Box::pin(async move {
+                            let found = in_sent(s, &msgid, &mut lookup).await?;
+                            Ok((found, lookup))
+                        })
                     })
                     .await;
                 match found {
-                    Ok(true) => {
+                    Ok((true, _)) => {
                         self.remember_saves_sent(account, true).await?;
                         return self.finish(row).await;
                     }
-                    Ok(false) if Instant::now() < deadline => {
+                    Ok((false, lookup)) if Instant::now() < deadline => {
+                        finder = lookup;
                         tokio::time::sleep(PROBE_STEP).await;
                     }
-                    Ok(false) => break,
+                    Ok((false, lookup)) => {
+                        finder = lookup;
+                        break;
+                    }
                     Err(e) => return self.defer(row, &format!("Sent copy: {e}")).await,
                 }
             }
@@ -633,7 +652,7 @@ impl<F: ConnectorFactory> Engine<F> {
         let (msgid, path) = (row.msgid.clone(), self.inner.stores.outbox.join(file));
         let copied = self
             .run_job(account, Priority::Write, move |s, _| {
-                Box::pin(async move { copy_to_sent(s, &path, &msgid).await })
+                Box::pin(async move { copy_to_sent(s, &path, &msgid, &mut finder).await })
             })
             .await;
         match copied {

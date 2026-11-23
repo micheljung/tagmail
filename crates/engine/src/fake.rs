@@ -156,6 +156,8 @@ pub struct FakeServer {
     pub caps: Vec<String>,
     pub mailboxes: Vec<FakeMailbox>,
     pub fetches: Vec<FetchLog>,
+    /// Every FETCH of header fields alone: mailbox and the UIDs returned.
+    pub header_fetches: Vec<(String, Vec<u32>)>,
     /// Full-window FETCHes that still succeed before every further one
     /// fails like a dropped connection.
     pub fail_after_full_fetches: Option<usize>,
@@ -252,6 +254,7 @@ pub fn server(caps: &[&str]) -> Shared {
             mailbox("Archive", Some(SpecialUse::Archive), 300),
         ],
         fetches: Vec::new(),
+        header_fetches: Vec::new(),
         fail_after_full_fetches: None,
         reject_login: false,
         fail_appends: false,
@@ -444,6 +447,9 @@ impl FakeSession {
             .map(|(uid, m)| self.meta(&mb, uid, m, spec))
             .collect();
         let fetched: Vec<u32> = out.iter().filter_map(|m| m.uid.map(|u| u.0)).collect();
+        if !spec.envelope && !spec.header_fields.is_empty() {
+            server.header_fetches.push((name.clone(), fetched.clone()));
+        }
         server.fetches.push(FetchLog {
             mailbox: name,
             uids: fetched,
@@ -469,7 +475,7 @@ impl FakeSession {
                 parts: vec![m.part()],
             });
         }
-        if !spec.header_fields.is_empty() {
+        if !spec.envelope && !spec.header_fields.is_empty() {
             let mut lines = String::new();
             for field in &spec.header_fields {
                 if field.eq_ignore_ascii_case("REFERENCES") {

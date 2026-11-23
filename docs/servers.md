@@ -44,8 +44,9 @@ Consequences for Tagmail:
   integration test `sync_window_fetch_and_uid_search` pins the behaviour so
   that it fails the day Stalwart fixes it. When a header search comes back
   empty from a mailbox that has messages, the engine reads the Message-ID
-  header of the newest 500 UIDs instead. That finds appended drafts and
-  sent copies, which land at the tail; an op that has to find older mail
+  header of the newest 500 UIDs instead, once per op batch and mailbox or
+  per Sent watch; later lookups there read only UIDs that arrived since.
+  That finds appended drafts and sent copies, which land at the tail; an op that has to find older mail
   again after a UIDVALIDITY change can still miss it on Stalwart, which
   advertises OBJECTID, so this only matters for messages without one.
 - The engine probes each account on its first connection after a start
