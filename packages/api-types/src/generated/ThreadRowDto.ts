@@ -20,4 +20,9 @@ senders: Array<AddressDto>,
 /**
  * Label keys, sorted.
  */
-labels: Array<string>, };
+labels: Array<string>, 
+/**
+ * Mailboxes whose list shows the thread (pending moves included),
+ * ascending.
+ */
+mailboxIds: Array<number>, };

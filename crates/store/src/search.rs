@@ -394,7 +394,8 @@ fn lower(query: &Query, mailboxes: &[Mailbox]) -> Node {
                 } else {
                     Sql::leaf(
                         &format!(
-                            "m.id IN (SELECT message_id FROM location WHERE mailbox_id IN ({}))",
+                            "m.id IN (SELECT message_id FROM location \
+                             WHERE mailbox_id IN ({}) AND hidden = 0)",
                             id_list(&ids)
                         ),
                         Vec::new(),

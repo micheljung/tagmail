@@ -188,6 +188,7 @@ impl Store for Mail {
                     has_attachment: true,
                     senders: vec![],
                     labels: vec![],
+                    mailbox_ids: vec![],
                 },
                 messages: self.records.clone(),
             }),

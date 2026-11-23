@@ -8,12 +8,17 @@ mod compose;
 mod compose_tests;
 mod ctx;
 mod error;
+mod executor;
+#[cfg(test)]
+mod executor_tests;
 #[cfg(test)]
 mod fake;
 mod jobs;
+mod labels;
 mod message;
 mod outbox;
 mod outgoing;
+mod overlay;
 mod raw;
 mod smtp;
 mod supervisor;

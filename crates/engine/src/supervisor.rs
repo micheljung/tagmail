@@ -10,7 +10,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use tagmail_api_core::{AccountRegistry, BoxFuture, ChangeFeed, FetchRawError, RuntimeStatus};
+use tagmail_api_core::dto::LabelDto;
+use tagmail_api_core::ops_dto::{
+    LabelChangeDto, LabelJobDto, LabelPatchDto, NewLabelDto, OpDto, OpStatusDto,
+};
+use tagmail_api_core::{
+    AccountRegistry, BoxFuture, ChangeFeed, FetchRawError, OpRequest, RuntimeStatus, Submitted,
+    WriteResult, WriteService,
+};
 use tagmail_core::{AccountId, MessageRowId};
 use tagmail_imap::{
     Capabilities, CapabilityOverride, Connector, IdleStop, ImapSession, Password, Pool, PoolConfig,
@@ -25,7 +32,9 @@ use tokio::time::Instant;
 use crate::cache::{MailboxRow, SyncState};
 use crate::ctx::Ctx;
 use crate::error::{Error, Result};
+use crate::executor;
 use crate::jobs::{JobFuture, Jobs, Priority, erase};
+use crate::overlay::Overlays;
 use crate::raw;
 use crate::smtp::{LettreSender, SmtpSender};
 use crate::sync::{self, Progress};
@@ -211,6 +220,7 @@ struct Handle<S> {
     status: Status,
     stop: watch::Sender<bool>,
     task: JoinHandle<()>,
+    executor: JoinHandle<()>,
     jobs: Arc<Jobs<S>>,
 }
 
@@ -219,14 +229,21 @@ pub(crate) struct Inner<F: ConnectorFactory> {
     factory: F,
     pub(crate) stores: Stores,
     accounts: Mutex<HashMap<AccountId, Handle<Session<F>>>>,
-    runtime: tokio::runtime::Handle,
+    pub(crate) runtime: tokio::runtime::Handle,
     pub(crate) smtp: Arc<dyn SmtpSender>,
     /// Wakes the compose runner.
     pub(crate) outbox_wake: Notify,
     runner: Mutex<Option<(watch::Sender<bool>, JoinHandle<()>)>>,
+    /// Open ops of every account, projected over cache writes.
+    pub(crate) overlays: Arc<Overlays>,
+    /// Wakes an account's op executor.
+    pub(crate) wakes: Mutex<HashMap<AccountId, Arc<Notify>>>,
+    /// The last failure of each label job.
+    pub(crate) job_errors: Mutex<HashMap<i64, String>>,
 }
 
-/// The sync engine: implements [`AccountRegistry`] for the API.
+/// The sync engine: implements [`AccountRegistry`] and [`WriteService`]
+/// for the API.
 pub struct Engine<F: ConnectorFactory = ImapConnectorFactory> {
     pub(crate) inner: Arc<Inner<F>>,
 }
@@ -266,6 +283,9 @@ impl<F: ConnectorFactory> Engine<F> {
                 smtp,
                 outbox_wake: Notify::new(),
                 runner: Mutex::new(None),
+                overlays: Arc::default(),
+                wakes: Mutex::new(HashMap::new()),
+                job_errors: Mutex::new(HashMap::new()),
             }),
         };
         let (stop, stopped) = watch::channel(false);
@@ -294,8 +314,10 @@ impl<F: ConnectorFactory> Engine<F> {
         }
     }
 
-    /// Starts every `active` account in `config.db`; returns how many.
+    /// Restores the pending overlay, then starts every `active` account in
+    /// `config.db`; returns how many.
     pub async fn start_all(&self) -> Result<usize> {
+        self.restore_overlays().await?;
         let ids: Vec<i64> = self
             .inner
             .stores
@@ -328,6 +350,10 @@ impl<F: ConnectorFactory> Engine<F> {
         let status = Status::default();
         let (stop, stopped) = watch::channel(false);
         let jobs = Arc::new(Jobs::new());
+        let executor = self
+            .inner
+            .runtime
+            .spawn(executor::run(self.clone(), id, stopped.clone()));
         let task = self.inner.runtime.spawn(run(
             self.inner.clone(),
             id,
@@ -341,9 +367,12 @@ impl<F: ConnectorFactory> Engine<F> {
                 status,
                 stop,
                 task,
+                executor,
                 jobs,
             },
         );
+        drop(accounts);
+        self.mirror_registry(id);
     }
 
     /// Runs `job` on the account's worker connection between sync steps
@@ -414,7 +443,63 @@ impl<F: ConnectorFactory> Engine<F> {
             {
                 tracing::error!("account task panicked");
             }
+            if let Err(e) = h.executor.await
+                && e.is_panic()
+            {
+                tracing::error!("op executor panicked");
+            }
         }
+    }
+}
+
+impl<F: ConnectorFactory> WriteService for Engine<F> {
+    fn submit_op(&self, req: OpRequest) -> BoxFuture<WriteResult<Submitted>> {
+        let engine = self.clone();
+        Box::pin(async move { engine.queue_op(req).await })
+    }
+
+    fn ops(&self, status: Option<OpStatusDto>) -> BoxFuture<WriteResult<Vec<OpDto>>> {
+        let engine = self.clone();
+        Box::pin(async move { engine.list_ops(status).await })
+    }
+
+    fn op(&self, op_id: String) -> BoxFuture<WriteResult<OpDto>> {
+        let engine = self.clone();
+        Box::pin(async move { engine.op_dto(op_id).await })
+    }
+
+    fn retry_op(&self, op_id: String) -> BoxFuture<WriteResult<OpDto>> {
+        let engine = self.clone();
+        Box::pin(async move { engine.retry_failed_op(op_id).await })
+    }
+
+    fn discard_op(&self, op_id: String) -> BoxFuture<WriteResult<()>> {
+        let engine = self.clone();
+        Box::pin(async move { engine.discard_op_id(op_id).await })
+    }
+
+    fn create_label(&self, label: NewLabelDto) -> BoxFuture<WriteResult<LabelDto>> {
+        let engine = self.clone();
+        Box::pin(async move { engine.create_label(label).await })
+    }
+
+    fn update_label(
+        &self,
+        key: String,
+        patch: LabelPatchDto,
+    ) -> BoxFuture<WriteResult<LabelChangeDto>> {
+        let engine = self.clone();
+        Box::pin(async move { engine.update_label(key, patch).await })
+    }
+
+    fn delete_label(&self, key: String) -> BoxFuture<WriteResult<LabelChangeDto>> {
+        let engine = self.clone();
+        Box::pin(async move { engine.delete_label(key).await })
+    }
+
+    fn label_jobs(&self) -> BoxFuture<WriteResult<Vec<LabelJobDto>>> {
+        let engine = self.clone();
+        Box::pin(async move { engine.label_job_dtos().await })
     }
 }
 
@@ -502,7 +587,8 @@ async fn run_account<F: ConnectorFactory>(
         stores.blobs.clone(),
         stores.feed.clone(),
         id,
-    );
+    )
+    .with_overlays(inner.overlays.clone());
     let mut retry = inner.config.retry_min;
     loop {
         let result = tokio::select! {

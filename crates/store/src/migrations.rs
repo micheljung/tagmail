@@ -10,6 +10,7 @@ pub(crate) const CONFIG: &[&str] = &[
 pub(crate) const CACHE: &[&str] = &[
     include_str!("../migrations/cache/V1__init.sql"),
     include_str!("../migrations/cache/V2__pending_text_index.sql"),
+    include_str!("../migrations/cache/V3__op_overlay.sql"),
 ];
 
 /// Applies the migrations after `PRAGMA user_version`, each in its own

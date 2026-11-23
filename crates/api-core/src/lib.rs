@@ -11,10 +11,12 @@ pub mod events;
 pub mod id_index;
 pub mod messages;
 pub mod mime;
+pub mod ops_dto;
 pub mod routes;
 pub mod signing;
 pub mod store;
 pub mod ts;
+pub mod writes;
 
 pub use api::{API_VERSION, Api, Method, Request, Response};
 pub use events::{ChangeFeed, Event, EventSession, EventSource, OpenError};
@@ -23,3 +25,4 @@ pub use store::{
     MessageRecord, NewAccount, ProxiedImage, ProxyError, RuntimeStatus, Secret, Store, StoreError,
     StoreResult, ThreadDetail, ThreadRows, View, ViewError, ViewIndex,
 };
+pub use writes::{OpRequest, Submitted, WriteError, WriteResult, WriteService};

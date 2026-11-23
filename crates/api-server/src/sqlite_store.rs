@@ -16,8 +16,8 @@ use tagmail_api_core::{
 };
 use tagmail_core::query::{Query, Term};
 use tagmail_core::{
-    AccountId, ChangeCursor, EmailId, Flags, KeywordClass, MessageRowId, SpecialUse, ThreadId,
-    classify_keyword, decode_mailbox_name,
+    AccountId, ChangeCursor, EmailId, Flags, KeywordClass, LabelKey, MessageRowId, SpecialUse,
+    ThreadId, classify_keyword, decode_mailbox_name,
 };
 use tagmail_store::rusqlite::{
     self, Connection, OptionalExtension, named_params, params, params_from_iter,
@@ -126,6 +126,8 @@ fn entity_dto(e: Entity) -> EntityDto {
         Entity::Message => EntityDto::Message,
         Entity::Label => EntityDto::Label,
         Entity::Outbox => EntityDto::Outbox,
+        Entity::Op => EntityDto::Op,
+        Entity::LabelJob => EntityDto::LabelJob,
     }
 }
 
@@ -304,6 +306,7 @@ fn thread_rows(conn: &Connection, ids: &[ThreadId]) -> tagmail_store::Result<Vec
             has_attachment: false,
             senders: Vec::new(),
             labels: Vec::new(),
+            mailbox_ids: Vec::new(),
         })
     })?;
     for t in threads {
@@ -354,6 +357,20 @@ fn thread_rows(conn: &Connection, ids: &[ThreadId]) -> tagmail_store::Result<Vec
         }
     }
 
+    let mut stmt = conn.prepare(&format!(
+        "SELECT thread_id, mailbox_id FROM thread_mailbox WHERE thread_id IN ({list}) \
+         ORDER BY thread_id, mailbox_id"
+    ))?;
+    let mailboxes = stmt.query_map(params_from_iter(&ids), |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+    })?;
+    for m in mailboxes {
+        let (thread, mailbox) = m?;
+        if let Some(row) = rows.get_mut(&thread) {
+            row.mailbox_ids.push(mailbox);
+        }
+    }
+
     Ok(ids.iter().filter_map(|id| rows.remove(id)).collect())
 }
 
@@ -366,6 +383,36 @@ fn saves_sent_preset(imap_host: &str) -> Option<bool> {
         .then_some(true)
 }
 
+impl SqliteStore {
+    /// Label keys `(from, to)` of the running rename (`to`) and delete
+    /// jobs: a renamed label's view also shows messages still carrying the
+    /// old keyword, and labels being removed are no longer listed.
+    async fn label_jobs(&self) -> StoreResult<Vec<(String, Option<String>)>> {
+        let rows: Vec<(String, Option<String>)> = self
+            .config
+            .read(|conn| {
+                let mut stmt = conn.prepare_cached("SELECT from_kw, to_kw FROM label_job")?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<_>>()?;
+                Ok(rows)
+            })
+            .await?;
+        let key = |kw: &str| {
+            tagmail_core::Keyword::new(kw)
+                .ok()
+                .map(|k| match classify_keyword(&k) {
+                    KeywordClass::Label { key, .. } => key.to_string(),
+                    KeywordClass::Hidden => LabelKey::of(kw).to_string(),
+                })
+        };
+        Ok(rows
+            .into_iter()
+            .filter_map(|(from, to)| Some((key(&from)?, to.as_deref().and_then(key))))
+            .collect())
+    }
+}
+
 impl Store for SqliteStore {
     async fn head(&self) -> StoreResult<ChangeCursor> {
         Ok(self.cache.head().await?)
@@ -373,6 +420,16 @@ impl Store for SqliteStore {
 
     async fn view_index(&self, view: View) -> StoreResult<ViewIndex> {
         let epoch = self.cache.epoch();
+        let renamed_from: Vec<String> = match &view {
+            View::Label(key) => self
+                .label_jobs()
+                .await?
+                .into_iter()
+                .filter(|(_, to)| to.as_deref() == Some(key.as_str()))
+                .map(|(from, _)| from)
+                .collect(),
+            _ => Vec::new(),
+        };
         Ok(self
             .cache
             .read(move |conn| {
@@ -390,7 +447,15 @@ impl Store for SqliteStore {
                                 .collect::<rusqlite::Result<Vec<_>>>()?
                         }
                         View::Label(key) => {
-                            let label = Query::Term(Term::Label(key.as_str().to_owned()));
+                            let label = std::iter::once(key.as_str().to_owned())
+                                .chain(renamed_from)
+                                .map(|k| Query::Term(Term::Label(k)))
+                                .collect::<Vec<_>>();
+                            let label = if label.len() == 1 {
+                                label.into_iter().next().unwrap_or(Query::And(Vec::new()))
+                            } else {
+                                Query::Or(label)
+                            };
                             search::search_threads(conn, &label, search::MAX_HITS)?.threads
                         }
                         View::Search(query) => {
@@ -494,6 +559,11 @@ impl Store for SqliteStore {
         for (key, name, color) in registry {
             if registered.insert(key.clone()) {
                 labels.insert(key.clone(), LabelDto { key, name, color });
+            }
+        }
+        for (from, _) in self.label_jobs().await? {
+            if !registered.contains(&from) {
+                labels.remove(&from);
             }
         }
         Ok(labels.into_values().collect())

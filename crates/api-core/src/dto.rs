@@ -86,6 +86,9 @@ pub struct ThreadRowDto {
     pub senders: Vec<AddressDto>,
     /// Label keys, sorted.
     pub labels: Vec<String>,
+    /// Mailboxes whose list shows the thread (pending moves included),
+    /// ascending.
+    pub mailbox_ids: Vec<i64>,
 }
 
 /// `GET /api/threads?ids=`: rows as of `cursor`. Ids without a row (deleted
@@ -107,6 +110,11 @@ pub enum EntityDto {
     Label,
     /// Payload `{status, error?}`; see `OutboxItemDto`.
     Outbox,
+    /// A write's status: `upsert` carries an `OpDto`, `delete` (discarded)
+    /// carries `{ opId }`; `id` is 0.
+    Op,
+    /// A label rename or delete job (`LabelJobDto.id`); deleted when done.
+    LabelJob,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]

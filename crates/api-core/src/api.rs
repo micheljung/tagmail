@@ -19,6 +19,7 @@ use crate::store::{
     AccountRegistry, AccountSummary, ChangePage, ImageProxy, NewAccount, Secret, Store, StoreError,
     View, ViewError,
 };
+use crate::writes::WriteService;
 
 pub const API_VERSION: ApiVersion = ApiVersion { major: 1, minor: 0 };
 pub const MIN_CLIENT: ApiVersion = ApiVersion { major: 1, minor: 0 };
@@ -83,7 +84,7 @@ pub struct Response {
 }
 
 impl Response {
-    fn new(status: u16, content_type: &str, body: Vec<u8>) -> Response {
+    pub(crate) fn new(status: u16, content_type: &str, body: Vec<u8>) -> Response {
         Response {
             status,
             headers: vec![
@@ -165,6 +166,7 @@ pub struct Api<S> {
     pub(crate) registry: Option<Arc<dyn AccountRegistry>>,
     pub(crate) proxy: Option<Arc<dyn ImageProxy>>,
     pub(crate) compose: Option<Arc<dyn crate::compose::Compose>>,
+    pub(crate) writes: Option<Arc<dyn WriteService>>,
     /// URL signing keys and when they were read.
     pub(crate) keys: tokio::sync::Mutex<Option<(std::time::Instant, UrlKeys)>>,
 }
@@ -178,8 +180,16 @@ impl<S: Store> Api<S> {
             registry,
             proxy: None,
             compose: None,
+            writes: None,
             keys: tokio::sync::Mutex::new(None),
         }
+    }
+
+    /// Serves the write routes (ops, label changes) through `writes`;
+    /// without it they answer `503`.
+    pub fn with_writes(mut self, writes: Arc<dyn WriteService>) -> Api<S> {
+        self.writes = Some(writes);
+        self
     }
 
     pub fn store(&self) -> &Arc<S> {
@@ -226,6 +236,15 @@ impl<S: Store> Api<S> {
                 RouteId::CancelOutbox => self.cancel_outbox(params[0]).await,
                 RouteId::RetryOutbox => self.retry_outbox(params[0]).await,
                 RouteId::Reply => self.reply(params[0], req.query).await,
+                RouteId::SubmitOp => self.submit_op(req.body).await,
+                RouteId::Ops => self.list_ops(req.query).await,
+                RouteId::Op => self.get_op(params[0]).await,
+                RouteId::RetryOp => self.retry_op(params[0]).await,
+                RouteId::DiscardOp => self.discard_op(params[0]).await,
+                RouteId::CreateLabel => self.create_label(req.body).await,
+                RouteId::UpdateLabel => self.update_label(params[0], req.body).await,
+                RouteId::DeleteLabel => self.delete_label(params[0]).await,
+                RouteId::LabelJobs => self.label_jobs().await,
             },
             Err(Miss::MethodNotAllowed) => Ok(Response::error(
                 405,

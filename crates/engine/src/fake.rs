@@ -253,6 +253,26 @@ impl FakeServer {
         self.append(to, msg)
     }
 
+    /// Flags of `uid` in `name` as IMAP strings, sorted.
+    pub fn flags_of(&mut self, name: &str, uid: u32) -> Vec<String> {
+        let mut out: Vec<String> = self.mailbox(name).msgs[&uid]
+            .flags
+            .iter()
+            .map(|f| f.as_imap().to_owned())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// UID of the message with Message-ID `id` in `name`.
+    pub fn uid_of(&mut self, name: &str, id: &str) -> Option<u32> {
+        self.mailbox(name)
+            .msgs
+            .iter()
+            .find(|(_, m)| m.id == id)
+            .map(|(u, _)| *u)
+    }
+
     pub fn set_flags(&mut self, name: &str, uid: u32, flags: &[Flag]) {
         let modseq = self.bump(name);
         let msg = self.mailbox(name).msgs.get_mut(&uid).expect("uid");

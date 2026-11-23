@@ -6,12 +6,16 @@ use tagmail_api_core::dto::{
     ChangeDto, ChangeOpDto, EntityDto, LabelDto, MailboxDto, SpecialUseDto, ThreadRowDto,
 };
 use tagmail_api_core::id_index;
+use tagmail_api_core::ops_dto::{
+    LabelChangeDto, LabelJobDto, LabelPatchDto, NewLabelDto, OpDto, OpKindDto, OpStatusDto,
+};
 use tagmail_api_core::signing::UrlKeys;
 use tagmail_api_core::{
     AccountRegistry, AccountSummary, Api, BoxFuture, ChangeFeed, ChangePage, Event, EventSession,
     FetchRawError, MessageRecord, Method, NewAccount, OpenError, Request, Response, RuntimeStatus,
     Store, StoreResult, ThreadDetail, ThreadRows, View, ViewIndex,
 };
+use tagmail_api_core::{Submitted, WriteError, WriteResult, WriteService};
 use tagmail_core::query::parse;
 use tagmail_core::{
     AccountId, CacheEpoch, ChangeCursor, LabelKey, MailboxRowId, MessageRowId, ThreadId,
@@ -218,6 +222,7 @@ fn row(id: i64) -> ThreadRowDto {
         has_attachment: false,
         senders: vec![],
         labels: vec![],
+        mailbox_ids: vec![],
     }
 }
 
@@ -347,7 +352,7 @@ async fn mailboxes_and_labels() {
         json_body(&resp),
         json!([{ "key": "work", "name": "Work", "color": null }])
     );
-    assert_eq!(post(&api, "/api/labels", &json!({})).await.status, 405);
+    assert_eq!(post(&api, "/api/mailboxes", &json!({})).await.status, 405);
 }
 
 #[tokio::test]
@@ -586,4 +591,208 @@ async fn event_session_rejects_stale_resume() {
     };
     let opened = EventSession::open(store, &feed, Some(stale)).await.unwrap();
     assert_eq!(opened.err(), Some(OpenError::Gone));
+}
+
+/// Records the write requests it gets and answers from fixed data.
+#[derive(Default)]
+struct Writes {
+    ops: Mutex<Vec<tagmail_api_core::OpRequest>>,
+}
+
+fn op_dto(id: &str, status: OpStatusDto) -> OpDto {
+    OpDto {
+        op_id: id.to_owned(),
+        seq: 1,
+        account_id: 1,
+        kind: OpKindDto::Archive,
+        status,
+        error: None,
+        attempts: 0,
+        thread_ids: vec![4, 5],
+        label: None,
+        mailbox_id: None,
+        created_at: 1,
+    }
+}
+
+impl WriteService for Writes {
+    fn submit_op(&self, req: tagmail_api_core::OpRequest) -> BoxFuture<WriteResult<Submitted>> {
+        let mut ops = self.ops.lock().unwrap();
+        let seen = ops.iter().any(|o| o.op_id == req.op_id);
+        let id = req.op_id.clone();
+        ops.push(req);
+        Box::pin(async move {
+            Ok(if seen {
+                Submitted::Existing(op_dto(&id, OpStatusDto::Done))
+            } else {
+                Submitted::Created(op_dto(&id, OpStatusDto::Pending))
+            })
+        })
+    }
+    fn ops(&self, status: Option<OpStatusDto>) -> BoxFuture<WriteResult<Vec<OpDto>>> {
+        Box::pin(async move { Ok(vec![op_dto("f", status.unwrap_or(OpStatusDto::Pending))]) })
+    }
+    fn op(&self, op_id: String) -> BoxFuture<WriteResult<OpDto>> {
+        Box::pin(async move {
+            if op_id == "missing" {
+                Err(WriteError::NotFound("no such op".into()))
+            } else {
+                Ok(op_dto(&op_id, OpStatusDto::Pending))
+            }
+        })
+    }
+    fn retry_op(&self, op_id: String) -> BoxFuture<WriteResult<OpDto>> {
+        Box::pin(async move { Err(WriteError::Conflict(format!("{op_id} is not failed"))) })
+    }
+    fn discard_op(&self, _: String) -> BoxFuture<WriteResult<()>> {
+        Box::pin(async { Ok(()) })
+    }
+    fn create_label(&self, label: NewLabelDto) -> BoxFuture<WriteResult<LabelDto>> {
+        Box::pin(async move {
+            Ok(LabelDto {
+                key: LabelKey::of(&label.name).to_string(),
+                name: label.name,
+                color: label.color,
+            })
+        })
+    }
+    fn update_label(
+        &self,
+        key: String,
+        _: LabelPatchDto,
+    ) -> BoxFuture<WriteResult<LabelChangeDto>> {
+        Box::pin(async move {
+            Ok(LabelChangeDto {
+                label: Some(LabelDto {
+                    key,
+                    name: "x".into(),
+                    color: None,
+                }),
+                job_id: Some(7),
+                job_ids: vec![7],
+            })
+        })
+    }
+    fn delete_label(&self, _: String) -> BoxFuture<WriteResult<LabelChangeDto>> {
+        Box::pin(async {
+            Ok(LabelChangeDto {
+                label: None,
+                job_id: Some(8),
+                job_ids: vec![8],
+            })
+        })
+    }
+    fn label_jobs(&self) -> BoxFuture<WriteResult<Vec<LabelJobDto>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+}
+
+async fn call(api: &Api<MemStore>, method: Method, path: &str, body: &[u8]) -> Response {
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
+    api.handle(Request {
+        method,
+        path,
+        query,
+        body,
+    })
+    .await
+}
+
+#[tokio::test]
+async fn write_routes_need_an_engine() {
+    let (api, _) = api(MemStore::default());
+    for (method, path) in [
+        (Method::Post, "/api/ops"),
+        (Method::Get, "/api/ops"),
+        (Method::Delete, "/api/ops/x"),
+        (Method::Post, "/api/labels"),
+        (Method::Patch, "/api/labels/work"),
+        (Method::Get, "/api/label-jobs"),
+    ] {
+        let resp = call(&api, method, path, b"{}").await;
+        assert_eq!(resp.status, 503, "{method:?} {path}");
+    }
+}
+
+#[tokio::test]
+async fn write_routes_reach_the_write_service() {
+    let (api, _) = api(MemStore::default());
+    let writes = Arc::new(Writes::default());
+    let api = api.with_writes(writes.clone() as Arc<dyn WriteService>);
+
+    let body = json!({ "opId": "u-1", "kind": "archive", "threadIds": [4, 5] });
+    let resp = post(&api, "/api/ops", &body).await;
+    assert_eq!(resp.status, 202);
+    assert_eq!(json_body(&resp)["status"], "pending");
+    let again = post(&api, "/api/ops", &body).await;
+    assert_eq!(
+        (again.status, json_body(&again)["status"].clone()),
+        (200, json!("done"))
+    );
+    {
+        let ops = writes.ops.lock().unwrap();
+        assert_eq!(ops[0].thread_ids, [ThreadId(4), ThreadId(5)]);
+        assert_eq!(ops[0].kind, tagmail_core::ops::OpKind::Archive);
+    }
+
+    let bad = post(
+        &api,
+        "/api/ops",
+        &json!({ "opId": "u-2", "kind": "move", "threadIds": [1] }),
+    )
+    .await;
+    assert_eq!(
+        (bad.status, json_body(&bad)["field"].clone()),
+        (422, json!("mailboxId"))
+    );
+    let unknown = post(
+        &api,
+        "/api/ops",
+        &json!({ "opId": "u-3", "kind": "nuke", "threadIds": [1] }),
+    )
+    .await;
+    assert_eq!(unknown.status, 400);
+
+    let list = get(&api, "/api/ops?status=failed").await;
+    assert_eq!(json_body(&list)["ops"][0]["status"], "failed");
+    assert_eq!(get(&api, "/api/ops?status=done").await.status, 400);
+    assert_eq!(get(&api, "/api/ops/missing").await.status, 404);
+    assert_eq!(
+        call(&api, Method::Post, "/api/ops/u-1/retry", b"")
+            .await
+            .status,
+        409
+    );
+    assert_eq!(
+        call(&api, Method::Delete, "/api/ops/u-1", b"").await.status,
+        204
+    );
+
+    let created = post(
+        &api,
+        "/api/labels",
+        &json!({ "name": "Work", "color": "#aa0000" }),
+    )
+    .await;
+    assert_eq!(
+        (created.status, json_body(&created)["key"].clone()),
+        (201, json!("work"))
+    );
+    let renamed = call(
+        &api,
+        Method::Patch,
+        "/api/labels/work",
+        br#"{"name":"Job"}"#,
+    )
+    .await;
+    assert_eq!(json_body(&renamed)["jobId"], json!(7));
+    let deleted = call(&api, Method::Delete, "/api/labels/work", b"").await;
+    assert_eq!(
+        (deleted.status, json_body(&deleted)["label"].clone()),
+        (202, Value::Null)
+    );
+    assert_eq!(
+        json_body(&get(&api, "/api/label-jobs").await)["jobs"],
+        json!([])
+    );
 }

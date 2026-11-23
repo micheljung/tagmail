@@ -10,6 +10,7 @@ use ts_rs::{Config, ExportError, TS};
 use crate::auth_dto::*;
 use crate::compose_dto::*;
 use crate::dto::*;
+use crate::ops_dto::*;
 
 /// Path of the generated bindings, relative to the workspace root.
 pub const OUT_DIR: &str = "packages/api-types/src/generated";
@@ -102,6 +103,18 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<ReplyMode>(&cfg, &mut files)?;
     file::<SendDto>(&cfg, &mut files)?;
     file::<SendStatusDto>(&cfg, &mut files)?;
+    file::<LabelChangeDto>(&cfg, &mut files)?;
+    file::<LabelJobDto>(&cfg, &mut files)?;
+    file::<LabelJobKindDto>(&cfg, &mut files)?;
+    file::<LabelJobStatusDto>(&cfg, &mut files)?;
+    file::<LabelJobsDto>(&cfg, &mut files)?;
+    file::<LabelPatchDto>(&cfg, &mut files)?;
+    file::<NewLabelDto>(&cfg, &mut files)?;
+    file::<NewOpDto>(&cfg, &mut files)?;
+    file::<OpDto>(&cfg, &mut files)?;
+    file::<OpKindDto>(&cfg, &mut files)?;
+    file::<OpStatusDto>(&cfg, &mut files)?;
+    file::<OpsDto>(&cfg, &mut files)?;
     files.insert(CSP_FILE.to_owned(), csp());
     let index: String = std::iter::once(INDEX_HEADER.to_owned())
         .chain(files.keys().map(|f| {

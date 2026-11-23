@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use tagmail_api_core::compose::Compose;
-use tagmail_api_core::{AccountRegistry, Api, ChangeFeed, EventSource};
+use tagmail_api_core::{AccountRegistry, Api, ChangeFeed, EventSource, WriteService};
 use tagmail_engine::{Engine, EngineConfig, ImapConnectorFactory, LettreSender, Stores};
 use tagmail_store::{BlobStore, CacheDb, ConfigDb};
 use tokio::net::TcpListener;
@@ -158,6 +158,7 @@ impl Server {
             .with_image_proxy(Arc::new(ImageFetcher::with_webpki_roots()?));
         if let Some(engine) = &engine {
             api = api.with_compose(engine.clone() as Arc<dyn Compose>);
+            api = api.with_writes(engine.clone() as Arc<dyn WriteService>);
         }
         let state = http::AppState {
             api: Arc::new(api),

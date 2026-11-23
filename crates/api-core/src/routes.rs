@@ -31,6 +31,15 @@ pub enum RouteId {
     CancelOutbox,
     RetryOutbox,
     Reply,
+    SubmitOp,
+    Ops,
+    Op,
+    RetryOp,
+    DiscardOp,
+    CreateLabel,
+    UpdateLabel,
+    DeleteLabel,
+    LabelJobs,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -80,6 +89,15 @@ pub const ROUTES: &[Route] = &[
     route(Method::Delete, "/api/outbox/{id}", RouteId::CancelOutbox),
     route(Method::Post, "/api/outbox/{id}/retry", RouteId::RetryOutbox),
     route(Method::Get, "/api/messages/{id}/reply", RouteId::Reply),
+    route(Method::Post, "/api/ops", RouteId::SubmitOp),
+    route(Method::Get, "/api/ops", RouteId::Ops),
+    route(Method::Get, "/api/ops/{id}", RouteId::Op),
+    route(Method::Post, "/api/ops/{id}/retry", RouteId::RetryOp),
+    route(Method::Delete, "/api/ops/{id}", RouteId::DiscardOp),
+    route(Method::Post, "/api/labels", RouteId::CreateLabel),
+    route(Method::Patch, "/api/labels/{key}", RouteId::UpdateLabel),
+    route(Method::Delete, "/api/labels/{key}", RouteId::DeleteLabel),
+    route(Method::Get, "/api/label-jobs", RouteId::LabelJobs),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -12,6 +12,7 @@ use tagmail_store::{BlobStore, CacheDb, changes};
 
 use crate::cache::W;
 use crate::error::Result;
+use crate::overlay::Overlays;
 
 #[derive(Clone)]
 pub struct Ctx {
@@ -19,6 +20,7 @@ pub struct Ctx {
     pub blobs: Arc<BlobStore>,
     pub feed: Arc<ChangeFeed>,
     pub account: AccountId,
+    pub overlays: Arc<Overlays>,
     clock: Arc<AtomicI64>,
 }
 
@@ -40,8 +42,15 @@ impl Ctx {
             blobs,
             feed,
             account,
+            overlays: Arc::default(),
             clock: Arc::new(AtomicI64::new(0)),
         }
+    }
+
+    /// Projects the pending ops in `overlays` over every write.
+    pub fn with_overlays(mut self, overlays: Arc<Overlays>) -> Ctx {
+        self.overlays = overlays;
+        self
     }
 
     /// Strictly increasing milliseconds, so every transaction of the
@@ -71,10 +80,11 @@ impl Ctx {
         let account = self.account.0;
         let now = self.tick();
         let epoch = self.cache.epoch();
+        let overlay = self.overlays.get(self.account);
         let (out, head) = self
             .cache
             .write(move |tx| {
-                let mut w = W::new(tx, account, now);
+                let mut w = W::new(tx, account, now).with_overlay(overlay);
                 let out = f(&mut w)?;
                 let head = if w.finish()? {
                     Some(changes::head(tx, epoch)?)

@@ -90,7 +90,7 @@ async fn cache_migrations_apply_to_fresh_db_and_reopen() {
     let path = dir.path().join("cache.db");
     let db = CacheDb::open(&path).unwrap();
     let epoch = db.epoch();
-    assert_eq!(user_version(&db).await, 2);
+    assert_eq!(user_version(&db).await, 3);
     assert_eq!(
         tables(&db).await,
         [

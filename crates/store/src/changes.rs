@@ -20,16 +20,23 @@ pub enum Entity {
     Label,
     /// A `config.db` outbox item; payload `{status, error?}`.
     Outbox,
+    /// A pending write's status; `entity_id` is the op's seq, the op id is
+    /// in the payload.
+    Op,
+    /// Progress of a label rename or delete job (`label_job.id`).
+    LabelJob,
 }
 
 impl Entity {
-    const ALL: [Entity; 6] = [
+    const ALL: [Entity; 8] = [
         Entity::Account,
         Entity::Mailbox,
         Entity::Thread,
         Entity::Message,
         Entity::Label,
         Entity::Outbox,
+        Entity::Op,
+        Entity::LabelJob,
     ];
 
     fn as_str(self) -> &'static str {
@@ -40,6 +47,8 @@ impl Entity {
             Entity::Message => "message",
             Entity::Label => "label",
             Entity::Outbox => "outbox",
+            Entity::Op => "op",
+            Entity::LabelJob => "label_job",
         }
     }
 }

@@ -3,15 +3,20 @@
 //! the change-log entries describing them (plan §3.2–3.6).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use serde_json::{Value, json};
 use tagmail_api_core::dto::AddressDto;
-use tagmail_core::{KeywordClass, KeywordSet, MessageRowId, SpecialUse, classify_keyword};
+use tagmail_core::ops::{self, ArchiveMode, MailboxView, Projected, Role};
+use tagmail_core::{
+    EmailId, Flags, KeywordClass, KeywordSet, MessageRowId, SpecialUse, classify_keyword,
+};
 use tagmail_imap::UidSet;
 use tagmail_store::rusqlite::{Connection, OptionalExtension, params};
 use tagmail_store::{ChangeOp, Entity, Error, FtsDocument, NewChange, Result, changes, fts};
 
 use crate::message::{Fetched, LocationState, NewMessage, address_text};
+use crate::overlay::AccountOverlay;
 use crate::threading::{self, ThreadInput};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -251,6 +256,10 @@ pub struct W<'a> {
     /// Initial-sync windows emit one `bulk:<mailbox>` entry instead of
     /// per-message and per-thread entries.
     bulk: BTreeSet<i64>,
+    overlay: Arc<AccountOverlay>,
+    /// The account's mailboxes `(id, name, special_use)`, read once per
+    /// transaction while the overlay is not empty.
+    views: Option<Vec<(i64, String, Option<SpecialUse>)>>,
 }
 
 impl<'a> W<'a> {
@@ -263,7 +272,149 @@ impl<'a> W<'a> {
             messages: BTreeSet::new(),
             threads: BTreeSet::new(),
             bulk: BTreeSet::new(),
+            overlay: Arc::default(),
+            views: None,
         }
+    }
+
+    pub fn with_overlay(mut self, overlay: Arc<AccountOverlay>) -> W<'a> {
+        self.overlay = overlay;
+        self
+    }
+
+    fn views(&mut self) -> Result<&[(i64, String, Option<SpecialUse>)]> {
+        if self.views.is_none() {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT id, name, special_use FROM mailbox WHERE account_id = ?1",
+            )?;
+            let rows = stmt
+                .query_map([self.account], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                })?
+                .collect::<tagmail_store::rusqlite::Result<Vec<_>>>()?;
+            self.views = Some(
+                rows.into_iter()
+                    .map(|(id, name, u)| (id, name, u.and_then(|u| u.parse().ok())))
+                    .collect(),
+            );
+        }
+        Ok(self.views.as_deref().unwrap_or_default())
+    }
+
+    fn archive_mode(&mut self) -> Result<ArchiveMode> {
+        let configured = self.overlay.archive_mode;
+        let has_all = self
+            .views()?
+            .iter()
+            .any(|(_, _, u)| *u == Some(SpecialUse::All));
+        Ok(ArchiveMode::detect(configured, has_all))
+    }
+
+    /// The mailboxes of the account as the projection sees them.
+    fn mailbox_views(&mut self) -> Result<Vec<(i64, String, Role, bool)>> {
+        let mode = self.archive_mode()?;
+        let views = self.views()?;
+        let archive = ops::archive_mailbox(mode, views.iter().map(|(_, n, u)| (n.as_str(), *u)))
+            .map(str::to_owned);
+        Ok(views
+            .iter()
+            .map(|(id, name, u)| {
+                (
+                    *id,
+                    name.clone(),
+                    Role::of(name, *u),
+                    archive.as_deref() == Some(name.as_str()),
+                )
+            })
+            .collect())
+    }
+
+    fn email_id(&self, message: i64) -> Result<Option<EmailId>> {
+        let id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT email_id FROM message WHERE id = ?1",
+                [message],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(id.and_then(|i| EmailId::parse(&i).ok()))
+    }
+
+    /// The server state of a location with the account's open ops on the
+    /// message applied; `None` when no op touches the message.
+    fn project(
+        &mut self,
+        mailbox: i64,
+        message: i64,
+        flags: Flags,
+        keywords: &KeywordSet,
+    ) -> Result<Option<Projected>> {
+        if self.overlay.ops.is_empty() {
+            return Ok(None);
+        }
+        let Some(email_id) = self.email_id(message)? else {
+            return Ok(None);
+        };
+        if !self.overlay.ops.touches(&email_id) {
+            return Ok(None);
+        }
+        let mode = self.archive_mode()?;
+        let views = self.mailbox_views()?;
+        let Some((_, name, role, is_archive)) = views.iter().find(|v| v.0 == mailbox) else {
+            return Ok(None);
+        };
+        let view = MailboxView {
+            name,
+            role: *role,
+            archive_mode: mode,
+            is_archive: *is_archive,
+        };
+        let overlay = self.overlay.clone();
+        Ok(Some(ops::project(
+            overlay.ops.ops_for(&email_id),
+            &view,
+            flags,
+            keywords.clone(),
+        )))
+    }
+
+    /// Mailboxes the account's open moving ops put `message` into.
+    fn pending_destinations(&mut self, message: i64) -> Result<Vec<i64>> {
+        if self.overlay.ops.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(email_id) = self.email_id(message)? else {
+            return Ok(Vec::new());
+        };
+        let overlay = self.overlay.clone();
+        let destinations: Vec<_> = overlay
+            .ops
+            .ops_for(&email_id)
+            .filter_map(|o| o.destination())
+            .collect();
+        if destinations.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mode = self.archive_mode()?;
+        let views = self.mailbox_views()?;
+        Ok(views
+            .iter()
+            .filter(|(_, name, role, is_archive)| {
+                let view = MailboxView {
+                    name,
+                    role: *role,
+                    archive_mode: mode,
+                    is_archive: *is_archive,
+                };
+                destinations.iter().any(|d| d.matches(&view))
+            })
+            .map(|v| v.0)
+            .collect())
     }
 
     pub fn emit(&mut self, entity: Entity, id: i64, op: ChangeOp, payload: Option<Value>) {
@@ -636,28 +787,157 @@ pub fn add_messages(w: &mut W<'_>, mailbox: i64, fetched: &[Fetched]) -> Result<
         if let Some(previous) = previous.filter(|p| *p != id) {
             w.touch_message(previous);
         }
-        upsert_location(w.conn, mailbox, id, &f.location)?;
+        upsert_location(w, mailbox, id, &f.location)?;
         w.touch_message(id);
     }
     Ok(())
 }
 
-fn upsert_location(conn: &Connection, mailbox: i64, message: i64, l: &LocationState) -> Result<()> {
-    let mut stmt = conn.prepare_cached(
-        "INSERT INTO location (mailbox_id, uid, message_id, flags, keywords, modseq) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+/// What a location row stores for a server state: the projected state,
+/// plus the server state itself when an op is projected over it.
+struct Stored {
+    flags: u8,
+    keywords: String,
+    srv_flags: Option<u8>,
+    srv_keywords: Option<String>,
+    hidden: bool,
+}
+
+fn stored(
+    w: &mut W<'_>,
+    mailbox: i64,
+    message: i64,
+    flags: Flags,
+    keywords: &KeywordSet,
+) -> Result<Stored> {
+    Ok(match w.project(mailbox, message, flags, keywords)? {
+        None => Stored {
+            flags: flags.bits(),
+            keywords: keywords.to_storage(),
+            srv_flags: None,
+            srv_keywords: None,
+            hidden: false,
+        },
+        Some(p) => Stored {
+            flags: p.flags.bits(),
+            keywords: p.keywords.to_storage(),
+            srv_flags: Some(flags.bits()),
+            srv_keywords: Some(keywords.to_storage()),
+            hidden: p.hidden,
+        },
+    })
+}
+
+fn upsert_location(w: &mut W<'_>, mailbox: i64, message: i64, l: &LocationState) -> Result<()> {
+    let s = stored(w, mailbox, message, l.flags, &l.keywords)?;
+    let mut stmt = w.conn.prepare_cached(
+        "INSERT INTO location (mailbox_id, uid, message_id, flags, keywords, modseq, \
+         srv_flags, srv_keywords, hidden) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
          ON CONFLICT (mailbox_id, uid) DO UPDATE SET message_id = excluded.message_id, \
-         flags = excluded.flags, keywords = excluded.keywords, modseq = excluded.modseq",
+         flags = excluded.flags, keywords = excluded.keywords, modseq = excluded.modseq, \
+         srv_flags = excluded.srv_flags, srv_keywords = excluded.srv_keywords, \
+         hidden = excluded.hidden",
     )?;
     stmt.execute(params![
         mailbox,
         l.uid,
         message,
-        l.flags.bits(),
-        l.keywords.to_storage(),
+        s.flags,
+        s.keywords,
         modseq_sql(l.modseq),
+        s.srv_flags,
+        s.srv_keywords,
+        s.hidden,
     ])?;
     Ok(())
+}
+
+/// `(mailbox_id, uid, flags, keywords, srv_flags, srv_keywords, hidden)`.
+type StoredRow = (i64, u32, u8, String, Option<u8>, Option<String>, bool);
+
+/// Re-projects the open ops over the server state of every location of
+/// `messages`: after an op is added, completes, fails or is discarded.
+pub fn reproject(w: &mut W<'_>, messages: &[i64]) -> Result<()> {
+    for &message in messages {
+        let rows: Vec<StoredRow> = {
+            let mut stmt = w.conn.prepare_cached(
+                "SELECT mailbox_id, uid, flags, keywords, srv_flags, srv_keywords, hidden \
+                 FROM location WHERE message_id = ?1",
+            )?;
+            stmt.query_map([message], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })?
+            .collect::<tagmail_store::rusqlite::Result<_>>()?
+        };
+        for (mailbox, uid, flags, keywords, srv_flags, srv_keywords, hidden) in rows {
+            let server_flags = Flags::from_bits(srv_flags.unwrap_or(flags));
+            let server_keywords =
+                KeywordSet::from_storage(srv_keywords.as_deref().unwrap_or(&keywords))?;
+            let s = stored(w, mailbox, message, server_flags, &server_keywords)?;
+            if s.flags != flags
+                || s.keywords != keywords
+                || s.srv_flags != srv_flags
+                || s.srv_keywords != srv_keywords
+                || s.hidden != hidden
+            {
+                w.conn.execute(
+                    "UPDATE location SET flags = ?3, keywords = ?4, srv_flags = ?5, \
+                     srv_keywords = ?6, hidden = ?7 WHERE mailbox_id = ?1 AND uid = ?2",
+                    params![
+                        mailbox,
+                        uid,
+                        s.flags,
+                        s.keywords,
+                        s.srv_flags,
+                        s.srv_keywords,
+                        s.hidden
+                    ],
+                )?;
+            }
+        }
+        w.touch_message(message);
+    }
+    Ok(())
+}
+
+/// Messages of the account with an overlay stored on any location.
+pub fn overlaid_messages(conn: &Connection, account: i64) -> Result<Vec<i64>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT DISTINCT l.message_id FROM location l JOIN message m ON m.id = l.message_id \
+         WHERE m.account_id = ?1 AND (l.srv_flags IS NOT NULL OR l.hidden = 1)",
+    )?;
+    let rows = stmt
+        .query_map([account], |r| r.get(0))?
+        .collect::<tagmail_store::rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
+/// Message rows of the account for `email_ids` that exist.
+pub fn messages_by_email_id(
+    conn: &Connection,
+    account: i64,
+    email_ids: &[String],
+) -> Result<Vec<i64>> {
+    let mut stmt =
+        conn.prepare_cached("SELECT id FROM message WHERE account_id = ?1 AND email_id = ?2")?;
+    let mut out = Vec::new();
+    for e in email_ids {
+        if let Some(id) = stmt
+            .query_row(params![account, e], |r| r.get::<_, i64>(0))
+            .optional()?
+        {
+            out.push(id);
+        }
+    }
+    Ok(out)
 }
 
 /// Applies FETCHed flags and keywords to known locations. Unknown UIDs are
@@ -665,28 +945,34 @@ fn upsert_location(conn: &Connection, mailbox: i64, message: i64, l: &LocationSt
 pub fn update_flags(w: &mut W<'_>, mailbox: i64, states: &[LocationState]) -> Result<usize> {
     let mut changed = 0;
     for s in states {
-        let row: Option<(i64, u8, String)> = w
+        let row: Option<(i64, u8, String, bool)> = w
             .conn
             .query_row(
-                "SELECT message_id, flags, keywords FROM location WHERE mailbox_id = ?1 AND uid = ?2",
+                "SELECT message_id, flags, keywords, hidden FROM location \
+                 WHERE mailbox_id = ?1 AND uid = ?2",
                 params![mailbox, s.uid],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        let Some((message, flags, keywords)) = row else {
+        let Some((message, flags, keywords, hidden)) = row else {
             continue;
         };
-        let new_keywords = s.keywords.to_storage();
-        let differs = flags != s.flags.bits() || !keywords.eq_ignore_ascii_case(&new_keywords);
+        let new = stored(w, mailbox, message, s.flags, &s.keywords)?;
+        let differs = flags != new.flags
+            || !keywords.eq_ignore_ascii_case(&new.keywords)
+            || hidden != new.hidden;
         w.conn.execute(
-            "UPDATE location SET flags = ?3, keywords = ?4, modseq = coalesce(?5, modseq) \
-             WHERE mailbox_id = ?1 AND uid = ?2",
+            "UPDATE location SET flags = ?3, keywords = ?4, modseq = coalesce(?5, modseq), \
+             srv_flags = ?6, srv_keywords = ?7, hidden = ?8 WHERE mailbox_id = ?1 AND uid = ?2",
             params![
                 mailbox,
                 s.uid,
-                s.flags.bits(),
-                new_keywords,
-                modseq_sql(s.modseq)
+                new.flags,
+                new.keywords,
+                modseq_sql(s.modseq),
+                new.srv_flags,
+                new.srv_keywords,
+                new.hidden
             ],
         )?;
         if differs {
@@ -907,9 +1193,29 @@ fn refresh_thread(w: &mut W<'_>, thread: i64, bulk: bool) -> Result<()> {
         "INSERT INTO thread_mailbox (thread_id, mailbox_id, last_date) \
          SELECT ?1, l.mailbox_id, max(m.date) FROM message m \
          JOIN location l ON l.message_id = m.id \
-         WHERE m.thread_id = ?1 AND m.tombstoned_at IS NULL GROUP BY l.mailbox_id",
+         WHERE m.thread_id = ?1 AND m.tombstoned_at IS NULL AND l.hidden = 0 \
+         GROUP BY l.mailbox_id",
         [thread],
     )?;
+    if !w.overlay.ops.is_empty() {
+        let members: Vec<(i64, i64)> = {
+            let mut stmt = w.conn.prepare_cached(
+                "SELECT id, date FROM message WHERE thread_id = ?1 AND tombstoned_at IS NULL",
+            )?;
+            stmt.query_map([thread], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<tagmail_store::rusqlite::Result<_>>()?
+        };
+        for (message, date) in members {
+            for mailbox in w.pending_destinations(message)? {
+                w.conn.execute(
+                    "INSERT INTO thread_mailbox (thread_id, mailbox_id, last_date) \
+                     VALUES (?1, ?2, ?3) ON CONFLICT (thread_id, mailbox_id) \
+                     DO UPDATE SET last_date = max(last_date, excluded.last_date)",
+                    params![thread, mailbox, date],
+                )?;
+            }
+        }
+    }
     if !bulk {
         let after = thread_mailboxes(w.conn, thread)?;
         let removed: Vec<i64> = before
@@ -922,6 +1228,16 @@ fn refresh_thread(w: &mut W<'_>, thread: i64, bulk: bool) -> Result<()> {
             [thread],
             |r| r.get(0),
         )?;
+        let labels: Vec<String> = {
+            let mut stmt = w.conn.prepare_cached(
+                "SELECT DISTINCT l.label_key FROM message m \
+                 JOIN message_label ml ON ml.message_id = m.id \
+                 JOIN label l ON l.id = ml.label_id \
+                 WHERE m.thread_id = ?1 AND m.tombstoned_at IS NULL ORDER BY l.label_key",
+            )?;
+            stmt.query_map([thread], |r| r.get(0))?
+                .collect::<tagmail_store::rusqlite::Result<_>>()?
+        };
         w.emit(
             Entity::Thread,
             thread,
@@ -930,6 +1246,7 @@ fn refresh_thread(w: &mut W<'_>, thread: i64, bulk: bool) -> Result<()> {
                 "lastDate": last_date,
                 "mailboxes": after.keys().collect::<Vec<_>>(),
                 "removedFrom": removed,
+                "labels": labels,
             })),
         );
     }
