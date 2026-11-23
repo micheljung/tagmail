@@ -20,7 +20,7 @@ use tagmail_imap::{Password, Security};
 use tagmail_store::Sealed;
 use tagmail_store::rusqlite::OptionalExtension;
 
-use crate::error::{Error, Result};
+use crate::error::{CLOSED, CONNECT_FAILED, Error, PROTOCOL_FAILED, Result, TIMED_OUT, TLS_FAILED};
 use crate::supervisor::Stores;
 
 /// Timeout of a submission, plus [`MIN_RATE`] for the message itself.
@@ -91,6 +91,29 @@ fn smtp(e: lettre::transport::smtp::Error) -> SmtpError {
     }
 }
 
+/// Like [`smtp`] for an account test: the server's own replies in full,
+/// failures below SMTP as a fixed category.
+fn coarse(e: lettre::transport::smtp::Error) -> SmtpError {
+    if e.is_permanent() || e.is_transient() || e.is_client() {
+        return smtp(e);
+    }
+    let category = if e.is_timeout() {
+        TIMED_OUT
+    } else if e.is_tls() {
+        TLS_FAILED
+    } else if e.is_response() {
+        PROTOCOL_FAILED
+    } else if e.is_transport_shutdown() {
+        CLOSED
+    } else {
+        CONNECT_FAILED
+    };
+    SmtpError {
+        permanent: false,
+        message: category.to_owned(),
+    }
+}
+
 /// The message file in chunks; a read error ends it early and is kept.
 struct Chunks {
     file: File,
@@ -131,12 +154,19 @@ fn has_8bit(path: &PathBuf) -> io::Result<bool> {
     }
 }
 
-/// Connects with the account's TLS mode and authenticates.
-async fn login(insecure: bool, server: SmtpServer) -> Result<AsyncSmtpConnection, SmtpError> {
+/// Connects with the account's TLS mode and authenticates; failures go
+/// through `error`.
+async fn login(
+    insecure: bool,
+    server: SmtpServer,
+    error: fn(lettre::transport::smtp::Error) -> SmtpError,
+) -> Result<AsyncSmtpConnection, SmtpError> {
     let hello = ClientId::default();
     let tls = || {
-        TlsParameters::new_rustls(server.host.clone())
-            .map_err(|e| permanent(format!("TLS setup: {e}")))
+        TlsParameters::new_rustls(server.host.clone()).map_err(|e| SmtpError {
+            permanent: true,
+            ..error(e)
+        })
     };
     let security = if insecure {
         Security::Plain
@@ -151,14 +181,14 @@ async fn login(insecure: bool, server: SmtpServer) -> Result<AsyncSmtpConnection
     let mut conn =
         AsyncSmtpConnection::connect_tokio1(address, Some(SMTP_TIMEOUT), &hello, wrapper, None)
             .await
-            .map_err(smtp)?;
+            .map_err(error)?;
     if security == Security::StartTls {
-        conn.starttls(tls()?, &hello).await.map_err(smtp)?;
+        conn.starttls(tls()?, &hello).await.map_err(error)?;
     }
     let credentials = Credentials::new(server.username, server.password.expose().to_owned());
     conn.auth(&[Mechanism::Plain, Mechanism::Login], &credentials)
         .await
-        .map_err(smtp)?;
+        .map_err(error)?;
     Ok(conn)
 }
 
@@ -177,7 +207,7 @@ async fn submit(
             .map_err(read)?
     };
     let file = File::open(&path).map_err(read)?;
-    let mut conn = login(insecure, server).await?;
+    let mut conn = login(insecure, server, smtp).await?;
     let mut parameters = Vec::new();
     let non_ascii = envelope
         .from()
@@ -232,7 +262,7 @@ impl SmtpSender for LettreSender {
     fn check(&self, server: SmtpServer) -> BoxFuture<Result<(), SmtpError>> {
         let insecure = self.insecure_plaintext;
         Box::pin(async move {
-            let mut conn = login(insecure, server).await?;
+            let mut conn = login(insecure, server, coarse).await?;
             let _ = conn.quit().await;
             Ok(())
         })
@@ -313,4 +343,74 @@ pub async fn load_server(stores: &Stores, id: AccountId) -> Result<SmtpServer> {
         username,
         password: Password::new(password.as_str()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+
+    use super::*;
+
+    fn server(port: u16) -> SmtpServer {
+        SmtpServer {
+            host: "127.0.0.1".to_owned(),
+            port,
+            security: Security::Tls,
+            username: "u".to_owned(),
+            password: Password::new("p"),
+        }
+    }
+
+    /// Serves one connection: writes each reply after reading a line,
+    /// the first one right away.
+    fn scripted(replies: &'static [&'static str]) -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut writer = stream;
+            for (i, reply) in replies.iter().enumerate() {
+                if i > 0 {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                }
+                let _ = writer.write_all(reply.as_bytes());
+            }
+        });
+        port
+    }
+
+    async fn check(port: u16) -> String {
+        let sender = LettreSender {
+            insecure_plaintext: true,
+        };
+        sender.check(server(port)).await.unwrap_err().message
+    }
+
+    #[tokio::test]
+    async fn account_test_shows_categories_below_smtp() {
+        let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        assert_eq!(check(port).await, CONNECT_FAILED);
+        assert_eq!(
+            check(scripted(&["SSH-2.0-OpenSSH_9.6 internal-host\r\n"])).await,
+            PROTOCOL_FAILED
+        );
+    }
+
+    #[tokio::test]
+    async fn account_test_keeps_the_servers_reply() {
+        let port = scripted(&[
+            "220 mail ready\r\n",
+            "250-mail\r\n250 AUTH PLAIN LOGIN\r\n",
+            "535 5.7.8 bad credentials\r\n",
+        ]);
+        let message = check(port).await;
+        assert!(message.contains("bad credentials"), "{message}");
+    }
 }

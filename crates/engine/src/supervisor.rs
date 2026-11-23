@@ -33,7 +33,7 @@ use tokio::time::Instant;
 
 use crate::cache::{self, MailboxRow, SyncState};
 use crate::ctx::Ctx;
-use crate::error::{Error, Result};
+use crate::error::{Error, Result, TIMED_OUT, test_message};
 use crate::executor;
 use crate::jobs::{JobFuture, Jobs, Priority, erase};
 use crate::overlay::Overlays;
@@ -932,7 +932,7 @@ impl<F: ConnectorFactory> Engine<F> {
         let imap_ms = elapsed_ms(started);
         let (imap, capabilities, mailboxes) = match imap {
             Ok(Ok((caps, n))) => (step(None, imap_ms), caps, u32::try_from(n).ok()),
-            Ok(Err(e)) => (step(Some(e.to_string()), imap_ms), Vec::new(), None),
+            Ok(Err(e)) => (step(Some(test_message(&e)), imap_ms), Vec::new(), None),
             Err(_) => (step(Some(TIMED_OUT.to_owned()), imap_ms), Vec::new(), None),
         };
         let server = SmtpServer {
@@ -961,7 +961,6 @@ impl<F: ConnectorFactory> Engine<F> {
 
 /// Each step of an account test gives up after this long.
 const TEST_TIMEOUT: Duration = Duration::from_secs(15);
-const TIMED_OUT: &str = "the server did not answer in time";
 
 fn security(mode: TlsMode) -> Security {
     match mode {
