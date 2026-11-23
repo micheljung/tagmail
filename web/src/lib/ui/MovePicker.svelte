@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { originsOf, pickers } from '../ops/actions.svelte';
-	import { isInbox, nav, ops } from '../stores';
+	import { isInbox, mailboxLabel, nav, ops } from '../stores';
 	import type { MailboxDto } from '../transport';
 	import Icon, { type IconName } from './Icon.svelte';
 
@@ -21,13 +21,15 @@
 	});
 
 	function displayName(m: MailboxDto): string {
-		return isInbox(m) ? 'Inbox' : m.name;
+		return mailboxLabel(m);
 	}
 
 	function icon(m: MailboxDto): IconName {
 		if (isInbox(m)) return 'inbox';
 		if (m.specialUse === 'trash') return 'trash';
 		if (m.specialUse === 'archive' || m.specialUse === 'all') return 'archive';
+		if (m.specialUse === 'junk') return 'alert';
+		if (m.specialUse === 'drafts') return 'pencil';
 		if (m.specialUse === 'sent') return 'send';
 		return 'folder';
 	}

@@ -1,5 +1,22 @@
-import type { LabelDto, MailboxDto } from '@tagmail/api-types';
+import type { LabelDto, MailboxDto, SpecialUseDto } from '@tagmail/api-types';
 import type { Api } from '../transport';
+
+const MORE_ORDER: readonly SpecialUseDto[] = ['drafts', 'archive', 'all', 'junk', 'trash'];
+
+const SPECIAL_NAMES: Partial<Record<SpecialUseDto, string>> = {
+	all: 'All mail',
+	archive: 'Archive',
+	drafts: 'Drafts',
+	junk: 'Spam',
+	sent: 'Sent',
+	trash: 'Trash'
+};
+
+/** How the UI names a mailbox: special-use folders by role, others by their path. */
+export function mailboxLabel(m: MailboxDto): string {
+	if (isInbox(m)) return 'Inbox';
+	return (m.specialUse && SPECIAL_NAMES[m.specialUse]) || m.name;
+}
 
 /** IMAP reserves the name INBOX, case-insensitively, for the inbox. */
 export function isInbox(m: MailboxDto): boolean {
@@ -32,9 +49,22 @@ export class NavStore {
 
 	mailboxName(id: number): string {
 		const box = this.mailboxes.find((m) => m.id === id);
-		if (!box) return 'another folder';
-		return isInbox(box) ? 'Inbox' : box.name;
+		return box ? mailboxLabel(box) : 'another folder';
 	}
+
+	/** The player's own folders: neither the Inbox nor a special-use mailbox. */
+	folders = $derived(
+		this.mailboxes
+			.filter((m) => !isInbox(m) && m.specialUse === null)
+			.sort((a, b) => a.name.localeCompare(b.name))
+	);
+
+	/** Special-use mailboxes for the "More" section, in Gmail's order. */
+	specials = $derived(
+		this.mailboxes
+			.filter((m) => m.specialUse !== null && MORE_ORDER.includes(m.specialUse))
+			.sort((a, b) => MORE_ORDER.indexOf(a.specialUse!) - MORE_ORDER.indexOf(b.specialUse!))
+	);
 
 	load(): Promise<void> {
 		this.#loading ??= this.#fetch().finally(() => (this.#loading = null));

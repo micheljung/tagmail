@@ -249,6 +249,29 @@ test('renaming a label keeps its conversations under the new name', async ({ pag
 	await expect(page.locator('.total')).toHaveText(count!);
 });
 
+test('the mailbox route lists a folder and More reveals the special ones', async ({ page }) => {
+	await page.keyboard.press('#');
+	await total(page, 99_999);
+	const nav = page.getByRole('navigation');
+	await nav.getByRole('link', { name: 'Projects' }).click();
+	await expect(page.getByText('Projects is empty')).toBeVisible();
+	await expect(nav.getByRole('link', { name: 'Trash' })).toHaveCount(0);
+	await nav.getByRole('button', { name: 'More' }).click();
+	await expect(nav.getByRole('link', { name: 'Spam' })).toBeVisible();
+	await nav.getByRole('link', { name: 'Trash' }).click();
+	await expect(page).toHaveURL(/\/mailbox\/4$/);
+	await expect(nav.getByRole('link', { name: 'Trash' })).toHaveAttribute('aria-current', 'page');
+	await total(page, 1);
+	await expect(row(page, 0)).toHaveId(`thread-${idAt(0)}`);
+	await list(page, 'Folder Trash').focus();
+	await page.keyboard.press('v');
+	await page.keyboard.type('inbox');
+	await page.keyboard.press('Enter');
+	await expect(page.getByText('Trash is empty')).toBeVisible();
+	await page.goto('/inbox');
+	await total(page, 100_000);
+});
+
 test('undo returns trashed threads from a label list to their own folders', async ({ page }) => {
 	const label = LABELS.find((l) => l.key === 'travel')!;
 	await page.goto(`/label/${label.key}`);

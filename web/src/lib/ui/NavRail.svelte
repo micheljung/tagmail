@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { labelColor } from '../format';
-	import { nav, theme } from '../stores';
+	import { mailboxLabel, nav, theme } from '../stores';
+	import type { MailboxDto } from '../transport';
 	import Icon, { type IconName } from './Icon.svelte';
 
 	let {
@@ -37,6 +38,25 @@
 		}
 	];
 
+	let moreOpen = $state(false);
+
+	const currentMailbox = $derived(
+		page.url.pathname.startsWith('/mailbox/') ? Number(page.params.id) : null
+	);
+
+	function specialIcon(m: MailboxDto): IconName {
+		switch (m.specialUse) {
+			case 'trash':
+				return 'trash';
+			case 'junk':
+				return 'alert';
+			case 'drafts':
+				return 'pencil';
+			default:
+				return 'archive';
+		}
+	}
+
 	const currentLabel = $derived(
 		page.url.pathname.startsWith('/label/') ? decodeURIComponent(page.params.name ?? '') : null
 	);
@@ -56,7 +76,50 @@
 				</a>
 			</li>
 		{/each}
+		{#each nav.folders as box (box.id)}
+			<li>
+				<a
+					href="/mailbox/{box.id}"
+					aria-current={currentMailbox === box.id ? 'page' : undefined}
+					onclick={onnavigate}
+				>
+					<Icon name="folder" />
+					<span>{box.name}</span>
+				</a>
+			</li>
+		{/each}
+		{#if nav.specials.length > 0}
+			<li>
+				<button
+					class="more"
+					aria-expanded={moreOpen || nav.specials.some((m) => m.id === currentMailbox)}
+					aria-controls="nav-more"
+					onclick={() => (moreOpen = !moreOpen)}
+				>
+					<Icon
+						name={moreOpen || nav.specials.some((m) => m.id === currentMailbox) ? 'up' : 'down'}
+					/>
+					<span>More</span>
+				</button>
+			</li>
+		{/if}
 	</ul>
+	{#if moreOpen || nav.specials.some((m) => m.id === currentMailbox)}
+		<ul class="primary" id="nav-more">
+			{#each nav.specials as box (box.id)}
+				<li>
+					<a
+						href="/mailbox/{box.id}"
+						aria-current={currentMailbox === box.id ? 'page' : undefined}
+						onclick={onnavigate}
+					>
+						<Icon name={specialIcon(box)} />
+						<span>{mailboxLabel(box)}</span>
+					</a>
+				</li>
+			{/each}
+		</ul>
+	{/if}
 
 	<h2 class="heading">Labels</h2>
 	{#if nav.labels.length > 0}
@@ -157,7 +220,8 @@
 		list-style: none;
 	}
 
-	a {
+	a,
+	.more {
 		display: flex;
 		align-items: center;
 		gap: 14px;
@@ -169,13 +233,22 @@
 		font-weight: 520;
 	}
 
-	a span {
+	a span,
+	.more span {
 		overflow: hidden;
 		white-space: nowrap;
 		text-overflow: ellipsis;
 	}
 
-	a:hover {
+	.more {
+		width: 100%;
+		border: 0;
+		background: none;
+		cursor: pointer;
+	}
+
+	a:hover,
+	.more:hover {
 		background: var(--hover);
 	}
 
