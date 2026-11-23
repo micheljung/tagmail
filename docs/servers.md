@@ -42,7 +42,18 @@ Consequences for Tagmail:
   `SEARCH SUBJECT` is unaffected. Header-search lookups (Message-ID based
   Sent and outbox matching) therefore cannot rely on it there. The IMAP
   integration test `sync_window_fetch_and_uid_search` pins the behaviour so
-  that it fails the day Stalwart fixes it.
+  that it fails the day Stalwart fixes it. When a header search comes back
+  empty from a mailbox that has messages, the engine reads the Message-ID
+  header of the newest 500 UIDs instead. That finds appended drafts and
+  sent copies, which land at the tail; an op that has to find older mail
+  again after a UIDVALIDITY change can still miss it on Stalwart, which
+  advertises OBJECTID, so this only matters for messages without one.
+- The engine probes each account once on its first connection: it sets the
+  hidden keyword `$tagmail_probe` on the newest INBOX message, reads it back
+  on another connection and clears it (`account.keyword_probe`: `ok`,
+  `dropped`, `unsupported`, or `skipped` while INBOX is empty). One keyword
+  cannot reveal Stalwart's limit; a label op whose keyword the server did not
+  keep marks the account `labels_degraded` until a later label is kept.
 
 Raw output of the runs above (Dovecot: `user2`; Stalwart: `user1`):
 
