@@ -88,7 +88,9 @@ impl Layout {
         }
         std::fs::rename(&tmp, self.root.join(POINTER_FILE))?;
         #[cfg(unix)]
-        std::fs::File::open(&self.root)?.sync_all()?;
+        if let Err(e) = std::fs::File::open(&self.root).and_then(|d| d.sync_all()) {
+            tracing::debug!(dir = %self.root.display(), error = %e, "replica root not synced");
+        }
         Ok(())
     }
 
