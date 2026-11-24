@@ -1,7 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
 	FALLBACK_URL,
 	notificationFor,
+	openApp,
 	fetchStrategy,
 	safeAppUrl,
 	servesShell,
@@ -230,5 +231,36 @@ describe('notificationFor', () => {
 		]
 	])('shows a generic notification for %s', (_name, data) => {
 		expect(notificationFor(data, ORIGIN)).toEqual(generic);
+	});
+});
+
+describe('openApp', () => {
+	function fakeClients(windows: number) {
+		const opened = Array.from({ length: windows }, () => ({
+			focus: vi.fn(() => Promise.resolve()),
+			postMessage: vi.fn()
+		}));
+		return {
+			opened,
+			matchAll: vi.fn(() => Promise.resolve(opened)),
+			openWindow: vi.fn(() => Promise.resolve(null))
+		};
+	}
+
+	it('focuses an open window and asks it to navigate in-app', async () => {
+		const clients = fakeClients(2);
+		await openApp(clients, '/thread/4711');
+		expect(clients.matchAll).toHaveBeenCalledWith({ type: 'window', includeUncontrolled: true });
+		const [first, second] = clients.opened;
+		expect(first.focus).toHaveBeenCalledOnce();
+		expect(first.postMessage).toHaveBeenCalledWith({ type: 'navigate', url: '/thread/4711' });
+		expect(second.postMessage).not.toHaveBeenCalled();
+		expect(clients.openWindow).not.toHaveBeenCalled();
+	});
+
+	it('opens a window when none is open', async () => {
+		const clients = fakeClients(0);
+		await openApp(clients, '/inbox');
+		expect(clients.openWindow).toHaveBeenCalledWith('/inbox');
 	});
 });

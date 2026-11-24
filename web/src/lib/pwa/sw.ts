@@ -130,3 +130,31 @@ export function notificationFor(data: string | null | undefined, origin: string)
 	const title = count > 1 ? `${count} new messages` : (from ?? 'New mail');
 	return spec(title, subject ?? '', tag, count > 1);
 }
+
+export interface AppWindow {
+	focus(): Promise<unknown>;
+	postMessage(message: unknown): void;
+}
+
+export interface AppClients {
+	matchAll(options: {
+		type: 'window';
+		includeUncontrolled: boolean;
+	}): Promise<readonly AppWindow[]>;
+	openWindow(url: string): Promise<unknown>;
+}
+
+/**
+ * Opens `url` from a notification. An open window is focused and navigates
+ * in-app on a message instead of reloading, so a draft being written
+ * survives the tap.
+ */
+export async function openApp(clients: AppClients, url: string): Promise<void> {
+	const [open] = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+	if (!open) {
+		await clients.openWindow(url);
+		return;
+	}
+	await open.focus();
+	open.postMessage({ type: 'navigate', url });
+}

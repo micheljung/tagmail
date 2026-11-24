@@ -5,6 +5,7 @@ import {
 	SHELL_PAGE,
 	fetchStrategy,
 	notificationFor,
+	openApp,
 	safeAppUrl,
 	servesShell,
 	shellCacheName,
@@ -68,24 +69,10 @@ self.addEventListener('push', (event) => {
 	event.waitUntil(self.registration.showNotification(title, options));
 });
 
-/**
- * An open window navigates in-app on a message instead of reloading, so a
- * draft being written survives the tap.
- */
-async function openApp(url: string): Promise<void> {
-	const [open] = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
-	if (!open) {
-		await self.clients.openWindow(url);
-		return;
-	}
-	await open.focus();
-	open.postMessage({ type: 'navigate', url });
-}
-
 self.addEventListener('notificationclick', (event) => {
 	event.notification.close();
 	const data = event.notification.data as { url?: unknown } | null;
-	event.waitUntil(openApp(safeAppUrl(data?.url, self.location.origin)));
+	event.waitUntil(openApp(self.clients, safeAppUrl(data?.url, self.location.origin)));
 });
 
 interface PushSubscriptionChangeEvent extends ExtendableEvent {
