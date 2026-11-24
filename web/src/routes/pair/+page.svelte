@@ -25,7 +25,7 @@
 		error = null;
 		try {
 			desktop.setStatus(await api.pair({ server: server.trim(), code: code.trim() }));
-			await goto('/inbox', { replaceState: true });
+			await goto('/inbox', { replace: true });
 		} catch (e) {
 			error = errorText(e);
 			busy = false;

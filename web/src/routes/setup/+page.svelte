@@ -21,7 +21,7 @@
 		error = null;
 		try {
 			await api.setup(token.trim(), password);
-			await goto('/inbox', { replaceState: true });
+			await goto('/inbox', { replace: true });
 		} catch (e) {
 			error = errorText(e);
 			busy = false;

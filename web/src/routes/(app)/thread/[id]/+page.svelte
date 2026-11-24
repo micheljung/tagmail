@@ -111,7 +111,7 @@
 		api.thread(current, controller.signal).then(
 			(d) => {
 				if (d.thread.id !== current) {
-					void goto(`/thread/${d.thread.id}`, { replaceState: true, state: page.state });
+					void goto(`/thread/${d.thread.id}`, { replace: true, state: page.state });
 					return;
 				}
 				detail = d;

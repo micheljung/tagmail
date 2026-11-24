@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { afterNavigate, goto, invalidateAll, replaceState } from '$app/navigation';
+	import { afterNavigate, goto, invalidateAll } from '$app/navigation';
 	import { page } from '$app/state';
 	import { shortcuts } from '#lib/shortcuts/index.ts';
 	import ComposeDock from '#lib/compose/ComposeDock.svelte';
@@ -83,7 +83,7 @@
 		}
 		const reloaded = navigation.from?.url.href === navigation.to?.url.href;
 		if (!reloaded) appIndex = pushed ? appIndex + 1 : 0;
-		void replaceState('', { ...page.state, appIndex });
+		void goto(page.url.href, { shallow: true, replace: true, state: { ...page.state, appIndex } });
 	});
 
 	function back() {

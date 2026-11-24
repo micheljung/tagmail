@@ -16,7 +16,7 @@
 	onMount(() => {
 		passkeys = passkeysSupported();
 		api.session().then(
-			() => goto(next(), { replaceState: true }),
+			() => goto(next(), { replace: true }),
 			(e: unknown) => {
 				if (e instanceof ApiError && e.code === 'setup_required') void goto('/setup');
 			}
@@ -33,7 +33,7 @@
 		error = null;
 		try {
 			await action();
-			await goto(next(), { replaceState: true });
+			await goto(next(), { replace: true });
 		} catch (e) {
 			error = errorText(e);
 			busy = null;
