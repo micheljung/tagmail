@@ -6,6 +6,7 @@ import {
 	enablePush,
 	fetchPushApi,
 	pushAvailability,
+	PUSH_OP_TIMEOUT_MS,
 	pushSyncer,
 	renewPush,
 	syncPush,
@@ -365,6 +366,25 @@ describe('settings changes', () => {
 
 		expect(calls).toEqual(['POST', 'PATCH']);
 		expect(prefs.value?.preview).toBe(false);
+	});
+
+	it('keep going after one hangs', async () => {
+		vi.useFakeTimers();
+		const api = fakeApi(OLD_KEY);
+		const answering = fakeApi(OLD_KEY);
+		api.updatePushSubscription = vi
+			.fn<PushApi['updatePushSubscription']>((id, patch) =>
+				answering.updatePushSubscription(id, patch)
+			)
+			.mockReturnValueOnce(new Promise(() => {}));
+		const hung = expect(
+			updatePush(api, memoryPrefs(SAVED), 1, { preview: true })
+		).rejects.toThrow();
+		const next = updatePush(api, memoryPrefs(SAVED), 1, { preview: false });
+		await vi.advanceTimersByTimeAsync(PUSH_OP_TIMEOUT_MS);
+		await hung;
+		await expect(next).resolves.toBeTruthy();
+		vi.useRealTimers();
 	});
 
 	it('keep going after one fails', async () => {

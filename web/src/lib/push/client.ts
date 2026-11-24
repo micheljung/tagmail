@@ -93,6 +93,9 @@ async function settingsOf(api: RegisterApi, prefs: PushPrefs | undefined): Promi
 		: { preview: prefs.preview };
 }
 
+/** A change that hangs longer than this gives way to the ones behind it. */
+export const PUSH_OP_TIMEOUT_MS = 30_000;
+
 let queue: Promise<unknown> = Promise.resolve();
 
 /**
@@ -100,7 +103,17 @@ let queue: Promise<unknown> = Promise.resolve();
  * re-registration can't overwrite a toggle the user made meanwhile.
  */
 function serialized<T>(op: () => Promise<T>): Promise<T> {
-	const run = queue.then(op);
+	const run = queue.then(() => {
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const timeout = new Promise<never>(
+			(_, reject) =>
+				(timer = setTimeout(
+					() => reject(new Error('Push settings change timed out')),
+					PUSH_OP_TIMEOUT_MS
+				))
+		);
+		return Promise.race([op(), timeout]).finally(() => clearTimeout(timer));
+	});
 	queue = run.catch(() => {});
 	return run;
 }
