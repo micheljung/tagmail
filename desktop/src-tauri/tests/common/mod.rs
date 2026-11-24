@@ -8,8 +8,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use tagmail_api_server::{Config, Server};
+use tagmail_core::{AccountId, EmailId, MessageRowId};
 use tagmail_store::rusqlite::params;
-use tagmail_store::{ChangeOp, Entity, NewChange, changes};
+use tagmail_store::{BlobKey, ChangeOp, DEFAULT_RAW_CAP, Entity, FtsDocument, NewChange, changes};
 use tempfile::TempDir;
 
 const PASSWORD: &str = "correct horse battery";
@@ -50,6 +51,22 @@ impl Env {
         }
     }
 
+    /// Like [`Env::start`] with `threads` single-message INBOX threads over
+    /// two years instead: thread `id` is newer than `id - 1`, every tenth
+    /// subject says "invoice", text and search rows exist for all of them
+    /// (text blobs only inside the window), and message [`OLD_RAW`] has its
+    /// raw body on the server.
+    pub async fn start_large(&self, threads: i64) -> Owner {
+        let server = Server::start(&self.config(), None).await.unwrap();
+        let cookie = setup_owner(&server).await;
+        seed_account(&server).await;
+        seed_large(&server, threads).await;
+        Owner {
+            server: Some(server),
+            cookie,
+        }
+    }
+
     /// Starts the server, sets up the owner and seeds an account with
     /// [`SEEDED_THREADS`] INBOX threads.
     pub async fn start(&self) -> Owner {
@@ -86,6 +103,18 @@ impl Owner {
             .await
             .unwrap();
         self.server = Some(server);
+    }
+
+    /// The thread ids of a view, as the web loads them.
+    pub async fn index(&self, view: &str) -> Vec<i64> {
+        let resp = reqwest::Client::new()
+            .get(format!("{}/api/views/{view}/index", self.url()))
+            .header("cookie", &self.cookie)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "{view}");
+        tagmail_api_core::id_index::decode(&resp.bytes().await.unwrap()).unwrap()
     }
 
     /// The server's ops, as the web lists them.
@@ -216,7 +245,7 @@ fn insert_thread(
     Ok(())
 }
 
-async fn seed(server: &Server) {
+async fn seed_account(server: &Server) {
     server
         .store()
         .config()
@@ -233,6 +262,10 @@ async fn seed(server: &Server) {
         })
         .await
         .unwrap();
+}
+
+async fn seed(server: &Server) {
+    seed_account(server).await;
     let date = now() - 3600;
     server
         .store()
@@ -250,6 +283,103 @@ async fn seed(server: &Server) {
         })
         .await
         .unwrap();
+}
+
+pub const OLD_RAW: i64 = 5;
+pub const OLD_BODY: &str = "from the archive";
+const SPAN: i64 = 2 * 365 * DAY;
+const WINDOW: i64 = 90 * DAY;
+pub const DAY: i64 = 86_400;
+
+pub fn large_subject(id: i64) -> String {
+    let topic = if id % 10 == 0 {
+        "invoice"
+    } else {
+        "meeting notes"
+    };
+    format!("{topic} {id}")
+}
+
+fn key(id: i64) -> BlobKey {
+    BlobKey::for_message(AccountId(1), &EmailId::parse(&format!("g:{id}")).unwrap())
+}
+
+async fn seed_large(server: &Server, threads: i64) {
+    let start = now();
+    let texts: Vec<(i64, String)> = server
+        .store()
+        .cache()
+        .write(move |tx| {
+            tx.execute(
+                "INSERT INTO mailbox (id, account_id, name, uidvalidity, sync_state) \
+                 VALUES (?1, 1, 'INBOX', 7, 'live')",
+                [INBOX],
+            )?;
+            let mut texts = Vec::new();
+            for id in 1..=threads {
+                let date = start - (threads - id) * SPAN / threads;
+                let subject = large_subject(id);
+                let body = format!("{subject}: the agenda for week {}", id % 52);
+                let in_window = start - date < WINDOW;
+                tx.execute(
+                    "INSERT INTO thread (id, account_id, subject_norm, last_date, msg_count, unread_count) \
+                     VALUES (?1, 1, ?2, ?3, 1, 0)",
+                    params![id, subject, date],
+                )?;
+                tx.execute(
+                    "INSERT INTO message (id, account_id, email_id, thread_id, date, subject, snippet, \
+                     from_json, text_blob) VALUES (?1, 1, ?2, ?1, ?3, ?4, ?5, \
+                     '[{\"email\":\"ann@x.example\"}]', ?6)",
+                    params![
+                        id,
+                        format!("g:{id}"),
+                        date,
+                        subject,
+                        &body,
+                        in_window.then(|| key(id).as_str().to_owned())
+                    ],
+                )?;
+                tx.execute(
+                    "INSERT INTO location (mailbox_id, uid, message_id, flags) VALUES (?1, ?2, ?2, 1)",
+                    params![INBOX, id],
+                )?;
+                tx.execute(
+                    "INSERT INTO thread_mailbox (thread_id, mailbox_id, last_date) VALUES (?1, ?2, ?3)",
+                    params![id, INBOX, date],
+                )?;
+                tagmail_store::fts::index(
+                    tx,
+                    MessageRowId(id),
+                    &FtsDocument {
+                        subject: &subject,
+                        from: "ann@x.example",
+                        to: "",
+                        body: &body,
+                    },
+                )?;
+                if in_window {
+                    texts.push((id, body));
+                }
+            }
+            Ok(texts)
+        })
+        .await
+        .unwrap();
+    let blobs = server.store().blobs().clone();
+    tokio::task::spawn_blocking(move || {
+        for (id, body) in texts {
+            blobs.put_text(&key(id), &body).unwrap();
+        }
+        let raw = format!(
+            "From: ann@x.example\r\nSubject: {}\r\nContent-Type: text/plain\r\n\r\n{OLD_BODY}\r\n",
+            large_subject(OLD_RAW)
+        );
+        let mut writer = blobs.raw_writer(key(OLD_RAW), DEFAULT_RAW_CAP).unwrap();
+        writer.write_chunk(raw.as_bytes()).unwrap();
+        writer.finish().unwrap();
+    })
+    .await
+    .unwrap();
 }
 
 pub async fn eventually<F, Fut>(what: &str, timeout: Duration, mut check: F)

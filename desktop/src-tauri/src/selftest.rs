@@ -18,13 +18,13 @@ use crate::state::Local;
 
 pub const PREFIX: &str = "/__selftest/";
 const PROBE_PREFIX: &str = "/__probe/";
-/// `TAGMAIL_DESKTOP_PROBE=compose` reports compose windows; `writes` runs
-/// the offline write check step by step.
+/// `TAGMAIL_DESKTOP_PROBE=compose` reports compose windows, `writes` runs
+/// the offline write check step by step, `parity` the 100k list checks.
 pub fn probe_head(kind: &str) -> String {
-    let script = if kind == "writes" {
-        "writes.js"
-    } else {
-        "probe.js"
+    let script = match kind {
+        "writes" => "writes.js",
+        "parity" => "parity.js",
+        _ => "probe.js",
     };
     format!(r#"<script type="module" src="/__probe/{script}"></script>"#)
 }
@@ -103,6 +103,9 @@ pub fn probe(req: &http::Request<Vec<u8>>) -> Option<HttpResponse> {
     let rest = req.uri().path().strip_prefix(PROBE_PREFIX)?;
     Some(match (req.method(), rest) {
         (&Method::GET, "probe.js") => file("text/javascript", include_str!("../selftest/probe.js")),
+        (&Method::GET, "parity.js") => {
+            file("text/javascript", include_str!("../selftest/parity.js"))
+        }
         (&Method::GET, "writes.js") => {
             file("text/javascript", include_str!("../selftest/writes.js"))
         }

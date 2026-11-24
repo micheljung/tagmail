@@ -68,6 +68,10 @@ required-features = ["app", "test-hooks"]
 name = "writes"
 required-features = ["app", "test-hooks"]
 
+[[test]]
+name = "parity"
+required-features = ["app", "test-hooks"]
+
 [build-dependencies]
 tauri-build = { version = "2.7", optional = true }
 

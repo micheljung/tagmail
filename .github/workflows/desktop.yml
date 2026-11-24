@@ -68,11 +68,11 @@ jobs:
       - run: TAGMAIL_DESKTOP_DATA_DIR="$RUNNER_TEMP/desktop" dbus-run-session -- xvfb-run -a target/debug/tagmail-desktop
         timeout-minutes: 5
       # AC 17 (D-Bus notification, tray count), AC 18 (xdg-open mailto:) and
-      # offline writes through the webview.
+      # offline writes and 100k-thread parity through the webview.
       - run: >-
           dbus-run-session -- xvfb-run -a
           cargo test --locked -p tagmail-desktop --features app,test-hooks
-          --test notify --test mailto --test writes -- --test-threads=1
+          --test notify --test mailto --test writes --test parity -- --test-threads=1
         timeout-minutes: 10
 
   # Build everywhere; the in-webview self-test is informational until

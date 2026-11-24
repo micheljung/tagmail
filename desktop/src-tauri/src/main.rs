@@ -231,6 +231,7 @@ fn main() {
     native::plugins(tauri::Builder::default())
         .register_asynchronous_uri_scheme_protocol("app", |ctx, req, responder| {
             let state = ctx.app_handle().state::<Arc<AppState>>().inner().clone();
+            tracing::debug!(method = %req.method(), uri = %req.uri(), "request");
             tauri::async_runtime::spawn(async move {
                 #[cfg(feature = "test-hooks")]
                 if let Some(resp) = tagmail_desktop::selftest::probe(&req) {

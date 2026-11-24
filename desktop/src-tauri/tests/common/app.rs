@@ -36,13 +36,17 @@ impl Lines {
         }
     }
 
-    /// The first line (since the last match) that satisfies `pred`.
+    /// The first line not yet matched that satisfies `pred`, including
+    /// lines that arrived while waiting for something else.
     pub async fn wait(
         &mut self,
         what: &str,
         timeout: Duration,
         pred: impl Fn(&str) -> bool,
     ) -> String {
+        if let Some(at) = self.seen.iter().position(|l| pred(l)) {
+            return self.seen.remove(at);
+        }
         let deadline = Instant::now() + timeout;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -50,7 +54,7 @@ impl Lines {
                 Ok(Some(line)) if pred(&line) => return line,
                 Ok(Some(line)) => self.seen.push(line),
                 _ => panic!(
-                    "timed out waiting for {what}; output so far:\n{}",
+                    "timed out waiting for {what}; unmatched output:\n{}",
                     self.seen.join("\n")
                 ),
             }
