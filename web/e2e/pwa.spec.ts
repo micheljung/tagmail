@@ -1,6 +1,6 @@
-import type { Page } from '@playwright/test';
+import type { BrowserContext, Page, Worker } from '@playwright/test';
 import { VAPID_PUBLIC_KEY } from './mock/push.ts';
-import { expect, signIn, test } from './helpers.ts';
+import { expect, openInbox, row, signIn, test } from './helpers.ts';
 
 const ENDPOINT = 'https://fcm.googleapis.com/fcm/send/e2e-device';
 const IPHONE_UA =
@@ -62,6 +62,55 @@ async function stubPush(page: Page, options: { existing?: string } = {}) {
 		},
 		{ endpoint: ENDPOINT, existing: options.existing }
 	);
+}
+
+const MANIFEST_ICONS = [
+	{ src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' },
+	{ src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png' },
+	{ src: '/icons/maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
+];
+
+async function controlled(page: Page) {
+	await page.evaluate(() => navigator.serviceWorker.ready.then(() => undefined));
+	await page.reload();
+	await expect
+		.poll(() => page.evaluate(() => navigator.serviceWorker.controller !== null))
+		.toBe(true);
+}
+
+async function cachedPaths(page: Page): Promise<string[]> {
+	return page.evaluate(async () => {
+		const paths: string[] = [];
+		for (const name of await caches.keys())
+			for (const request of await (await caches.open(name)).keys())
+				paths.push(new URL(request.url).pathname);
+		return paths;
+	});
+}
+
+interface Shown {
+	title: string;
+	options: { body: string; tag: string; renotify: boolean; data: { url: string } };
+}
+
+/**
+ * Headless Chromium denies notifications, so `showNotification` would
+ * reject; the worker records what it was asked to show instead.
+ */
+async function recordNotifications(context: BrowserContext): Promise<Worker> {
+	const worker = context.serviceWorkers()[0] ?? (await context.waitForEvent('serviceworker'));
+	await worker.evaluate(() => {
+		const scope = self as unknown as {
+			__shown: unknown[];
+			registration: ServiceWorkerRegistration;
+		};
+		scope.__shown = [];
+		scope.registration.showNotification = (title, options) => {
+			scope.__shown.push({ title, options });
+			return Promise.resolve();
+		};
+	});
+	return worker;
 }
 
 const stubState = (page: Page) =>
@@ -169,4 +218,112 @@ test.describe('in an iPhone Safari tab', () => {
 			'On iPhone and iPad, add Tagmail to your Home Screen first: Share → Add to Home Screen, then open it from there.'
 		);
 	});
+});
+
+test('the app is installable from its manifest', async ({ page, context }) => {
+	await signIn(page);
+	await page.goto('/inbox');
+	await page.evaluate(() => navigator.serviceWorker.ready.then(() => undefined));
+	const cdp = await context.newCDPSession(page);
+	expect(await cdp.send('Page.getInstallabilityErrors')).toEqual({ installabilityErrors: [] });
+
+	const response = await page.request.get('/manifest.webmanifest');
+	expect(response.headers()['content-type']).toBe('application/manifest+json');
+	expect(await response.json()).toEqual({
+		id: '/',
+		name: 'Tagmail',
+		short_name: 'Tagmail',
+		start_url: '/inbox',
+		scope: '/',
+		display: 'standalone',
+		background_color: '#ffffff',
+		theme_color: '#2350c8',
+		description: 'Mail with labels for your IMAP accounts',
+		icons: MANIFEST_ICONS
+	});
+	for (const { src } of MANIFEST_ICONS) {
+		const icon = await page.request.get(src);
+		expect(icon.headers()['content-type'], src).toBe('image/png');
+	}
+});
+
+test('the service worker controls the app and never caches the API', async ({ page }) => {
+	await openInbox(page);
+	await controlled(page);
+	await row(page, 0).click();
+	await page.keyboard.press('Enter');
+	await expect(page).toHaveURL(/\/thread\//);
+	await expect(page.locator('main')).toContainText(/\S/);
+
+	const paths = await cachedPaths(page);
+	expect(paths).toContain('/index.html');
+	expect(paths.some((p) => /^\/_app\/boot\.[0-9a-f]+\.js$/.test(p))).toBe(true);
+	expect(paths.filter((p) => p.startsWith('/api'))).toEqual([]);
+});
+
+test('offline, the app shell still loads and says so', async ({ page, context }) => {
+	await openInbox(page);
+	await controlled(page);
+	await context.setOffline(true);
+	await page.reload();
+	await expect(page.locator('[data-offline]')).toHaveText(
+		"You're offline. Mail will load when you're back online."
+	);
+	await expect(page.getByRole('link', { name: 'Inbox', exact: true })).toBeVisible();
+	await context.setOffline(false);
+	await page.reload();
+	await expect(row(page, 0).locator('[data-loaded]')).toBeVisible();
+	await expect(page.locator('[data-offline]')).toHaveCount(0);
+});
+
+test('a push shows its notification, without preview and when malformed too', async ({
+	page,
+	context
+}) => {
+	await signIn(page);
+	await page.goto('/inbox');
+	await page.evaluate(() => navigator.serviceWorker.ready.then(() => undefined));
+	const worker = await recordNotifications(context);
+	const cdp = await context.newCDPSession(page);
+	const registrations: string[] = [];
+	cdp.on('ServiceWorker.workerRegistrationUpdated', (e) =>
+		registrations.push(...e.registrations.map((r) => r.registrationId))
+	);
+	await cdp.send('ServiceWorker.enable');
+	await expect.poll(() => registrations.length).toBeGreaterThan(0);
+	const deliver = (data: string) =>
+		cdp.send('ServiceWorker.deliverPushMessage', {
+			origin: new URL(page.url()).origin,
+			registrationId: registrations[0],
+			data
+		});
+
+	await deliver(
+		JSON.stringify({
+			v: 1,
+			kind: 'newMail',
+			accountId: 1,
+			count: 1,
+			threadId: 4711,
+			from: 'Alice Example',
+			subject: 'Lunch?',
+			url: '/thread/4711'
+		})
+	);
+	await deliver(JSON.stringify({ v: 1, kind: 'newMail', accountId: 1, count: 1, url: '/inbox' }));
+	await deliver('{"v":1,"kind":');
+
+	const shown = () => worker.evaluate(() => (self as unknown as { __shown: Shown[] }).__shown);
+	await expect.poll(async () => (await shown()).length).toBe(3);
+	const summary = (await shown()).map(({ title, options }) => ({
+		title,
+		body: options.body,
+		tag: options.tag,
+		url: options.data.url
+	}));
+	expect(summary).toEqual([
+		{ title: 'Alice Example', body: 'Lunch?', tag: 'inbox-1', url: '/thread/4711' },
+		{ title: 'New mail', body: '', tag: 'inbox-1', url: '/inbox' },
+		{ title: 'New mail', body: '', tag: 'tagmail', url: '/inbox' }
+	]);
 });
