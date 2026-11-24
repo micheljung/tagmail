@@ -232,3 +232,79 @@ async fn a_stored_plain_http_server_is_not_resumed() {
         "{status}"
     );
 }
+
+async fn pair(shell: &Shell<Desktop>, owner: &common::Owner) -> Value {
+    let code = owner.pairing_code().await;
+    let paired = call(
+        shell,
+        Method::POST,
+        "/api/desktop/pair",
+        json!({ "server": owner.url(), "code": code }),
+    )
+    .await;
+    assert_eq!(paired.status(), 200, "{:?}", json_of(&paired));
+    json_of(&paired)
+}
+
+fn host(owner: &common::Owner) -> String {
+    owner.url().trim_start_matches("http://").to_owned()
+}
+
+#[tokio::test]
+async fn another_server_keeps_unsent_work_local_and_says_so() {
+    let env_a = Env::new();
+    let a = env_a.start().await;
+    let env_b = Env::new();
+    let b = env_b.start().await;
+    let emitted = Recorder::default();
+    let (_, shell) = open(&env_a, &emitted).await;
+    pair(&shell, &a).await;
+
+    eventually("the identities", SYNC, || async {
+        let resp = call(&shell, Method::GET, "/api/identities", Value::Null).await;
+        resp.status() == 200 && !json_of(&resp)["identities"][0]["id"].is_null()
+    })
+    .await;
+    let identities = call(&shell, Method::GET, "/api/identities", Value::Null).await;
+    let draft = call(
+        &shell,
+        Method::POST,
+        "/api/drafts",
+        json!({
+            "identityId": json_of(&identities)["identities"][0]["id"],
+            "to": [{ "email": "bob@x.example" }],
+            "cc": [],
+            "bcc": [],
+            "subject": "For server A",
+            "text": "hello",
+            "attachmentIds": [],
+            "saveNow": false,
+        }),
+    )
+    .await;
+    assert!(draft.status().is_success(), "{:?}", json_of(&draft));
+
+    let warned = format!(
+        "1 unsent change for {} stays on this device and is not sent to {}.",
+        host(&a),
+        host(&b)
+    );
+    let status = pair(&shell, &b).await;
+    assert!(
+        status["warnings"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(warned)),
+        "{status}"
+    );
+
+    call(&shell, Method::POST, "/api/desktop/unpair", Value::Null).await;
+    let again = pair(&shell, &b).await;
+    assert!(
+        !again["warnings"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(warned)),
+        "{again}"
+    );
+}

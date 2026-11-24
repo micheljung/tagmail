@@ -16,8 +16,9 @@ use tagmail_api_core::dto::ApiErrorDto;
 use tagmail_api_core::events::EventSource;
 use tagmail_api_core::sqlite_store::SqliteStore;
 use tagmail_replica::client::REQUEST_TIMEOUT;
+use tagmail_replica::durable::FROM_OTHER_SERVER;
 use tagmail_replica::{
-    ClientError, Durable, Layout, Phase, Replica, ReplicaEvent, Router, ServerClient,
+    Binding, ClientError, Durable, Layout, Phase, Replica, ReplicaEvent, Router, ServerClient,
 };
 use tokio::sync::{broadcast, watch};
 use url::Url;
@@ -30,10 +31,13 @@ use crate::token::{FILE_WARNING, TokenStore};
 pub const STATUS: &str = "desktop:status";
 pub const UPDATE_REQUIRED: &str = "desktop:update-required";
 const SERVER_KEY: &str = "server_url";
+const BOUND_SERVER_KEY: &str = "bound_server";
 const DEVICE_NAME_KEY: &str = "device_name";
 const TOKEN_FILE: &str = "device-token";
 const EVENT_BUFFER: usize = 64;
 const MAX_DEVICE_NAME: usize = 100;
+const INSECURE_SERVER: &str =
+    "an https address, e.g. https://mail.example.com (plain http only for localhost)";
 pub const INSECURE_WARNING: &str = "The stored server address uses plain http, so this device \
      stopped syncing with it. Pair again with an https address.";
 
@@ -54,9 +58,15 @@ pub struct Desktop {
     events: broadcast::Sender<ReplicaEvent>,
     last_sync: AtomicI64,
     insecure_server: AtomicBool,
+    rebound: Mutex<Option<String>>,
     changed: watch::Sender<u64>,
     settings_tx: watch::Sender<DesktopSettingsDto>,
 }
+
+const QUARANTINED: &str = "SELECT \
+     (SELECT count(*) FROM intent WHERE state = 'failed' AND error = ?1) \
+     + (SELECT count(*) FROM outbox WHERE state = 'failed' AND error = ?1) \
+     + (SELECT count(*) FROM draft WHERE other_server = 1)";
 
 const UNREAD_INBOX: &str = "SELECT count(DISTINCT t.id) FROM thread t \
      JOIN thread_mailbox tm ON tm.thread_id = t.id \
@@ -109,6 +119,14 @@ fn loopback(url: &Url) -> bool {
     }
 }
 
+fn host_label(url: &Url) -> String {
+    let host = url.host_str().unwrap_or_default();
+    match url.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    }
+}
+
 /// Plain http only reaches this machine; anything else needs https.
 pub fn server_url(raw: &str) -> Option<Url> {
     let url = Url::parse(raw.trim()).ok()?;
@@ -152,6 +170,7 @@ impl Desktop {
             events: broadcast::channel(EVENT_BUFFER).0,
             last_sync: AtomicI64::new(0),
             insecure_server: AtomicBool::new(false),
+            rebound: Mutex::new(None),
         });
         let server = desktop.stored_server()?;
         let token = desktop.tokens.load().unwrap_or_else(|e| {
@@ -208,6 +227,38 @@ impl Desktop {
         self.running.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    fn lock_rebound(&self) -> std::sync::MutexGuard<'_, Option<String>> {
+        self.rebound.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Binds the durable rows to `server` and words what stays behind when
+    /// they were written for another one.
+    fn bind(&self, server: &Url) -> tagmail_replica::Result<Option<String>> {
+        let previous = self
+            .durable
+            .meta(BOUND_SERVER_KEY)?
+            .and_then(|raw| Url::parse(&raw).ok());
+        if self.durable.bind_server(server)? == Binding::Bound {
+            return Ok(None);
+        }
+        let unsent: i64 = self
+            .durable
+            .conn()
+            .query_row(QUARANTINED, [FROM_OTHER_SERVER], |r| r.get(0))?;
+        let old = previous.map_or_else(|| "the previous server".to_owned(), |u| host_label(&u));
+        Ok((unsent > 0).then(|| {
+            let (changes, stay, are) = if unsent == 1 {
+                ("change", "stays", "is")
+            } else {
+                ("changes", "stay", "are")
+            };
+            format!(
+                "{unsent} unsent {changes} for {old} {stay} on this device and {are} not sent to {}.",
+                host_label(server)
+            )
+        }))
+    }
+
     fn lock_settings(&self) -> std::sync::MutexGuard<'_, DesktopSettingsDto> {
         self.settings.lock().unwrap_or_else(|e| e.into_inner())
     }
@@ -262,7 +313,10 @@ impl Desktop {
     }
 
     async fn exchange(server: &Url, code: &str) -> Result<DeviceTokenDto, api::Response> {
-        let client = ServerClient::new(server, None).map_err(internal)?;
+        let client = ServerClient::new(server, None).map_err(|e| match e {
+            ClientError::Insecure(_) => invalid("server", INSECURE_SERVER),
+            other => internal(other),
+        })?;
         let request = client
             .request(reqwest::Method::POST, "api/pairing/exchange")
             .map_err(internal)?
@@ -392,6 +446,7 @@ impl Backend for Desktop {
         if self.insecure_server.load(Ordering::Relaxed) {
             warnings.push(INSECURE_WARNING.to_owned());
         }
+        warnings.extend(self.lock_rebound().clone());
         let Some(replica) = self.replica() else {
             return DesktopStatusDto {
                 paired: false,
@@ -422,10 +477,7 @@ impl Backend for Desktop {
 
     async fn pair(&self, server: String, code: String) -> Result<DesktopStatusDto, api::Response> {
         let Some(url) = server_url(&server) else {
-            return Err(invalid(
-                "server",
-                "an https address, e.g. https://mail.example.com (plain http only for localhost)",
-            ));
+            return Err(invalid("server", INSECURE_SERVER));
         };
         let code = code.trim();
         if code.is_empty() {
@@ -438,6 +490,7 @@ impl Backend for Desktop {
             self.layout.discard().map_err(internal)?;
         }
         self.insecure_server.store(false, Ordering::Relaxed);
+        *self.lock_rebound() = self.bind(&url).map_err(internal)?;
         self.tokens.save(&token.token).map_err(internal)?;
         self.durable
             .set_meta(SERVER_KEY, url.as_str())
@@ -460,6 +513,7 @@ impl Backend for Desktop {
             tracing::warn!(error = %e, "forgetting the server failed");
         }
         self.insecure_server.store(false, Ordering::Relaxed);
+        *self.lock_rebound() = None;
         if let Err(e) = self.layout.discard() {
             tracing::warn!(error = %e, "removing the replica failed");
         }
