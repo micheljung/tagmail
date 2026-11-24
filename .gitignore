@@ -4,3 +4,5 @@ node_modules/
 build/
 .omc/
 *.db
+/master.key
+/compose.yml
