@@ -18,7 +18,16 @@ use crate::state::Local;
 
 pub const PREFIX: &str = "/__selftest/";
 const PROBE_PREFIX: &str = "/__probe/";
-pub const PROBE_HEAD: &str = r#"<script type="module" src="/__probe/probe.js"></script>"#;
+/// `TAGMAIL_DESKTOP_PROBE=compose` reports compose windows; `writes` runs
+/// the offline write check step by step.
+pub fn probe_head(kind: &str) -> String {
+    let script = if kind == "writes" {
+        "writes.js"
+    } else {
+        "probe.js"
+    };
+    format!(r#"<script type="module" src="/__probe/{script}"></script>"#)
+}
 pub const INDEX_HEAD: &str = r#"<script type="module" src="/__selftest/selftest.js"></script>"#;
 pub const THREADS: i64 = 60;
 pub const RENDER_MESSAGE: i64 = 1;
@@ -87,12 +96,33 @@ impl SelfTest {
     }
 }
 
-/// The compose probe (`TAGMAIL_DESKTOP_PROBE=1`): prints each compose
-/// window's fields as a `DESKTOP_PROBE {json}` line. `None` outside its paths.
+/// Probe routes: scripts, steps a test unlocks by creating
+/// `<data dir>/probe-<name>`, and reports printed as `DESKTOP_PROBE {json}`
+/// lines. `None` outside its paths.
 pub fn probe(req: &http::Request<Vec<u8>>) -> Option<HttpResponse> {
     let rest = req.uri().path().strip_prefix(PROBE_PREFIX)?;
     Some(match (req.method(), rest) {
         (&Method::GET, "probe.js") => file("text/javascript", include_str!("../selftest/probe.js")),
+        (&Method::GET, "writes.js") => {
+            file("text/javascript", include_str!("../selftest/writes.js"))
+        }
+        (&Method::GET, "step") => {
+            let name = form_urlencoded::parse(req.uri().query().unwrap_or("").as_bytes())
+                .find(|(k, _)| k == "name")
+                .map(|(_, v)| v.into_owned())
+                .filter(|n| n.chars().all(|c| c.is_ascii_alphanumeric()));
+            let dir = std::env::var_os("TAGMAIL_DESKTOP_DATA_DIR");
+            match (name, dir) {
+                (Some(name), Some(dir))
+                    if std::path::Path::new(&dir)
+                        .join(format!("probe-{name}"))
+                        .exists() =>
+                {
+                    status(StatusCode::OK, "go")
+                }
+                _ => status(StatusCode::NO_CONTENT, ""),
+            }
+        }
         (&Method::POST, "report") => {
             println!("DESKTOP_PROBE {}", String::from_utf8_lossy(req.body()));
             json_response(&json!({}))

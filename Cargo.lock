@@ -5909,6 +5909,7 @@ dependencies = [
  "tagmail-api-core",
  "tagmail-api-server",
  "tagmail-core",
+ "tagmail-engine",
  "tagmail-replica",
  "tagmail-store",
  "tauri",

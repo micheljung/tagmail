@@ -109,10 +109,9 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let links = Arc::new(LinkQueue::new(Box::new(AppEmit(handle.clone()))));
     let shell = shell(app, Arc::clone(&desktop)).with_links(Arc::clone(&links));
     #[cfg(feature = "test-hooks")]
-    let shell = if std::env::var_os("TAGMAIL_DESKTOP_PROBE").is_some() {
-        shell.with_index_head(tagmail_desktop::selftest::PROBE_HEAD.to_owned())
-    } else {
-        shell
+    let shell = match std::env::var("TAGMAIL_DESKTOP_PROBE") {
+        Ok(kind) => shell.with_index_head(tagmail_desktop::selftest::probe_head(&kind)),
+        Err(_) => shell,
     };
     open(
         app,

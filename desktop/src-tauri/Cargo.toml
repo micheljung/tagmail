@@ -64,6 +64,10 @@ required-features = ["app", "test-hooks"]
 name = "mailto"
 required-features = ["app", "test-hooks"]
 
+[[test]]
+name = "writes"
+required-features = ["app", "test-hooks"]
+
 [build-dependencies]
 tauri-build = { version = "2.7", optional = true }
 
@@ -74,3 +78,4 @@ tempfile.workspace = true
 [target.'cfg(unix)'.dev-dependencies]
 reqwest = { workspace = true, features = ["rustls-no-provider", "json"] }
 tagmail-api-server = { path = "../../crates/api-server" }
+tagmail-engine.workspace = true

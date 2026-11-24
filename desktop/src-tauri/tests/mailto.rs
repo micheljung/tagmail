@@ -28,7 +28,7 @@ async fn a_mailto_link_opens_compose_in_the_running_app() {
     let pair = format!("{},{}", owner.url(), owner.pairing_code().await);
     command
         .env("TAGMAIL_DESKTOP_PAIR", pair)
-        .env("TAGMAIL_DESKTOP_PROBE", "1");
+        .env("TAGMAIL_DESKTOP_PROBE", "compose");
     let mut app = Lines::spawn(command);
     app.wait("the live replica", START, |l| {
         l.starts_with("DESKTOP_STATUS") && l.contains(LIVE)

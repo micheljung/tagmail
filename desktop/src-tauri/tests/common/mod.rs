@@ -56,18 +56,54 @@ impl Env {
         let server = Server::start(&self.config(), None).await.unwrap();
         let cookie = setup_owner(&server).await;
         seed(&server).await;
-        Owner { server, cookie }
+        Owner {
+            server: Some(server),
+            cookie,
+        }
     }
 }
 
 pub struct Owner {
-    pub server: Server,
+    server: Option<Server>,
     cookie: String,
 }
 
 impl Owner {
+    pub fn server(&self) -> &Server {
+        self.server.as_ref().expect("server running")
+    }
+
+    pub async fn stop(&mut self) {
+        self.server.take().unwrap().shutdown().await.unwrap();
+    }
+
+    /// Starts again on the same data and port, now with the sync engine so
+    /// writes are accepted (the seeded account has no reachable IMAP
+    /// server, so ops stay pending).
+    pub async fn restart_with_engine(&mut self, env: &Env) {
+        let engine = tagmail_engine::EngineConfig::default();
+        let server = Server::start_with_engine(&env.config(), engine)
+            .await
+            .unwrap();
+        self.server = Some(server);
+    }
+
+    /// The server's ops, as the web lists them.
+    pub async fn ops(&self) -> Vec<Value> {
+        let body: Value = reqwest::Client::new()
+            .get(format!("{}/api/ops", self.url()))
+            .header("cookie", &self.cookie)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        body["ops"].as_array().cloned().unwrap_or_default()
+    }
+
     pub fn url(&self) -> String {
-        format!("http://{}", self.server.local_addr())
+        format!("http://{}", self.server().local_addr())
     }
 
     /// A fresh single-use pairing code, as the web's Devices page makes.
@@ -105,7 +141,7 @@ impl Owner {
         let date = now();
         let subject = subject.to_owned();
         let from = format!(r#"[{{"email":"{from}"}}]"#);
-        self.server
+        self.server()
             .store()
             .cache()
             .write(move |tx| {
@@ -124,9 +160,9 @@ impl Owner {
             })
             .await
             .unwrap();
-        self.server
+        self.server()
             .feed()
-            .publish(self.server.store().cache().head().await.unwrap());
+            .publish(self.server().store().cache().head().await.unwrap());
     }
 }
 
