@@ -26,10 +26,6 @@ pub const PASSWORD: &str = "engine";
 pub const LIVE_BUDGET: Duration = Duration::from_secs(10);
 pub const POLL: Duration = Duration::from_secs(2);
 
-pub fn addr() -> (String, u16) {
-    addr_of(Server::Dovecot)
-}
-
 /// The test servers: `dovecot` and `dovecot-gmail` (a virtual `\All`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Server {
@@ -110,14 +106,6 @@ pub async fn mailpit_id(msgid: &str) -> Option<String> {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Sending {
     pub server_saves_sent: Option<bool>,
-}
-
-pub fn server_config(
-    user: &str,
-    password: &str,
-    capability_override: CapabilityOverride,
-) -> ServerConfig {
-    server_config_at(Server::Dovecot, user, password, capability_override)
 }
 
 pub fn server_config_at(
@@ -758,10 +746,6 @@ pub fn keep() -> &'static [&'static str] {
 
 /// Deletes the user's own mailboxes, empties the special ones and drops
 /// the label registry annotation.
-pub async fn reset_user(user: &str) {
-    reset_user_at(Server::Dovecot, user).await;
-}
-
 pub async fn reset_user_at(server: Server, user: &str) {
     let mut raw = Raw::login_at(server, user).await;
     if stalwart() {
