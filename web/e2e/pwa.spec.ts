@@ -3,6 +3,8 @@ import { VAPID_PUBLIC_KEY } from './mock/push.ts';
 import { expect, openInbox, row, signIn, test } from './helpers.ts';
 
 const ENDPOINT = 'https://fcm.googleapis.com/fcm/send/e2e-device';
+/** Shorter drops don't reload the app (connectivity.svelte.ts). */
+const RECOVERY_MIN_OFFLINE_MS = 2000;
 const IPHONE_UA =
 	'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
 
@@ -355,6 +357,7 @@ test('offline, the app shell still loads and says so, and recovers online', asyn
 		"You're offline. Mail will load when you're back online."
 	);
 	await expect(page.getByRole('link', { name: 'Inbox', exact: true })).toBeVisible();
+	await page.waitForTimeout(RECOVERY_MIN_OFFLINE_MS);
 	await context.setOffline(false);
 	await expect(row(page, 0).locator('[data-loaded]')).toBeVisible();
 	await expect(page.locator('[data-offline]')).toHaveCount(0);
