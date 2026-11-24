@@ -50,10 +50,10 @@ with it.
 The port is published on `127.0.0.1` only, for a reverse proxy on the same
 host (Caddy, nginx, Traefik). Behind Docker's port forwarding the server sees
 the proxy's connections coming from the Docker network gateway, so the
-example trusts `X-Forwarded-For` from `172.16.0.0/12`, Docker's default
-address pool; narrow it to your network's gateway if you can. A proxy in
-another container on the same Compose network can reach `tagmail:7878`
-directly instead.
+example pins the network to `172.30.78.0/24` and trusts `X-Forwarded-For`
+from its gateway `172.30.78.1` only. If that subnet clashes with one of
+yours, change both. A proxy in another container on the same Compose
+network can reach `tagmail:7878` directly instead; trust its address then.
 
 Compose prefixes the volume with the project name, which defaults to the
 directory name: in `~/tagmail` the data lives in the volume
@@ -61,13 +61,17 @@ directory name: in `~/tagmail` the data lives in the volume
 
 ## Run without Compose
 
+The default bridge network has no fixed gateway, so create a network with
+a fixed subnet and trust its gateway:
+
 ```sh
+docker network create --subnet 172.30.78.0/24 --gateway 172.30.78.1 tagmail
 docker volume create tagmail-data
-docker run -d --name tagmail -p 127.0.0.1:7878:7878 \
+docker run -d --name tagmail --network tagmail -p 127.0.0.1:7878:7878 \
   -v tagmail-data:/data \
   -v "$PWD/master.key:/run/secrets/tagmail_master_key:ro" \
   ghcr.io/micheljung/tagmail:latest \
-  --public-origin https://mail.example.com --trusted-proxy 172.16.0.0/12
+  --public-origin https://mail.example.com --trusted-proxy 172.30.78.1
 ```
 
 ## Upgrade

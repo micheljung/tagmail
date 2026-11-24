@@ -4,13 +4,20 @@ services:
   tagmail:
     image: ghcr.io/micheljung/tagmail:latest
     restart: unless-stopped
-    command: ["--public-origin", "https://mail.example.com", "--trusted-proxy", "172.16.0.0/12"]
+    command: ["--public-origin", "https://mail.example.com", "--trusted-proxy", "172.30.78.1"]
     ports:
       - "127.0.0.1:7878:7878"
     volumes:
       - tagmail-data:/data
     secrets:
       - tagmail_master_key
+
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.30.78.0/24
+          gateway: 172.30.78.1
 
 volumes:
   tagmail-data:
