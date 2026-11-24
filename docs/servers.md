@@ -4,6 +4,64 @@ What Tagmail's design depends on, measured with `cargo xtask probe-server`
 (plan §4 M3). Rows marked "not yet probed" have not been run: nothing here
 is guessed.
 
+## Supported servers
+
+Tagmail works with IMAP servers that offer TLS or STARTTLS and password
+login, and sends through their SMTP submission service. Labels need a
+server that keeps custom keywords (`PERMANENTFLAGS` with `\*`).
+
+| Server | Status |
+|--------|--------|
+| Dovecot | Tested: integration tests run against it |
+| Stalwart | Tested: integration tests run against it; keeps about 98 distinct labels per account (see below) |
+| Gmail | Expected to work with the notes below; not yet probed |
+| Fastmail | Expected to work with the notes below; not yet probed |
+| Outlook.com, Microsoft 365 | Not supported |
+| Others (Yahoo, iCloud, self-hosted, …) | Run the [probe](#running-the-probe) |
+
+When a server drops a label, Tagmail shows a banner for that account:
+"drops labels it doesn't know, so some labels may not stick there".
+
+### Using Gmail
+
+- Sign in with an app password: turn on 2-Step Verification for the
+  Google account, then create an app password. The normal password and
+  OAuth sign-in are not supported in this version.
+- IMAP must be enabled in Gmail's settings.
+- Servers: `imap.gmail.com` port 993 with TLS, `smtp.gmail.com` port 465
+  with TLS (or 587 with STARTTLS).
+- Gmail labels appear in Tagmail as folders, because that is how Gmail
+  exposes them over IMAP. Tagmail's own labels are IMAP keywords, which
+  the Gmail web interface does not show. Whether Gmail keeps them across
+  sessions is not yet known; see [Gmail](#gmail) under the probe.
+- A message with several Gmail labels is one message in Tagmail, found in
+  several folders.
+- Archive removes the message from INBOX and keeps it in
+  `[Gmail]/All Mail`. Tagmail does not create an `Archive` folder there.
+- Gmail files sent mail in Sent itself, so Tagmail does not add a copy.
+
+### Using Fastmail
+
+- Sign in with an app password that has IMAP and SMTP access (Fastmail
+  settings, Privacy & Security).
+- Servers: `imap.fastmail.com` port 993 with TLS, `smtp.fastmail.com`
+  port 465 with TLS.
+- Fastmail advertises `OBJECTID`, so messages keep their identity across
+  moves. Keyword persistence is not yet probed; see [Fastmail](#fastmail)
+  under the probe.
+
+### Outlook.com and Microsoft 365
+
+Not supported: Microsoft turned off password login (basic authentication)
+for IMAP and SMTP, and Tagmail does not implement OAuth2 in this version.
+
+### Other providers
+
+Most providers need an app password when two-factor authentication is on.
+Before relying on labels, run the [probe](#running-the-probe) against a
+test account of the provider: it shows whether custom keywords are kept,
+and how many.
+
 ## Probe results
 
 | | Dovecot 2.4.5 | Stalwart v0.15.3 | Gmail | Fastmail |
