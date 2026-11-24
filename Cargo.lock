@@ -5696,11 +5696,8 @@ name = "tagmail-desktop"
 version = "0.0.0"
 dependencies = [
  "form_urlencoded",
- "futures-util",
- "getrandom 0.4.3",
  "http",
  "keyring",
- "multer",
  "reqwest",
  "serde",
  "serde_json",

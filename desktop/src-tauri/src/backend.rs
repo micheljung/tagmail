@@ -21,10 +21,13 @@ pub type EventStore<S> = (Arc<S>, Arc<dyn EventSource>);
 pub trait Backend: Send + Sync + 'static {
     type Store: Store;
 
-    /// The API over the current local store, or the response to give
-    /// instead (unpaired, still bootstrapping). Built per request: a
-    /// re-bootstrap closes the old store once no request holds it.
-    fn api(&self) -> Result<Api<Self::Store>, api::Response>;
+    /// Answers an `/api` request; `content_type` is the request's header
+    /// (uploads need its boundary).
+    fn handle_api(
+        &self,
+        req: api::Request<'_>,
+        content_type: Option<&str>,
+    ) -> impl Future<Output = api::Response> + Send;
 
     /// The current store and its change feed for an event session.
     fn events(&self) -> Option<EventStore<Self::Store>>;
@@ -71,8 +74,14 @@ impl LocalBackend {
 impl Backend for LocalBackend {
     type Store = SqliteStore;
 
-    fn api(&self) -> Result<Api<SqliteStore>, api::Response> {
-        Ok(Api::new(Arc::clone(&self.local.store), None))
+    async fn handle_api(
+        &self,
+        req: api::Request<'_>,
+        _content_type: Option<&str>,
+    ) -> api::Response {
+        Api::new(Arc::clone(&self.local.store), None)
+            .handle(req)
+            .await
     }
 
     fn events(&self) -> Option<EventStore<SqliteStore>> {

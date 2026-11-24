@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use serde_json::Value;
-use tagmail_api_core::api::{self, Api, offline_error};
+use tagmail_api_core::api::{self, offline_error};
 use tagmail_api_core::auth_dto::DeviceTokenDto;
 use tagmail_api_core::desktop_dto::{
     DesktopPhaseDto, DesktopSettingsDto, DesktopSettingsPatchDto, DesktopStatusDto,
@@ -16,9 +16,9 @@ use tagmail_api_core::dto::ApiErrorDto;
 use tagmail_api_core::events::EventSource;
 use tagmail_api_core::sqlite_store::SqliteStore;
 use tagmail_replica::client::REQUEST_TIMEOUT;
-use tagmail_replica::compose::DesktopCompose;
-use tagmail_replica::writes::DesktopWrites;
-use tagmail_replica::{ClientError, Durable, Layout, Phase, Replica, ReplicaEvent, ServerClient};
+use tagmail_replica::{
+    ClientError, Durable, Layout, Phase, Replica, ReplicaEvent, Router, ServerClient,
+};
 use tokio::sync::{broadcast, watch};
 use url::Url;
 
@@ -33,11 +33,11 @@ const SERVER_KEY: &str = "server_url";
 const DEVICE_NAME_KEY: &str = "device_name";
 const TOKEN_FILE: &str = "device-token";
 const EVENT_BUFFER: usize = 64;
-const DOWNLOADING: &str = "Your mail is still downloading to this device";
 const MAX_DEVICE_NAME: usize = 100;
 
 struct Running {
     replica: Arc<Replica>,
+    router: Router,
     stop: watch::Sender<bool>,
 }
 
@@ -177,7 +177,12 @@ impl Desktop {
             Arc::clone(&replica),
             stop.subscribe(),
         ));
-        if let Some(old) = self.lock_running().replace(Running { replica, stop }) {
+        let router = Router::new(Arc::clone(&replica));
+        if let Some(old) = self.lock_running().replace(Running {
+            replica,
+            router,
+            stop,
+        }) {
             let _ = old.stop.send(true);
         }
         Ok(())
@@ -297,19 +302,15 @@ fn phase_dto(phase: &Phase, bootstrapped: bool) -> DesktopPhaseDto {
 impl Backend for Desktop {
     type Store = SqliteStore;
 
-    fn api(&self) -> Result<Api<SqliteStore>, api::Response> {
-        let Some(replica) = self.replica() else {
-            return Err(unpaired());
+    async fn handle_api(&self, req: api::Request<'_>, content_type: Option<&str>) -> api::Response {
+        let router = self.lock_running().as_ref().map(|r| r.router.clone());
+        let Some(router) = router else {
+            return unpaired();
         };
-        if *replica.phase().borrow() == Phase::Unpaired {
-            return Err(unpaired());
+        if *router.replica().phase().borrow() == Phase::Unpaired {
+            return unpaired();
         }
-        match replica.store() {
-            Some(store) => Ok(Api::new(store, None)
-                .with_writes(Arc::new(DesktopWrites(Arc::clone(&replica))))
-                .with_compose(Arc::new(DesktopCompose(replica)))),
-            None => Err(offline_error(DOWNLOADING)),
-        }
+        router.handle(req, content_type).await
     }
 
     fn events(&self) -> Option<EventStore<SqliteStore>> {
