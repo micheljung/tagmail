@@ -21,6 +21,7 @@ use tagmail_replica::{
     Binding, ClientError, Durable, Layout, Phase, Replica, ReplicaEvent, Router, ServerClient,
 };
 use tokio::sync::{broadcast, watch};
+use tokio::task::JoinHandle;
 use url::Url;
 
 use crate::backend::{Backend, EventStore};
@@ -47,6 +48,7 @@ struct Running {
     replica: Arc<Replica>,
     router: Router,
     stop: watch::Sender<bool>,
+    task: JoinHandle<()>,
 }
 
 pub struct Desktop {
@@ -289,26 +291,33 @@ impl Desktop {
         let replica_settings = settings::replica_settings(&self.lock_settings());
         let replica = Replica::open(self.layout.clone(), client, replica_settings).await?;
         let (stop, stop_rx) = watch::channel(false);
-        tokio::spawn(Arc::clone(&replica).run(stop_rx));
+        let task = tokio::spawn(Arc::clone(&replica).run(stop_rx));
         tokio::spawn(watch_replica(
             Arc::downgrade(self),
             Arc::clone(&replica),
             stop.subscribe(),
         ));
         let router = Router::new(Arc::clone(&replica));
-        if let Some(old) = self.lock_running().replace(Running {
+        let old = self.lock_running().replace(Running {
             replica,
             router,
             stop,
-        }) {
+            task,
+        });
+        if let Some(old) = old {
             let _ = old.stop.send(true);
         }
         Ok(())
     }
 
-    fn stop(&self) {
-        if let Some(old) = self.lock_running().take() {
+    /// Returns once the old replica stopped syncing and flushing.
+    async fn stop(&self) {
+        let old = self.lock_running().take();
+        if let Some(old) = old {
             let _ = old.stop.send(true);
+            if let Err(e) = old.task.await {
+                tracing::warn!(error = %e, "the replica task failed");
+            }
         }
         self.bump();
     }
@@ -498,7 +507,7 @@ impl Backend for Desktop {
         }
         let token = Desktop::exchange(&url, code).await?;
         let previous = self.stored_server().map_err(internal)?;
-        self.stop();
+        self.stop().await;
         if previous.as_ref() != Some(&url) {
             self.layout.discard().map_err(internal)?;
         }
@@ -518,7 +527,7 @@ impl Backend for Desktop {
     }
 
     async fn unpair(&self) {
-        self.stop();
+        self.stop().await;
         if let Err(e) = self.tokens.delete() {
             tracing::warn!(error = %e, "removing the device token failed");
         }

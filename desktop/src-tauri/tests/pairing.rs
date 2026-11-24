@@ -325,3 +325,20 @@ async fn the_data_dir_is_private() {
         assert_eq!(mode, 0o700, "{}", dir.display());
     }
 }
+
+#[tokio::test]
+async fn pairing_and_unpairing_wait_for_the_old_replica_to_stop() {
+    let env = Env::new();
+    let owner = env.start().await;
+    let (desktop, shell) = open(&env, &Recorder::default()).await;
+    pair(&shell, &owner).await;
+    let first = Arc::downgrade(&desktop.replica().unwrap());
+
+    pair(&shell, &owner).await;
+    assert!(first.upgrade().is_none(), "the first replica still runs");
+    let second = Arc::downgrade(&desktop.replica().unwrap());
+
+    let unpaired = call(&shell, Method::POST, "/api/desktop/unpair", Value::Null).await;
+    assert_eq!(unpaired.status(), 204);
+    assert!(second.upgrade().is_none(), "the second replica still runs");
+}
