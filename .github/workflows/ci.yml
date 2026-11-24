@@ -49,7 +49,7 @@ jobs:
           lycheeVersion: v0.24.2
           args: >-
             --offline --include-fragments --no-progress
-            README.md CONTRIBUTING.md SECURITY.md 'docs/**/*.md'
+            README.md CONTRIBUTING.md SECURITY.md 'docs/**/*.md' 'deploy/**/*.md'
           jobSummary: false
 
   docs-external:
@@ -65,7 +65,7 @@ jobs:
             --include-fragments --no-progress
             --max-retries 3 --timeout 20
             --accept '100..=103,200..=299,429'
-            README.md CONTRIBUTING.md SECURITY.md 'docs/**/*.md'
+            README.md CONTRIBUTING.md SECURITY.md 'docs/**/*.md' 'deploy/**/*.md'
           jobSummary: false
 
   rust:
