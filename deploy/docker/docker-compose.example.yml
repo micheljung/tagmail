@@ -1,0 +1,20 @@
+# Copy to compose.yml next to master.key and set the public origin your
+# reverse proxy serves (README.md in this directory).
+services:
+  tagmail:
+    image: ghcr.io/micheljung/tagmail:latest
+    restart: unless-stopped
+    command: ["--public-origin", "https://mail.example.com", "--trusted-proxy", "172.16.0.0/12"]
+    ports:
+      - "127.0.0.1:7878:7878"
+    volumes:
+      - tagmail-data:/data
+    secrets:
+      - tagmail_master_key
+
+volumes:
+  tagmail-data:
+
+secrets:
+  tagmail_master_key:
+    file: ./master.key

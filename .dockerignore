@@ -1,0 +1,10 @@
+**/target
+**/node_modules
+**/.svelte-kit
+**/build
+**/.omc
+**/*.db
+.git
+.github
+docs
+test

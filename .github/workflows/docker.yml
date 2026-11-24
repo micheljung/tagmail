@@ -1,0 +1,102 @@
+name: Docker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - deploy/docker/**
+      - .dockerignore
+      - crates/**
+      - web/**
+      - packages/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - package.json
+      - pnpm-lock.yaml
+      - .github/workflows/docker.yml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/micheljung/tagmail:latest
+  STARTUP_TIMEOUT_SECS: 60
+  NONROOT_UID: 65532
+
+jobs:
+  image:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            arch: amd64
+            file: x86-64
+            smoke: true
+          - platform: linux/arm64
+            arch: arm64
+            file: ARM aarch64
+            smoke: false
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - name: Build the server and web app
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          target: dist
+          outputs: type=local,dest=dist
+          cache-from: type=gha,scope=docker-${{ matrix.arch }}
+          cache-to: type=gha,scope=docker-${{ matrix.arch }},mode=max
+      - name: Static binary without test hooks
+        run: |
+          file dist/tagmail-server | tee /dev/stderr \
+            | grep "${{ matrix.file }}.*static" > /dev/null
+          test -f dist/web/index.html
+          for hook in TAGMAIL_DESKTOP_PAIR /__probe/ /__selftest/ DESKTOP_SELFTEST; do
+            if grep -aq "$hook" dist/tagmail-server; then
+              echo "::error::tagmail-server contains the test hook $hook"
+              exit 1
+            fi
+          done
+      - name: Build the image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: deploy/docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          load: ${{ matrix.smoke }}
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha,scope=docker-${{ matrix.arch }}
+      - name: Compose example smoke test
+        if: matrix.smoke
+        run: |
+          docker image ls "$IMAGE"
+          dir=$(mktemp -d)
+          cp deploy/docker/docker-compose.example.yml "$dir/compose.yml"
+          cd "$dir"
+          openssl rand -hex 32 > master.key
+          sudo chown "$NONROOT_UID:$NONROOT_UID" master.key
+          sudo chmod 400 master.key
+          docker compose up -d --pull never
+          deadline=$((SECONDS + STARTUP_TIMEOUT_SECS))
+          until curl -fsS http://127.0.0.1:7878/api/version \
+              && docker compose logs tagmail | grep 'one-time setup token' > /dev/null; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              docker compose logs tagmail
+              exit 1
+            fi
+            sleep 1
+          done
+          echo
+          docker compose logs tagmail
+          docker compose down --volumes
