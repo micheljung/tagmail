@@ -32,6 +32,8 @@ app = [
 ]
 # Self-test page, fixture data and env overrides; never in release builds.
 test-hooks = []
+# Tests against Dovecot and Mailpit (`cargo xtask dovecot up`).
+stack-tests = []
 
 [dependencies]
 form_urlencoded.workspace = true
@@ -72,6 +74,10 @@ required-features = ["app", "test-hooks"]
 name = "parity"
 required-features = ["app", "test-hooks"]
 
+[[test]]
+name = "offline"
+required-features = ["app", "test-hooks", "stack-tests"]
+
 [build-dependencies]
 tauri-build = { version = "2.7", optional = true }
 
@@ -83,3 +89,4 @@ tempfile.workspace = true
 reqwest = { workspace = true, features = ["rustls-no-provider", "json"] }
 tagmail-api-server = { path = "../../crates/api-server" }
 tagmail-engine.workspace = true
+tagmail-imap.workspace = true
