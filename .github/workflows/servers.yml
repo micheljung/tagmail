@@ -1,0 +1,84 @@
+name: Servers
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - crates/imap/**
+      - crates/engine/**
+      - crates/store/**
+      - crates/core/**
+      - crates/api-core/**
+      - test/dovecot/**
+      - test/stalwart/**
+      - test/compose.yml
+      - xtask/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/servers.yml
+  schedule:
+    - cron: "41 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  server:
+    name: ${{ matrix.server }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - server: dovecot
+            up: dovecot up --gmail
+            port: 10143
+            user: user2
+            password: pass2
+            services: dovecot dovecot-gmail
+          - server: stalwart
+            up: stalwart up
+            port: 10145
+            user: user1
+            password: pass1
+            services: stalwart
+    env:
+      TAGMAIL_IMAP_SERVER: ${{ matrix.server }}
+      TAGMAIL_IMAP_ADDR: 127.0.0.1:${{ matrix.port }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100"
+      - uses: Swatinem/rust-cache@v2
+      - name: Start ${{ matrix.server }}
+        run: cargo xtask ${{ matrix.up }}
+      - name: Build the IMAP and sync suites
+        run: |
+          cargo test -p tagmail-imap --features dovecot-tests --test dovecot --no-run
+          cargo test -p tagmail-engine --features dovecot-tests --test dovecot --test labels --test rebuild --no-run
+      - name: IMAP suite
+        run: cargo test -p tagmail-imap --features dovecot-tests --test dovecot
+      - name: Probe
+        env:
+          TAGMAIL_PROBE_PASSWORD: ${{ matrix.password }}
+          OBJECTID: ${{ matrix.server == 'stalwart' }}
+        run: |
+          cargo xtask probe-server --host 127.0.0.1 --port ${{ matrix.port }} --security plain --user ${{ matrix.user }} --json > probe.json
+          { echo '```json'; cat probe.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          jq -e --argjson objectid "$OBJECTID" '.features.objectid == $objectid and .keyword_persistence.persisted_after_reconnect and (.copy.size_differs | not) and (($objectid | not) or .copy.email_id_equal)' probe.json
+      - name: Sync suite (engine sync, labels and ops, cache rebuild)
+        run: cargo test -p tagmail-engine --features dovecot-tests --test dovecot --test labels --test rebuild -- --nocapture
+      - name: Server logs
+        if: failure()
+        run: docker compose -f test/compose.yml logs ${{ matrix.services }}

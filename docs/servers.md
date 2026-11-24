@@ -140,3 +140,42 @@ send. Check it by hand: send one message from the account through its
 submission server (port 587 or 465) without Tagmail appending anything, then
 look in Sent. A copy means the server saves it (Gmail does; most others do
 not).
+
+<!-- Test coverage per server: maintained with .github/workflows/servers.yml -->
+## Test coverage per server
+
+`servers.yml` runs the same suites against each test server in
+`test/compose.yml`, on pull requests touching the IMAP, engine or store
+code or the server setups, on every push to `main`, and weekly to catch
+drift in the server images. `TAGMAIL_IMAP_SERVER` names the server and
+`TAGMAIL_IMAP_ADDR` points at it.
+
+| Suite | Dovecot 2.4.5 | Stalwart v0.15.3 |
+|---|---|---|
+| IMAP (`tagmail-imap`, `tests/dovecot.rs`) | all | all |
+| `probe-server`, gated on keyword persistence and COPY | `user2` | `user1` (spends its keyword budget) |
+| Engine sync (`tests/dovecot.rs`) | all | all |
+| Labels and ops (`tests/labels.rs`) | all | all but Gmail mode |
+| Cache rebuild (`tests/rebuild.rs`) | all | all |
+
+The 100k-message seed test (`dovecot_seed.rs`) and the Mailpit send tests
+run against Dovecot only, in `e2e.yml`.
+
+Where the tests expect something else on Stalwart:
+
+- `gmail_mode_archive_only_leaves_inbox` is skipped (`skipped_on_stalwart`):
+  it needs a server with a virtual `\All` mailbox, which only the
+  `dovecot-gmail` variant provides.
+- Stalwart names its special-use mailboxes `Sent Items`, `Deleted Items`
+  and `Junk Mail`, and has no `\Archive`: the test reset creates a plain
+  `Archive` folder, which the engine archives into as it would on any
+  server without one.
+- Without METADATA the label registry is not written to the server; the
+  label test asserts that instead of reading the annotation back.
+- With OBJECTID, messages appended again after their mailbox was deleted
+  and recreated are new server objects with new EMAILIDs, so
+  `recreated_mailbox_keeps_message_rows` expects new rows in the same
+  threads there, where Dovecot keeps the old rows.
+- The rebuild test finds a message's UID by reading its Message-ID header
+  rather than with `UID SEARCH HEADER`, which Stalwart answers empty.
+<!-- End of test coverage per server -->

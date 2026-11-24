@@ -18,9 +18,9 @@ cargo xtask stalwart down
 | `mailpit` | SMTP 10025, UI and API 10825 | `axllent/mailpit:v1.27` | SMTP sink; accepts any login, also without TLS (test stack only) |
 
 Every server has the users `user1` / `pass1` and `user2` / `pass2`, with
-cleartext login over plain IMAP. Dovecot also has `engine1` … `engine9` and
-`ops1` … `ops4` / `engine`, one per engine integration test; Stalwart has
-`ops4` / `engine` for the engine smoke test. These are test-only credentials.
+cleartext login over plain IMAP. Dovecot and Stalwart also have `engine1` …
+`engine9` and `ops1` … `ops4` / `engine`, one per engine integration test.
+These are test-only credentials.
 `tagmail-server` reaches them with `--insecure-plain-imap`, which turns TLS
 off for **all** of its accounts: never use it on a server that also syncs
 real mail.
@@ -78,7 +78,7 @@ docker logs $c; docker rm $c
 
 The same file runs against Stalwart, which advertises OBJECTID, with
 `TAGMAIL_IMAP_SERVER=stalwart TAGMAIL_IMAP_ADDR=127.0.0.1:10145` after
-`cargo xtask stalwart up` (the `imap-stalwart` job in `e2e.yml`). The tests
+`cargo xtask stalwart up` (the server matrix in `servers.yml`). The tests
 derive what they expect from the server's capabilities.
 `cargo xtask probe-server` reports how a server handles keywords, object ids
 and COPY; see [`docs/servers.md`](../docs/servers.md). It consumes
@@ -94,13 +94,14 @@ users and the Gmail-mode `dovecot-gmail` service (`cargo xtask dovecot up
 --gmail`), whose virtual `[Gmail]/All` saves into `Archive` so a MOVE to
 `\All` leaves INBOX as on Gmail; `TAGMAIL_IMAP_GMAIL_ADDR` (default
 `127.0.0.1:10144`) points them elsewhere.
-`labels.rs` also runs against Stalwart with
+`dovecot.rs`, `labels.rs` and `rebuild.rs` also run against Stalwart with
 `TAGMAIL_IMAP_SERVER=stalwart TAGMAIL_IMAP_ADDR=127.0.0.1:10145` after
-`cargo xtask stalwart up` (the `imap-stalwart` job): there only
-`label_round_trip_and_draft_uid_without_uidplus` runs (as `ops4`), the
-others need Dovecot and say so. It hides UIDPLUS, so the draft's UID must
-come from the Message-ID lookup, which Stalwart's `UID SEARCH HEADER`
-cannot answer once Drafts holds two messages.
+`cargo xtask stalwart up` (the server matrix in `servers.yml`); what differs
+there and the one test that cannot run is listed in
+[`docs/servers.md`](../docs/servers.md#test-coverage-per-server).
+`label_round_trip_and_draft_uid_without_uidplus` hides UIDPLUS, so the
+draft's UID must come from the Message-ID lookup, which Stalwart's
+`UID SEARCH HEADER` cannot answer once Drafts holds two messages.
 `dovecot_seed.rs` checks that the newest INBOX message of the seed loaded
 into `user1` is cached within 30 s:
 

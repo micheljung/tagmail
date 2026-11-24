@@ -53,53 +53,6 @@ jobs:
         if: failure()
         run: docker compose -f test/compose.yml logs
 
-  imap-dovecot:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.100"
-      - uses: Swatinem/rust-cache@v2
-      - name: Start Dovecot
-        run: cargo xtask dovecot up
-      - name: IMAP integration tests
-        run: cargo test -p tagmail-imap --features dovecot-tests --test dovecot
-      - name: Server logs
-        if: failure()
-        run: docker compose -f test/compose.yml logs dovecot
-
-  imap-stalwart:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.100"
-      - uses: Swatinem/rust-cache@v2
-      - name: Start Stalwart
-        run: cargo xtask stalwart up
-      - name: IMAP integration tests against Stalwart (OBJECTID, EMAILID)
-        env:
-          TAGMAIL_IMAP_ADDR: 127.0.0.1:10145
-          TAGMAIL_IMAP_SERVER: stalwart
-        run: cargo test -p tagmail-imap --features dovecot-tests --test dovecot
-      - name: Probe Stalwart
-        env:
-          TAGMAIL_PROBE_PASSWORD: pass1
-        run: |
-          cargo xtask probe-server --host 127.0.0.1 --port 10145 --security plain --user user1 --json > probe.json
-          { echo '```json'; cat probe.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          jq -e '.features.objectid and .keyword_persistence.persisted_after_reconnect and .copy.email_id_equal and (.copy.size_differs | not)' probe.json
-      - name: Engine label and draft smoke against Stalwart
-        env:
-          TAGMAIL_IMAP_ADDR: 127.0.0.1:10145
-          TAGMAIL_IMAP_SERVER: stalwart
-        run: cargo test -p tagmail-engine --features dovecot-tests --test labels
-      - name: Server logs
-        if: failure()
-        run: docker compose -f test/compose.yml logs stalwart
-
   engine-dovecot:
     runs-on: ubuntu-latest
     steps:
@@ -121,12 +74,13 @@ jobs:
         run: cargo xtask dovecot up --gmail
       - name: Load seed into Dovecot
         run: cargo xtask dovecot load --from "$SEED_DIR"
-      - name: Build engine integration tests
-        run: cargo test -p tagmail-engine --features dovecot-tests --test dovecot --test dovecot_seed --test labels --test rebuild --no-run
-      - name: Engine integration tests
+      # The sync suite without the seed runs per server in servers.yml.
+      - name: Build seeded engine integration test
+        run: cargo test -p tagmail-engine --features dovecot-tests --test dovecot_seed --no-run
+      - name: Seeded engine integration test
         env:
           TAGMAIL_SEED_MANIFEST: ${{ env.SEED_DIR }}/tagmail-seed.json
-        run: cargo test -p tagmail-engine --features dovecot-tests --test dovecot --test dovecot_seed --test labels --test rebuild -- --nocapture
+        run: cargo test -p tagmail-engine --features dovecot-tests --test dovecot_seed -- --nocapture
       - name: Send integration tests (Dovecot and Mailpit)
         run: cargo test -p tagmail-engine --features mailpit-tests --test send
       - name: Multi-account integration tests (Dovecot and Mailpit)
