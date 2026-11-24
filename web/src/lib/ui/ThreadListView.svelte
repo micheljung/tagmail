@@ -2,7 +2,8 @@
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import VirtualList from '../list/VirtualList.svelte';
-	import { act, type ActionTarget } from '../ops/actions.svelte';
+	import { act, inTrash, type ActionTarget } from '../ops/actions.svelte';
+	import type { SwipeAllowed, SwipeDirection } from '../list/swipe';
 	import { shortcuts, type ShortcutAction } from '../shortcuts';
 	import { accounts, nav, ops, type ThreadList } from '../stores';
 	import type { ThreadRowDto } from '../transport';
@@ -67,6 +68,16 @@
 			.filter((r): r is ThreadRowDto => r !== undefined);
 		return { threadIds, rows, view: list.view };
 	}
+
+	/** Swipe never deletes for good, and a ticked selection is acted on from the toolbar. */
+	const swipeAllowed: SwipeAllowed = $derived(
+		checkedCount > 0 ? { left: false, right: false } : { left: true, right: !inTrash(list.view) }
+	);
+
+	const SWIPE_ACTIONS: Record<SwipeDirection, ShortcutAction> = {
+		left: 'archive',
+		right: 'delete'
+	};
 
 	function run(action: ShortcutAction): boolean {
 		return act(action, target());
@@ -211,6 +222,11 @@
 							labelColor={(key) => nav.labelColor(key)}
 							{hiddenLabel}
 							accountName={markers && row ? accounts.name(row.accountId) : undefined}
+							swipe={swipeAllowed}
+							onswipe={(direction) => {
+								if (id === undefined || !row) return;
+								act(SWIPE_ACTIONS[direction], { threadIds: [id], rows: [row], view: list.view });
+							}}
 							oncheck={(range) => list.toggleChecked(index, range)}
 							onstar={() => {
 								if (id === undefined || !row) return;

@@ -22,7 +22,7 @@ class Pickers {
 export const pickers = new Pickers();
 
 /** The view's mailbox id when it is the Trash, where delete is permanent. */
-function inTrash(view: ViewId | null): boolean {
+export function inTrash(view: ViewId | null): boolean {
 	if (!view?.startsWith('mailbox:')) return false;
 	const id = Number(view.slice('mailbox:'.length));
 	return nav.mailboxes.some((m) => m.id === id && m.specialUse === 'trash');

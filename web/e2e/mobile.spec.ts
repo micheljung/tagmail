@@ -1,8 +1,13 @@
-import type { Locator } from '@playwright/test';
+import type { Locator, Page } from '@playwright/test';
 import { idAt } from './mock/fixture.ts';
 import { expect, openInbox, row, signIn, test } from './helpers.ts';
 
 const TOUCH_TARGET = 44;
+/** Past the 35 % commit threshold of a row. */
+const COMMIT_SHARE = 0.6;
+/** Under both the flick distance and the commit share. */
+const SHORT_SWIPE_PX = 40;
+const VERTICAL_DRAG_PX = 160;
 
 async function expectTouchSize(target: Locator): Promise<void> {
 	const box = await target.boundingBox();
@@ -124,4 +129,151 @@ test('touch targets are at least 44 px', async ({ page }) => {
 		await expectTouchSize(page.getByRole('button', { name, exact: true }));
 	}
 	await expectTouchSize(page.getByRole('button', { name: 'Reply', exact: true }));
+});
+
+/**
+ * Drags a row with synthetic touch pointer events by `dx`/`dy`; `cancel`
+ * ends it the way a browser does when it takes the gesture for scrolling,
+ * `click` follows the release with the click a short drag can still get.
+ */
+async function touchDrag(
+	target: Locator,
+	dx: number,
+	dy: number,
+	end: 'release' | 'click' | 'cancel' = 'release'
+) {
+	await target.evaluate(
+		(el, [dx, dy, end]) => {
+			const box = el.getBoundingClientRect();
+			const x = box.left + box.width / 2;
+			const y = box.top + box.height / 2;
+			const fire = (type: string, at: number) =>
+				el.dispatchEvent(
+					new PointerEvent(type, {
+						bubbles: true,
+						cancelable: true,
+						pointerId: 7,
+						pointerType: 'touch',
+						isPrimary: true,
+						clientX: x + dx * at,
+						clientY: y + dy * at
+					})
+				);
+			const STEPS = 8;
+			fire('pointerdown', 0);
+			for (let i = 1; i <= STEPS; i++) fire('pointermove', i / STEPS);
+			fire(end === 'cancel' ? 'pointercancel' : 'pointerup', 1);
+			if (end === 'click')
+				el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+		},
+		[dx, dy, end] as const
+	);
+}
+
+function toast(page: Page, text: string) {
+	return page.locator('[data-toast]').filter({ hasText: text });
+}
+
+function total(page: Page, n: number) {
+	return expect(page.locator('.total')).toHaveText(`${n.toLocaleString('en-US')} conversations`);
+}
+
+async function rowWidth(page: Page): Promise<number> {
+	return (await row(page, 0).boundingBox())!.width;
+}
+
+test.describe('swipe', () => {
+	test.beforeEach(async ({ page }) => {
+		await openInbox(page);
+	});
+
+	test('left archives, and Undo puts the row back in place', async ({ page }) => {
+		await touchDrag(row(page, 0).locator('.row'), -(await rowWidth(page)) * COMMIT_SHARE, 0);
+		await expect(toast(page, 'Archived 1 conversation')).toBeVisible();
+		await total(page, 99_999);
+		await expect(row(page, 0)).toHaveId(`thread-${idAt(1)}`);
+		await expect(page).toHaveURL(/\/inbox$/);
+		await toast(page, 'Archived 1 conversation').getByRole('button', { name: 'Undo' }).tap();
+		await total(page, 100_000);
+		await expect(row(page, 0)).toHaveId(`thread-${idAt(0)}`);
+	});
+
+	test('right moves to Trash, and Undo puts the row back in place', async ({ page }) => {
+		await touchDrag(row(page, 1).locator('.row'), (await rowWidth(page)) * COMMIT_SHARE, 0);
+		await expect(toast(page, 'Moved 1 conversation to Trash')).toBeVisible();
+		await total(page, 99_999);
+		await expect(row(page, 1)).toHaveId(`thread-${idAt(2)}`);
+		await toast(page, 'Moved 1 conversation to Trash').getByRole('button', { name: 'Undo' }).tap();
+		await total(page, 100_000);
+		await expect(row(page, 1)).toHaveId(`thread-${idAt(1)}`);
+	});
+
+	test('shows what each direction does behind the row', async ({ page }) => {
+		const target = row(page, 0).locator('.row');
+		const box = (await target.boundingBox())!;
+		const y = box.y + box.height / 2;
+		const start = box.x + box.width / 2;
+		const press = (type: string, x: number) =>
+			target.dispatchEvent(type, { pointerId: 9, pointerType: 'touch', clientX: x, clientY: y });
+		await press('pointerdown', start);
+		await press('pointermove', start - SHORT_SWIPE_PX);
+		await expect(row(page, 0).locator('.under.archive')).toHaveText('Archive');
+		await press('pointermove', start + SHORT_SWIPE_PX);
+		await expect(row(page, 0).locator('.under.delete')).toHaveText('Delete');
+		const archive = await row(page, 0)
+			.locator('.under')
+			.evaluate((el) => getComputedStyle(el).backgroundColor);
+		await press('pointermove', start - SHORT_SWIPE_PX);
+		const trash = await row(page, 0)
+			.locator('.under')
+			.evaluate((el) => getComputedStyle(el).backgroundColor);
+		expect(archive).not.toBe(trash);
+		await press('pointercancel', start);
+		await expect(target).not.toHaveAttribute('style', /translateX/);
+		await total(page, 100_000);
+	});
+
+	test('a short swipe snaps back and does not open the thread', async ({ page }) => {
+		const target = row(page, 0).locator('.row');
+		await touchDrag(target, -SHORT_SWIPE_PX, 0, 'click');
+		await expect(target).not.toHaveAttribute('style', /translateX/);
+		await expect(page).toHaveURL(/\/inbox$/);
+		await total(page, 100_000);
+		await expect(page.locator('[data-toast]')).toHaveCount(0);
+	});
+
+	test('a vertical drag leaves the row to scrolling', async ({ page }) => {
+		const target = row(page, 2).locator('.row');
+		expect(await target.evaluate((el) => getComputedStyle(el).touchAction)).toBe('pan-y');
+		await touchDrag(target, -SHORT_SWIPE_PX, -VERTICAL_DRAG_PX, 'cancel');
+		await expect(target).not.toHaveAttribute('style', /translateX/);
+		await total(page, 100_000);
+		await expect(page.locator('[data-toast]')).toHaveCount(0);
+	});
+
+	test('a ticked selection does not swipe', async ({ page }) => {
+		await page.getByRole('checkbox', { name: 'Select all conversations on screen' }).tap();
+		const selected = page.locator('.total');
+		await expect(selected).toHaveText(/selected$/);
+		const before = await selected.textContent();
+		await touchDrag(row(page, 1).locator('.row'), -(await rowWidth(page)) * COMMIT_SHARE, 0);
+		await expect(selected).toHaveText(before!);
+		await expect(row(page, 1)).toHaveId(`thread-${idAt(1)}`);
+		await expect(page.locator('[data-toast]')).toHaveCount(0);
+	});
+
+	test('a right swipe in Trash does nothing, never deleting for good', async ({ page }) => {
+		await touchDrag(row(page, 0).locator('.row'), (await rowWidth(page)) * COMMIT_SHARE, 0);
+		await expect(toast(page, 'Moved 1 conversation to Trash')).toBeVisible();
+		await page.goto('/mailbox/4');
+		const trash = page.getByRole('listbox', { name: 'Folder Trash' });
+		await expect(trash.locator('[data-loaded]').first()).toBeVisible();
+		const target = row(page, 0).locator('.row');
+		await touchDrag(target, (await rowWidth(page)) * COMMIT_SHARE, 0);
+		await expect(target).not.toHaveAttribute('style', /translateX/);
+		await expect(row(page, 0)).toHaveId(`thread-${idAt(0)}`);
+		await expect(page.locator('.total')).toHaveText('1 conversation');
+		await expect(toast(page, 'forever')).toHaveCount(0);
+		await expect(page).toHaveURL(/\/mailbox\/4$/);
+	});
 });

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { ThreadRowDto } from '@tagmail/api-types';
 	import { listDate, senderLine } from '../format';
+	import { swipe as swipeAction, type SwipeAllowed, type SwipeDirection } from '../list/swipe';
 	import AccountMarker from './AccountMarker.svelte';
 	import Icon from './Icon.svelte';
 	import LabelChip from './LabelChip.svelte';
@@ -13,6 +14,8 @@
 		labelColor = () => null,
 		hiddenLabel,
 		accountName,
+		swipe = { left: false, right: false },
+		onswipe,
 		oncheck,
 		onstar
 	}: {
@@ -25,16 +28,60 @@
 		hiddenLabel?: string;
 		/** Set in unified views of several accounts: the row shows whose it is. */
 		accountName?: string;
+		/** Touch swipe directions this row offers. */
+		swipe?: SwipeAllowed;
+		onswipe?: (direction: SwipeDirection) => void;
 		oncheck?: (range: boolean) => void;
 		onstar?: () => void;
 	} = $props();
 
 	const unread = $derived((row?.unreadCount ?? 0) > 0);
 	const labels = $derived(row ? row.labels.filter((l) => l !== hiddenLabel) : []);
+
+	let dx = $state(0);
+	let settling = $state(false);
+	/** What the row uncovers; kept while it slides back. */
+	let uncovered = $state<SwipeDirection | null>(null);
 </script>
 
 {#if row}
-	<div class="row" class:unread class:active class:checked data-loaded="1">
+	{#if uncovered}
+		<div
+			class="under"
+			class:archive={uncovered === 'left'}
+			class:delete={uncovered === 'right'}
+			aria-hidden="true"
+		>
+			{#if uncovered === 'left'}
+				<span class="hint end"><Icon name="archive" size={20} />Archive</span>
+			{:else}
+				<span class="hint"><Icon name="trash" size={20} />Delete</span>
+			{/if}
+		</div>
+	{/if}
+	<div
+		class="row"
+		class:unread
+		class:active
+		class:checked
+		class:settling
+		data-loaded="1"
+		style:transform={dx === 0 ? undefined : `translateX(${dx}px)`}
+		ontransitionend={() => {
+			settling = false;
+			if (dx === 0) uncovered = null;
+		}}
+		use:swipeAction={{
+			allowed: () => swipe,
+			onmove: (next, snap) => {
+				settling = snap && dx !== 0;
+				if (next !== 0) uncovered = next < 0 ? 'left' : 'right';
+				else if (!settling) uncovered = null;
+				dx = next;
+			},
+			oncommit: (direction) => onswipe?.(direction)
+		}}
+	>
 		<button
 			class="check"
 			role="checkbox"
@@ -105,7 +152,39 @@
 		border-bottom: 1px solid var(--line);
 		background: var(--row-bg);
 		color: var(--ink-2);
+		touch-action: pan-y;
 		transition: background 80ms linear;
+	}
+
+	.row.settling {
+		transition:
+			background 80ms linear,
+			transform 200ms var(--ease);
+	}
+
+	.under {
+		position: absolute;
+		inset: 0;
+		display: flex;
+		align-items: center;
+		padding: 0 24px;
+		color: var(--surface);
+		font-weight: 650;
+	}
+
+	.under.archive {
+		justify-content: flex-end;
+		background: var(--ok);
+	}
+
+	.under.delete {
+		background: var(--danger);
+	}
+
+	.hint {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
 	}
 
 	.row.unread {
