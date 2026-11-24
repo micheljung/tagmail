@@ -1,4 +1,12 @@
+import type { OpIntent } from '../ops/effects';
+
 export type SwipeDirection = 'left' | 'right';
+
+/** Swipes only move threads; right goes to Trash and never deletes for good. */
+export const SWIPE_OPS = {
+	left: 'archive',
+	right: 'trash'
+} as const satisfies Record<SwipeDirection, OpIntent['kind']>;
 
 export interface SwipeAllowed {
 	left: boolean;

@@ -215,6 +215,14 @@ test('signing out unsubscribes this browser first', async ({ page }) => {
 	expect((await stubState(page)).unsubscribed).toBe(1);
 });
 
+test('Settings opened as the first page finds the service worker', async ({ page }) => {
+	await stubPush(page);
+	await signIn(page);
+	await page.goto('/settings/notifications');
+	await expect(page.getByRole('button', { name: 'Enable notifications' })).toBeVisible();
+	await expect(page.locator('[data-push-state="unsupported"]')).toHaveCount(0);
+});
+
 test('notifications blocked in the browser say so', async ({ page }) => {
 	await page.addInitScript(() =>
 		Object.defineProperty(Notification, 'permission', { get: () => 'denied' })

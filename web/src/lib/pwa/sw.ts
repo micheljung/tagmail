@@ -6,6 +6,13 @@ export const FALLBACK_URL = '/inbox';
 const BYPASS_PREFIXES = ['/api/'];
 const BYPASS_PATHS = new Set(['/api', '/service-worker.js', '/healthz']);
 
+const SERVER_ERROR = 500;
+
+/** A navigation the server failed to answer gets the cached shell, as offline does. */
+export function servesShell(status: number): boolean {
+	return status >= SERVER_ERROR;
+}
+
 export type FetchStrategy = 'bypass' | 'network-first' | 'cache-first';
 
 export interface FetchInfo {

@@ -7,8 +7,8 @@
 	import { composer } from '#lib/compose/composer.svelte.ts';
 	import { desktop } from '#lib/desktop/desktop.svelte.ts';
 	import { connectivity } from '#lib/pwa/connectivity.svelte.ts';
-	import { registerServiceWorker, shouldRegister } from '#lib/pwa/register.ts';
-	import { pushEnv, syncPush, unsubscribeQuietly } from '#lib/push/client.ts';
+	import { registerServiceWorker, shareRegistration, shouldRegister } from '#lib/pwa/register.ts';
+	import { pushEnv, pushSyncer, syncPush, unsubscribeQuietly } from '#lib/push/client.ts';
 	import { pushPrefs } from '#lib/push/prefs.ts';
 	import { theme, toasts } from '#lib/stores/index.ts';
 	import { TauriTransport, api } from '#lib/transport/index.ts';
@@ -20,7 +20,10 @@
 	let { children }: LayoutProps = $props();
 	let isDesktop = $state(false);
 	let registration = $state<Promise<ServiceWorkerRegistration> | null>(null);
-	let pushSyncedFor: string | null = null;
+	const syncPushFor = pushSyncer(async () => {
+		const r = await registration;
+		if (r) await syncPush(r.pushManager, api, pushPrefs);
+	});
 
 	function confirmPair() {
 		if (desktop.confirmRepair()) void goto('/pair');
@@ -28,7 +31,10 @@
 
 	function startPwa() {
 		const supported = 'serviceWorker' in navigator;
-		if (!shouldRegister({ dev, desktop: false, secure: isSecureContext, supported })) return;
+		if (!shouldRegister({ dev, desktop: false, secure: isSecureContext, supported })) {
+			shareRegistration(null);
+			return;
+		}
 		registration = registerServiceWorker(navigator.serviceWorker, {
 			onUpdate: (apply) =>
 				toasts.show('A new version of Tagmail is available', {
@@ -41,6 +47,7 @@
 		registration.catch((error: unknown) =>
 			console.warn('service worker registration failed', error)
 		);
+		shareRegistration(registration);
 		api.beforeLogout = () =>
 			unsubscribeQuietly(async () => (await registration)?.pushManager ?? null);
 	}
@@ -48,12 +55,8 @@
 	$effect(() => {
 		const auth = page.data.session as CurrentAuthDto | null | undefined;
 		const id = auth?.via === 'session' ? auth.session?.id : undefined;
-		if (!registration || !id || id === pushSyncedFor) return;
-		if (pushEnv().permission !== 'granted') return;
-		pushSyncedFor = id;
-		void registration
-			.then((r) => syncPush(r.pushManager, api, pushPrefs))
-			.catch((error: unknown) => console.warn('push subscription sync failed', error));
+		if (!registration || !id || pushEnv().permission !== 'granted') return;
+		void syncPushFor(id);
 	});
 
 	onMount(() => {

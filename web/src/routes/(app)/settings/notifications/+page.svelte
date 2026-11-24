@@ -12,6 +12,7 @@
 		type PushAvailability
 	} from '#lib/push/client.ts';
 	import { pushPrefs } from '#lib/push/prefs.ts';
+	import { appRegistration } from '#lib/pwa/register.ts';
 	import { accounts } from '#lib/stores/index.ts';
 	import { api, isDesktop } from '#lib/transport/index.ts';
 	import { errorText } from '#lib/ui/errors.ts';
@@ -40,7 +41,7 @@
 		}
 		availability = pushAvailability(pushEnv());
 		void accounts.load();
-		const registration = await navigator.serviceWorker?.getRegistration();
+		const registration = await appRegistration;
 		manager = registration?.pushManager ?? null;
 		if (availability === 'ready' && !manager) availability = 'unsupported';
 		if (manager && Notification.permission === 'granted')

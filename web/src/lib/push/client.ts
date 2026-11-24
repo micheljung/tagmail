@@ -116,6 +116,33 @@ export async function syncPush(
 }
 
 /**
+ * Runs `sync` once per session: concurrent calls for the same session share
+ * one run, and a failed run is retried on the next call.
+ */
+export function pushSyncer(sync: () => Promise<unknown>): (sessionId: string) => Promise<void> {
+	let synced: string | null = null;
+	let running: { id: string; done: Promise<void> } | null = null;
+	return (id) => {
+		if (id === synced) return Promise.resolve();
+		if (running?.id === id) return running.done;
+		const done = sync().then(
+			() => {
+				synced = id;
+			},
+			(error: unknown) => console.warn('push subscription sync failed', error)
+		);
+		const run = {
+			id,
+			done: done.finally(() => {
+				if (running === run) running = null;
+			})
+		};
+		running = run;
+		return run.done;
+	};
+}
+
+/**
  * Asks for permission and subscribes. Call it straight from a click: iOS
  * only shows the prompt during a user gesture.
  */

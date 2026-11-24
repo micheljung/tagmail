@@ -14,6 +14,20 @@ export function shouldRegister(env: RegisterEnv): boolean {
 	return !env.dev && !env.desktop && env.secure && env.supported;
 }
 
+let share: (registration: Promise<ServiceWorkerRegistration> | null) => void = () => {};
+
+/**
+ * The registration the root layout makes, or `null` where it makes none.
+ * Pages mount before the root layout does, so they wait on this.
+ */
+export const appRegistration = new Promise<ServiceWorkerRegistration | null>((resolve) => {
+	share = (registration) => resolve(registration?.catch(() => null) ?? null);
+});
+
+export function shareRegistration(registration: Promise<ServiceWorkerRegistration> | null): void {
+	share(registration);
+}
+
 export interface RegisterHooks {
 	/** A new version is installed; `apply` activates it and reloads once. */
 	onUpdate: (apply: () => void) => void;

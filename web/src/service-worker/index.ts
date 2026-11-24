@@ -6,6 +6,7 @@ import {
 	fetchStrategy,
 	notificationFor,
 	safeAppUrl,
+	servesShell,
 	shellCacheName,
 	shellReferences,
 	staleCaches
@@ -26,11 +27,13 @@ async function precache(): Promise<void> {
 }
 
 async function networkFirst(request: Request): Promise<Response> {
+	const shell = () => caches.match(SHELL_PAGE, { cacheName: CACHE });
 	try {
-		return await fetch(request);
+		const response = await fetch(request);
+		return servesShell(response.status) ? ((await shell()) ?? response) : response;
 	} catch (error) {
-		const shell = await caches.match(SHELL_PAGE, { cacheName: CACHE });
-		if (shell) return shell;
+		const cached = await shell();
+		if (cached) return cached;
 		throw error;
 	}
 }

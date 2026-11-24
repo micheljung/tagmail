@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { SwipeTracker, type SwipeAllowed, type SwipePoint } from './swipe';
+import { SWIPE_OPS, SwipeTracker, type SwipeAllowed, type SwipePoint } from './swipe';
 
 const WIDTH = 400;
 const BOTH: SwipeAllowed = { left: true, right: true };
@@ -108,5 +108,11 @@ describe('SwipeTracker', () => {
 		expect(s.move(at(20, 50, 50, { pointerId: 2 }))).toBe(false);
 		expect(s.up(at(20, 50, 60, { pointerId: 2 }))).toEqual({ kind: 'none' });
 		expect(drag(s, 0, 0, 0)).toEqual({ kind: 'none' });
+	});
+});
+
+describe('SWIPE_OPS', () => {
+	it('archives left and trashes right, never deleting for good', () => {
+		expect(SWIPE_OPS).toEqual({ left: 'archive', right: 'trash' });
 	});
 });

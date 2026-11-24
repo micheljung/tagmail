@@ -148,3 +148,24 @@ describe('registerServiceWorker', () => {
 		expect(paths).toEqual(['/thread/4711', '/inbox', '/inbox']);
 	});
 });
+
+describe('appRegistration', () => {
+	afterEach(() => vi.resetModules());
+
+	it('resolves with the registration the root layout shares', async () => {
+		const { appRegistration, shareRegistration } = await import('./register');
+		const registration = {} as ServiceWorkerRegistration;
+		shareRegistration(Promise.resolve(registration));
+		expect(await appRegistration).toBe(registration);
+	});
+
+	it('resolves with null where registration failed or was not made', async () => {
+		const failed = await import('./register');
+		failed.shareRegistration(Promise.reject(new Error('blocked')));
+		expect(await failed.appRegistration).toBeNull();
+		vi.resetModules();
+		const none = await import('./register');
+		none.shareRegistration(null);
+		expect(await none.appRegistration).toBeNull();
+	});
+});

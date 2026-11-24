@@ -4,6 +4,7 @@ import {
 	notificationFor,
 	fetchStrategy,
 	safeAppUrl,
+	servesShell,
 	shellCacheName,
 	shellReferences,
 	staleCaches,
@@ -43,6 +44,18 @@ describe('fetchStrategy', () => {
 	];
 	it.each(cases)('%s', (_name, request, expected) => {
 		expect(fetchStrategy(request, ORIGIN)).toBe(expected);
+	});
+});
+
+describe('servesShell', () => {
+	it.each([
+		[200, false],
+		[404, false],
+		[500, true],
+		[502, true],
+		[503, true]
+	])('status %i → %s', (status, expected) => {
+		expect(servesShell(status)).toBe(expected);
 	});
 });
 

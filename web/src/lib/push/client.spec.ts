@@ -6,6 +6,7 @@ import {
 	enablePush,
 	fetchPushApi,
 	pushAvailability,
+	pushSyncer,
 	renewPush,
 	syncPush,
 	unsubscribeQuietly,
@@ -352,6 +353,32 @@ describe('fetchPushApi', () => {
 	it('fails on an error status', async () => {
 		const fetcher = () => Promise.resolve(new Response('', { status: 401 }));
 		await expect(fetchPushApi(fetcher).pushKey()).rejects.toThrow('401');
+	});
+});
+
+describe('pushSyncer', () => {
+	it('syncs once per session and shares a run in flight', async () => {
+		const sync = vi.fn(() => Promise.resolve());
+		const syncFor = pushSyncer(sync);
+		await Promise.all([syncFor('a'), syncFor('a')]);
+		await syncFor('a');
+		expect(sync).toHaveBeenCalledOnce();
+		await syncFor('b');
+		expect(sync).toHaveBeenCalledTimes(2);
+	});
+
+	it('tries again after a failed run', async () => {
+		vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const sync = vi
+			.fn()
+			.mockRejectedValueOnce(new TypeError('offline'))
+			.mockResolvedValue(undefined);
+		const syncFor = pushSyncer(sync);
+		await syncFor('a');
+		await syncFor('a');
+		await syncFor('a');
+		expect(sync).toHaveBeenCalledTimes(2);
+		vi.restoreAllMocks();
 	});
 });
 
