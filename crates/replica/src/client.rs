@@ -12,6 +12,7 @@ use thiserror::Error;
 use url::Url;
 
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// A success this recent counts as online.
 pub const ONLINE_WINDOW: Duration = Duration::from_secs(30);
 
@@ -180,6 +181,43 @@ impl ServerClient {
                 self.link.mark_down();
                 Err(ClientError::Offline(e.to_string()))
             }
+        }
+    }
+
+    /// Sends and returns any answer as status, content type and body;
+    /// only a missing answer is an error.
+    pub async fn exchange(
+        &self,
+        builder: RequestBuilder,
+    ) -> ClientResult<(u16, Option<String>, Vec<u8>)> {
+        let resp = match builder.send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                self.link.mark_down();
+                return Err(ClientError::Offline(e.to_string()));
+            }
+        };
+        self.link.mark_ok();
+        let status = resp.status().as_u16();
+        let content_type = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        match resp.bytes().await {
+            Ok(body) => Ok((status, content_type, body.to_vec())),
+            Err(e) => {
+                self.link.mark_down();
+                Err(ClientError::Offline(e.to_string()))
+            }
+        }
+    }
+
+    /// Asks the server whether it answers, briefly.
+    pub async fn probe(&self) -> bool {
+        match self.request(Method::GET, "api/version") {
+            Ok(b) => self.exchange(b.timeout(PROBE_TIMEOUT)).await.is_ok(),
+            Err(_) => false,
         }
     }
 

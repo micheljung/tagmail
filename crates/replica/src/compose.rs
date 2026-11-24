@@ -279,7 +279,7 @@ pub fn delete_draft_row(tx: &Transaction<'_>, client_id: &str) -> rusqlite::Resu
     Ok(files)
 }
 
-fn new_client_id() -> ComposeResult<String> {
+pub fn random_id() -> ComposeResult<String> {
     let mut bytes = [0u8; 16];
     getrandom::fill(&mut bytes)
         .map_err(|e| ComposeError::Internal(format!("random: {e}").into()))?;
@@ -493,7 +493,7 @@ impl Replica {
         std::fs::create_dir_all(&dir)?;
         let mut ids = Vec::with_capacity(parts.len());
         for part in parts {
-            let path = dir.join(format!("part-{}", new_client_id()?));
+            let path = dir.join(format!("part-{}", random_id()?));
             std::fs::write(&path, &part.bytes)?;
             ids.push(self.insert_upload(
                 &part.name,
@@ -537,7 +537,7 @@ impl Replica {
         let identity = self.identity(input.identity_id).await?;
         let client_id = match input.client_id.take() {
             Some(c) => c,
-            None => new_client_id()?,
+            None => random_id()?,
         };
         let existing = draft_by_client_id(&self.durable().conn(), &client_id)?;
         if let Some(d) = existing {
