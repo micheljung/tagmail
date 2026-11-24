@@ -56,16 +56,7 @@ impl ImageFetcher {
 
     /// Mozilla roots, ring provider, HTTP/1.1.
     pub fn with_webpki_roots() -> anyhow::Result<ImageFetcher> {
-        let roots = rustls::RootCertStore {
-            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-        };
-        let tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-        Ok(ImageFetcher::new(tls))
+        Ok(ImageFetcher::new(outbound::webpki_tls()?))
     }
 
     /// Test seams: resolver, address policy, ports and limits.

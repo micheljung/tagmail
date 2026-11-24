@@ -34,6 +34,7 @@ async fn fixture() -> Fixture {
         max_sse_clients: 2,
         auth: Default::default(),
         web_dir: None,
+        push: Default::default(),
     };
     let engine = tagmail_engine::EngineConfig {
         draft_debounce: Duration::from_secs(3600),

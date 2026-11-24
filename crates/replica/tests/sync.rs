@@ -55,6 +55,7 @@ impl Env {
             max_sse_clients: 4,
             auth: Default::default(),
             web_dir: None,
+            push: Default::default(),
         }
     }
 

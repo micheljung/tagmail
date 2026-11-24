@@ -145,6 +145,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             ..AuthConfig::default()
         },
         web_dir: cli.web_dir.or_else(default_web_dir),
+        push: Default::default(),
     };
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),

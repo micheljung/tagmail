@@ -16,7 +16,7 @@ use axum::http::{HeaderMap, HeaderName, HeaderValue, Method as HttpMethod, Statu
 use axum::middleware;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response as HttpResponse};
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use futures_util::stream;
 use tagmail_api_core::{Api, EventSession, EventSource, Method, OpenError, Request, Response};
 use tagmail_core::ChangeCursor;
@@ -24,6 +24,7 @@ use tokio::sync::{Semaphore, watch};
 use tokio::time::Sleep;
 
 use crate::auth::{self, Auth, Principal};
+use crate::push::{self, Push};
 use crate::ratelimit::RateLimiter;
 use crate::replica::Replica;
 use crate::web::WebDir;
@@ -53,6 +54,7 @@ pub struct AppState {
     /// Per client IP: each request makes the server fetch a remote image.
     pub image_proxy: Arc<RateLimiter>,
     pub replica: Arc<Replica>,
+    pub push: Arc<Push>,
 }
 
 /// Declares the routes axum serves itself as [`SERVER_ROUTES`] and builds
@@ -92,6 +94,12 @@ server_routes! {
     post "/api/replica/rows" => replica::rows,
     get "/api/replica/messages/{id}/raw" => replica::raw,
     post "/api/replica/image" => replica::image,
+    get "/api/push/key" => push::routes::key,
+    get "/api/push/subscriptions" => push::routes::list,
+    post "/api/push/subscriptions" => push::routes::subscribe,
+    patch "/api/push/subscriptions/{id}" => push::routes::patch,
+    delete "/api/push/subscriptions/{id}" => push::routes::delete,
+    post "/api/push/subscriptions/{id}/test" => push::routes::test,
 }
 
 /// Every `/api` route as (method, path template): the server's own and
@@ -192,7 +200,7 @@ fn is_account_test(method: &HttpMethod, path: &str, body: &[u8]) -> bool {
     }
 }
 
-fn rate_limited(wait: Duration, message: &str) -> HttpResponse {
+pub(crate) fn rate_limited(wait: Duration, message: &str) -> HttpResponse {
     let mut resp = Response::error(429, "rate_limited", message);
     resp.headers
         .push(("retry-after", wait.as_secs().max(1).to_string()));

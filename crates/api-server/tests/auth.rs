@@ -42,6 +42,7 @@ impl Dirs {
             max_sse_clients: 2,
             auth: AuthConfig::default(),
             web_dir: None,
+            push: Default::default(),
         }
     }
 }
@@ -179,6 +180,12 @@ fn the_route_table_covers_every_api_area() {
         "POST /api/replica/rows",
         "GET /api/replica/messages/{id}/raw",
         "POST /api/replica/image",
+        "GET /api/push/key",
+        "GET /api/push/subscriptions",
+        "POST /api/push/subscriptions",
+        "PATCH /api/push/subscriptions/{id}",
+        "DELETE /api/push/subscriptions/{id}",
+        "POST /api/push/subscriptions/{id}/test",
     ] {
         assert!(
             routes.iter().any(|r| r == expected),

@@ -151,6 +151,19 @@ pub async fn pin(
     Ok(SocketAddr::new(ip, port))
 }
 
+/// Mozilla roots, ring provider.
+pub fn webpki_tls() -> anyhow::Result<rustls::ClientConfig> {
+    let roots = rustls::RootCertStore {
+        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+    };
+    Ok(rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()?
+    .with_root_certificates(roots)
+    .with_no_client_auth())
+}
+
 /// A one-shot client that can only reach `url`'s host at `addr`.
 pub fn pinned_client(
     tls: rustls::ClientConfig,

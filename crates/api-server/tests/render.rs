@@ -22,6 +22,7 @@ fn config(data: &Path, keys: &Path) -> Config {
         max_sse_clients: 2,
         auth: Default::default(),
         web_dir: None,
+        push: Default::default(),
     }
 }
 

@@ -35,6 +35,7 @@ use tagmail_store::MasterKey;
 use crate::auth::{Auth, AuthConfig};
 use crate::credentials::{KeyWarning, load_master_key};
 use crate::proxy::ImageFetcher;
+use crate::push::{Push, PushConfig};
 use crate::web::WebDir;
 use tagmail_api_core::sqlite_store::SqliteStore;
 
@@ -63,6 +64,7 @@ pub struct Config {
     pub auth: AuthConfig,
     /// Built SPA served at `/`; without it only the API is served.
     pub web_dir: Option<PathBuf>,
+    pub push: PushConfig,
 }
 
 pub struct Server {
@@ -73,6 +75,8 @@ pub struct Server {
     engine: Option<Arc<Engine>>,
     stop: watch::Sender<bool>,
     task: JoinHandle<io::Result<()>>,
+    push: Arc<Push>,
+    dispatcher: JoinHandle<()>,
 }
 
 /// What syncs the accounts.
@@ -161,8 +165,22 @@ impl Server {
         let addr = listener.local_addr()?;
         let auth = Arc::new(Auth::new(store.config().clone(), &config.auth, addr.port()).await?);
         let (stop, shutdown) = watch::channel(false);
-        let mut api = Api::new(store.clone(), registry)
-            .with_image_proxy(Arc::new(ImageFetcher::with_webpki_roots()?));
+        let tls = outbound::webpki_tls()?;
+        let (push, push_tests) = Push::new(
+            &config.push,
+            store.config().clone(),
+            store.vault().clone(),
+            config.auth.public_origin.as_ref(),
+            tls.clone(),
+        );
+        let dispatcher = push::dispatch::spawn(
+            push.clone(),
+            feed.subscribe_arrivals(),
+            push_tests,
+            shutdown.clone(),
+        );
+        let mut api =
+            Api::new(store.clone(), registry).with_image_proxy(Arc::new(ImageFetcher::new(tls)));
         if let Some(engine) = &engine {
             api = api.with_compose(engine.clone() as Arc<dyn Compose>);
             api = api.with_writes(engine.clone() as Arc<dyn WriteService>);
@@ -183,6 +201,7 @@ impl Server {
                 ratelimit::REPLICA_IMAGES_GLOBAL,
             )),
             replica: Arc::new(replica::Replica::new(config.data_dir.join(CACHE_DB))),
+            push: push.clone(),
         };
         let mut stopped = shutdown;
         let task = tokio::spawn(async move {
@@ -205,6 +224,8 @@ impl Server {
             engine,
             stop,
             task,
+            push,
+            dispatcher,
         })
     }
 
@@ -241,6 +262,10 @@ impl Server {
         if !self.task.is_finished() {
             self.task.await??;
         }
+        if let Err(e) = self.dispatcher.await {
+            tracing::error!(error = %e, "push dispatcher failed");
+        }
+        drop(self.push);
         drop(self.engine);
         drop(self.feed);
         drop(self.auth);
