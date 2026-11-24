@@ -11,5 +11,7 @@ with you before any public disclosure.
 
 ## Supported versions
 
-Tagmail is pre-alpha. Only the latest commit on `main` receives security
+Only the latest release and the latest commit on `main` receive security
 fixes.
+
+The security model is described in [docs/security.md](docs/security.md).
