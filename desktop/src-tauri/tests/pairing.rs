@@ -189,3 +189,46 @@ async fn pairs_syncs_resumes_and_unpairs() {
     let session = call(&resumed, Method::GET, "/api/auth/session", Value::Null).await;
     assert_eq!(json_of(&session)["error"], "unpaired");
 }
+
+#[tokio::test]
+async fn plain_http_pairs_only_with_loopback() {
+    let env = Env::new();
+    let emitted = Recorder::default();
+    let (_, shell) = open(&env, &emitted).await;
+    for server in ["http://mail.example.com", "http://192.168.1.10:8080"] {
+        let refused = call(
+            &shell,
+            Method::POST,
+            "/api/desktop/pair",
+            json!({ "server": server, "code": "ABCD1234" }),
+        )
+        .await;
+        assert_eq!(refused.status(), 422, "{server}");
+        assert_eq!(json_of(&refused)["field"], "server");
+    }
+}
+
+#[tokio::test]
+async fn a_stored_plain_http_server_is_not_resumed() {
+    let env = Env::new();
+    let durable =
+        tagmail_replica::Durable::open(&tagmail_replica::Layout::new(env.desktop.path()).durable())
+            .unwrap();
+    durable
+        .set_meta("server_url", "http://mail.example.com/")
+        .unwrap();
+    drop(durable);
+    std::fs::write(env.desktop.path().join("device-token"), "token").unwrap();
+
+    let (desktop, shell) = open(&env, &Recorder::default()).await;
+    assert!(desktop.replica().is_none());
+    let status = json_of(&call(&shell, Method::GET, "/api/desktop/status", Value::Null).await);
+    assert_eq!(status["paired"], false);
+    assert!(
+        status["warnings"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(tagmail_desktop::desktop::INSECURE_WARNING)),
+        "{status}"
+    );
+}

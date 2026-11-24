@@ -2,7 +2,7 @@
 //! that keeps a local copy of the server in sync.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use serde_json::Value;
@@ -34,6 +34,8 @@ const DEVICE_NAME_KEY: &str = "device_name";
 const TOKEN_FILE: &str = "device-token";
 const EVENT_BUFFER: usize = 64;
 const MAX_DEVICE_NAME: usize = 100;
+pub const INSECURE_WARNING: &str = "The stored server address uses plain http, so this device \
+     stopped syncing with it. Pair again with an https address.";
 
 struct Running {
     replica: Arc<Replica>,
@@ -51,6 +53,7 @@ pub struct Desktop {
     running: Mutex<Option<Running>>,
     events: broadcast::Sender<ReplicaEvent>,
     last_sync: AtomicI64,
+    insecure_server: AtomicBool,
     changed: watch::Sender<u64>,
     settings_tx: watch::Sender<DesktopSettingsDto>,
 }
@@ -97,9 +100,24 @@ pub fn device_name() -> String {
     name.unwrap_or_else(|| "Tagmail desktop".to_owned())
 }
 
-fn server_url(raw: &str) -> Option<Url> {
+fn loopback(url: &Url) -> bool {
+    match url.host() {
+        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    }
+}
+
+/// Plain http only reaches this machine; anything else needs https.
+pub fn server_url(raw: &str) -> Option<Url> {
     let url = Url::parse(raw.trim()).ok()?;
-    (matches!(url.scheme(), "http" | "https") && url.host().is_some()).then_some(url)
+    let allowed = match url.scheme() {
+        "https" => url.host().is_some(),
+        "http" => loopback(&url),
+        _ => false,
+    };
+    allowed.then_some(url)
 }
 
 impl Desktop {
@@ -133,6 +151,7 @@ impl Desktop {
             running: Mutex::new(None),
             events: broadcast::channel(EVENT_BUFFER).0,
             last_sync: AtomicI64::new(0),
+            insecure_server: AtomicBool::new(false),
         });
         let server = desktop.stored_server()?;
         let token = desktop.tokens.load().unwrap_or_else(|e| {
@@ -194,10 +213,11 @@ impl Desktop {
     }
 
     fn stored_server(&self) -> tagmail_replica::Result<Option<Url>> {
-        Ok(self
-            .durable
-            .meta(SERVER_KEY)?
-            .and_then(|raw| server_url(&raw)))
+        let raw = self.durable.meta(SERVER_KEY)?.unwrap_or_default();
+        let url = server_url(&raw);
+        self.insecure_server
+            .store(url.is_none() && !raw.is_empty(), Ordering::Relaxed);
+        Ok(url)
     }
 
     async fn start(self: &Arc<Self>, server: &Url, token: String) -> tagmail_replica::Result<()> {
@@ -365,11 +385,13 @@ impl Backend for Desktop {
     }
 
     fn status(&self) -> DesktopStatusDto {
-        let warnings = if self.tokens.in_file() {
-            vec![FILE_WARNING.to_owned()]
-        } else {
-            Vec::new()
-        };
+        let mut warnings = Vec::new();
+        if self.tokens.in_file() {
+            warnings.push(FILE_WARNING.to_owned());
+        }
+        if self.insecure_server.load(Ordering::Relaxed) {
+            warnings.push(INSECURE_WARNING.to_owned());
+        }
         let Some(replica) = self.replica() else {
             return DesktopStatusDto {
                 paired: false,
@@ -402,7 +424,7 @@ impl Backend for Desktop {
         let Some(url) = server_url(&server) else {
             return Err(invalid(
                 "server",
-                "an http or https address, e.g. https://mail.example.com",
+                "an https address, e.g. https://mail.example.com (plain http only for localhost)",
             ));
         };
         let code = code.trim();
@@ -415,6 +437,7 @@ impl Backend for Desktop {
         if previous.as_ref() != Some(&url) {
             self.layout.discard().map_err(internal)?;
         }
+        self.insecure_server.store(false, Ordering::Relaxed);
         self.tokens.save(&token.token).map_err(internal)?;
         self.durable
             .set_meta(SERVER_KEY, url.as_str())
@@ -436,6 +459,7 @@ impl Backend for Desktop {
         if let Err(e) = self.durable.set_meta(SERVER_KEY, "") {
             tracing::warn!(error = %e, "forgetting the server failed");
         }
+        self.insecure_server.store(false, Ordering::Relaxed);
         if let Err(e) = self.layout.discard() {
             tracing::warn!(error = %e, "removing the replica failed");
         }
@@ -464,4 +488,37 @@ impl Backend for Desktop {
 
 fn unpaired() -> api::Response {
     api::Response::error(401, "unpaired", "pair this device with your server")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::server_url;
+
+    #[test]
+    fn plain_http_only_reaches_loopback() {
+        for ok in [
+            "https://mail.example.com",
+            "https://192.0.2.1:8443/",
+            "http://localhost:8080",
+            "http://LOCALHOST",
+            "http://127.0.0.1:3000",
+            "http://127.8.9.10",
+            "http://[::1]:8080",
+        ] {
+            assert!(server_url(ok).is_some(), "{ok}");
+        }
+        for refused in [
+            "http://mail.example.com",
+            "http://192.168.1.10",
+            "http://10.0.0.1",
+            "http://[::ffff:127.0.0.1]",
+            "http://localhost.example.com",
+            "http://localhost.",
+            "ftp://localhost",
+            "file:///etc/passwd",
+            "https://",
+        ] {
+            assert!(server_url(refused).is_none(), "{refused}");
+        }
+    }
 }
