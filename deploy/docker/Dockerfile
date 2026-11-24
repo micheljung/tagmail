@@ -1,6 +1,4 @@
 # syntax=docker/dockerfile:1
-# Build from the repository root:
-#   docker buildx build -f deploy/docker/Dockerfile --platform linux/amd64,linux/arm64 .
 # Both build stages run on the build platform; the server is cross-compiled
 # with zig as the musl linker instead of emulating cargo under QEMU.
 
