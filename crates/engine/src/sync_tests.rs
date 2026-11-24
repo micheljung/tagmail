@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use tagmail_api_core::EventSource;
+use tagmail_api_core::{Arrival, EventSource};
 use tagmail_imap::{Flag, ImapSession};
 use tagmail_store::fts;
 
@@ -628,4 +628,156 @@ async fn pending_text_reads_its_partial_index_in_order() {
         "{plan:?}"
     );
     assert!(!plan.iter().any(|d| d.contains("TEMP B-TREE")), "{plan:?}");
+}
+
+fn now_secs() -> i64 {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    i64::try_from(since.as_secs()).unwrap()
+}
+
+fn drain(rx: &mut tokio::sync::broadcast::Receiver<std::sync::Arc<[Arrival]>>) -> Vec<Arrival> {
+    let mut out = Vec::new();
+    while let Ok(batch) = rx.try_recv() {
+        out.extend(batch.iter().cloned());
+    }
+    out
+}
+
+type ServerChange = Box<dyn FnOnce(&mut crate::fake::FakeServer)>;
+
+/// Syncs the seeded account to live, applies `change` on the server and
+/// returns the arrivals the next sync of every mailbox published.
+async fn arrivals_after(change: impl FnOnce(&mut crate::fake::FakeServer)) -> Vec<Arrival> {
+    let t = open();
+    let srv = server(QRESYNC);
+    seed(&srv);
+    let mut s = session(&srv);
+    sync_all(&t, &mut s).await;
+    let mut rx = t.feed.subscribe_arrivals();
+    change(&mut lock(&srv));
+    for name in ["INBOX", "Sent", "Archive"] {
+        assert_eq!(sync_box(&t, &mut s, name).await, Progress::Done);
+    }
+    drain(&mut rx)
+}
+
+#[tokio::test]
+async fn a_new_unseen_inbox_message_is_one_arrival() {
+    let date = now_secs() - 60;
+    let got = arrivals_after(|s| {
+        s.append(
+            "INBOX",
+            FakeMsg::new("n1@x", "Re: Lunch", "cat@x", "me@x", date).refs(&["a1@x"]),
+        );
+    })
+    .await;
+    assert_eq!(got.len(), 1, "{got:?}");
+    let a = &got[0];
+    assert_eq!(a.account_id, 1);
+    assert_eq!(a.subject.as_deref(), Some("Re: Lunch"));
+    assert_eq!(a.from.as_ref().map(|f| f.email.as_str()), Some("cat@x"));
+    assert_eq!(a.date, date);
+    assert!(a.thread_id.is_some());
+}
+
+#[tokio::test]
+async fn an_initial_sync_publishes_no_arrivals() {
+    let t = open();
+    let srv = server(QRESYNC);
+    lock(&srv).append(
+        "INBOX",
+        FakeMsg::new("n1@x", "Hi", "cat@x", "me@x", now_secs()),
+    );
+    let mut rx = t.feed.subscribe_arrivals();
+    sync_all(&t, &mut session(&srv)).await;
+    assert_eq!(drain(&mut rx), []);
+}
+
+#[tokio::test]
+async fn only_new_unseen_recent_inbox_mail_arrives() {
+    let now = now_secs();
+    let cases: [(&str, ServerChange); 4] = [
+        (
+            "flag change",
+            Box::new(|s| {
+                let uid = s.uid_of("INBOX", "a2@x").unwrap();
+                s.set_flags("INBOX", uid, &[Flag::Flagged]);
+            }),
+        ),
+        (
+            "\\Seen",
+            Box::new(move |s| {
+                s.append(
+                    "INBOX",
+                    FakeMsg::new("n1@x", "Hi", "cat@x", "me@x", now).flags(&[Flag::Seen]),
+                );
+            }),
+        ),
+        (
+            "not the inbox",
+            Box::new(move |s| {
+                s.append("Archive", FakeMsg::new("n1@x", "Hi", "cat@x", "me@x", now));
+            }),
+        ),
+        (
+            "older than a day",
+            Box::new(move |s| {
+                s.append(
+                    "INBOX",
+                    FakeMsg::new("n1@x", "Hi", "cat@x", "me@x", now - 2 * DAY),
+                );
+            }),
+        ),
+    ];
+    for (case, change) in cases {
+        assert_eq!(arrivals_after(change).await, [], "{case}");
+    }
+}
+
+#[tokio::test]
+async fn a_known_message_copied_into_the_inbox_is_no_arrival() {
+    let t = open();
+    let srv = server(QRESYNC);
+    seed(&srv);
+    lock(&srv).append(
+        "Archive",
+        FakeMsg::new("n1@x", "Hi", "cat@x", "me@x", now_secs()),
+    );
+    let mut s = session(&srv);
+    sync_all(&t, &mut s).await;
+    let mut rx = t.feed.subscribe_arrivals();
+    {
+        let mut srv = lock(&srv);
+        let uid = srv.uid_of("Archive", "n1@x").unwrap();
+        srv.copy_msg("Archive", uid, "INBOX");
+    }
+    assert_eq!(sync_box(&t, &mut s, "INBOX").await, Progress::Done);
+    assert_eq!(
+        locations(&t).await.iter().filter(|l| l.2 == "n1@x").count(),
+        2
+    );
+    assert_eq!(drain(&mut rx), []);
+}
+
+#[tokio::test]
+async fn a_rolled_back_transaction_publishes_no_arrivals() {
+    let t = open();
+    let srv = server(QRESYNC);
+    sync_all(&t, &mut session(&srv)).await;
+    let inbox = cache_row(&t, "INBOX").await.id;
+    let day = (now_secs() - 1_700_000_000) / DAY;
+    let fetched = vec![crate::testutil::msg("n1", "Hi", "cat@x", "me@x", day).fetched(1)];
+    let mut rx = t.feed.subscribe_arrivals();
+    let failed = t
+        .ctx
+        .write(move |w| {
+            cache::add_messages(w, inbox, &fetched)?;
+            Err::<(), _>(tagmail_store::Error::Corrupt("rolled back".into()))
+        })
+        .await;
+    assert!(failed.is_err());
+    assert_eq!(drain(&mut rx), []);
+    assert_eq!(messages(&t).await, []);
 }

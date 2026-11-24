@@ -116,7 +116,7 @@ impl Ctx {
     }
 
     /// Runs `f` in one cache transaction and publishes the new change-log
-    /// head if it appended changes.
+    /// head if it appended changes, and the arrivals it collected.
     pub async fn write<T, F>(&self, f: F) -> Result<T>
     where
         T: Send + 'static,
@@ -126,22 +126,24 @@ impl Ctx {
         let now = self.tick();
         let epoch = self.cache.epoch();
         let overlay = self.overlays.get(self.account);
-        let (out, head) = self
+        let (out, head, arrivals) = self
             .cache
             .write(move |tx| {
                 let mut w = W::new(tx, account, now).with_overlay(overlay);
                 let out = f(&mut w)?;
+                let arrivals = w.take_arrivals();
                 let head = if w.finish()? {
                     Some(changes::head(tx, epoch)?)
                 } else {
                     None
                 };
-                Ok((out, head))
+                Ok((out, head, arrivals))
             })
             .await?;
         if let Some(head) = head {
             self.feed.publish(head);
         }
+        self.feed.publish_arrivals(arrivals);
         Ok(out)
     }
 

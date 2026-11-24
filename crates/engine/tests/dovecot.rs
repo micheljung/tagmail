@@ -15,6 +15,9 @@ use tagmail_core::{AccountId, ChangeCursor};
 use tagmail_imap::*;
 use tokio::time::Instant;
 
+/// The `Date` header of `common::message`.
+const MESSAGE_DATE: &str = "Sun, 22 Nov 2026 10:00:00 +0000";
+
 #[tokio::test]
 async fn restart_mid_sync_resumes_without_refetching_committed_windows() {
     let fixture = Fixture::new("engine1").await;
@@ -75,19 +78,24 @@ async fn restart_mid_sync_resumes_without_refetching_committed_windows() {
 }
 
 #[tokio::test]
-async fn append_by_another_client_reaches_the_change_feed_within_10s() {
+async fn append_by_another_client_reaches_the_change_feed_and_arrivals_within_10s() {
     let fixture = Fixture::new("engine2").await;
     let running = fixture.start(no_override(), None).await;
     running.wait_live().await;
     let mut feed = running.feed.subscribe();
+    let mut arrivals = running.feed.subscribe_arrivals();
     let before: ChangeCursor = *feed.borrow_and_update();
 
     let id = format!("append-{}@it", nanos());
+    let fresh = String::from_utf8(message(&id, "Fresh", &[]))
+        .unwrap()
+        .replace(
+            MESSAGE_DATE,
+            &mail_builder::headers::date::Date::now().to_rfc822(),
+        );
     let mut s = second("engine2").await;
     let appended = Instant::now();
-    s.append("INBOX", &[], &message(&id, "Fresh", &[]))
-        .await
-        .unwrap();
+    s.append("INBOX", &[], fresh.as_bytes()).await.unwrap();
     tokio::time::timeout(LIVE_BUDGET, async {
         loop {
             feed.changed().await.unwrap();
@@ -101,6 +109,12 @@ async fn append_by_another_client_reaches_the_change_feed_within_10s() {
     let elapsed = appended.elapsed();
     assert!(feed.borrow().seq > before.seq);
     println!("APPEND visible after {elapsed:?}");
+    let arrival = tokio::time::timeout(LIVE_BUDGET.saturating_sub(elapsed), arrivals.recv())
+        .await
+        .expect("no arrival within 10 s")
+        .unwrap();
+    assert_eq!(arrival.len(), 1);
+    assert_eq!(arrival[0].subject.as_deref(), Some("Fresh"));
     running.stop().await;
 }
 

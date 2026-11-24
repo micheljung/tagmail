@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use serde_json::{Value, json};
+use tagmail_api_core::Arrival;
 use tagmail_api_core::dto::AddressDto;
 use tagmail_core::ops::{self, ArchiveMode, MailboxView, Projected, Role};
 use tagmail_core::{
@@ -18,6 +19,10 @@ use tagmail_store::{ChangeOp, Entity, Error, FtsDocument, NewChange, Result, cha
 use crate::message::{Fetched, LocationState, NewMessage, address_text};
 use crate::overlay::AccountOverlay;
 use crate::threading::{self, ThreadInput};
+
+/// Older mail is restored from elsewhere, not news (contract §5).
+const ARRIVAL_MAX_AGE_SECS: i64 = 24 * 3600;
+const MS_PER_SEC: i64 = 1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncState {
@@ -261,6 +266,9 @@ pub struct W<'a> {
     /// The account's mailboxes `(id, name, special_use)`, read once per
     /// transaction while the overlay is not empty.
     views: Option<Vec<(i64, String, Option<SpecialUse>)>>,
+    /// The account's INBOX if it is live, read once per transaction.
+    live_inbox: Option<Option<i64>>,
+    arrivals: Vec<Arrival>,
 }
 
 impl<'a> W<'a> {
@@ -275,6 +283,8 @@ impl<'a> W<'a> {
             bulk: BTreeMap::new(),
             overlay: Arc::default(),
             views: None,
+            live_inbox: None,
+            arrivals: Vec::new(),
         }
     }
 
@@ -304,6 +314,29 @@ impl<'a> W<'a> {
             );
         }
         Ok(self.views.as_deref().unwrap_or_default())
+    }
+
+    fn live_inbox(&mut self) -> Result<Option<i64>> {
+        if let Some(id) = self.live_inbox {
+            return Ok(id);
+        }
+        let id = self
+            .conn
+            .query_row(
+                "SELECT id FROM mailbox WHERE account_id = ?1 AND name = 'INBOX' COLLATE NOCASE \
+                 AND sync_state = 'live'",
+                [self.account],
+                |r| r.get(0),
+            )
+            .optional()?;
+        self.live_inbox = Some(id);
+        Ok(id)
+    }
+
+    /// Messages this transaction inserted that warrant a notification;
+    /// published only once it commits.
+    pub fn take_arrivals(&mut self) -> Vec<Arrival> {
+        std::mem::take(&mut self.arrivals)
     }
 
     fn archive_mode(&mut self) -> Result<ArchiveMode> {
@@ -795,7 +828,28 @@ pub fn add_messages(w: &mut W<'_>, mailbox: i64, fetched: &[Fetched]) -> Result<
                 }
                 id
             }
-            None => insert_message(w, m)?,
+            None => {
+                let id = insert_message(w, m)?;
+                if !f.location.flags.contains(Flags::SEEN)
+                    && m.date >= w.now_ms / MS_PER_SEC - ARRIVAL_MAX_AGE_SECS
+                    && w.live_inbox()? == Some(mailbox)
+                {
+                    let thread_id = w.conn.query_row(
+                        "SELECT thread_id FROM message WHERE id = ?1",
+                        [id],
+                        |r| r.get(0),
+                    )?;
+                    w.arrivals.push(Arrival {
+                        account_id: w.account,
+                        message_id: id,
+                        thread_id,
+                        from: m.from.first().cloned(),
+                        subject: m.subject.clone(),
+                        date: m.date,
+                    });
+                }
+                id
+            }
         };
         let previous: Option<i64> = w
             .conn
