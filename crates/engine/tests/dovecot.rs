@@ -191,7 +191,7 @@ async fn external_changes_are_reflected_per_capability_path() {
         s.move_messages(&[ub].into_iter().collect(), "INBOX")
             .await
             .unwrap();
-        s.append("Sent", &[], &message(&c1, "Re: Lunch", &[&a1]))
+        s.append(sent(), &[], &message(&c1, "Re: Lunch", &[&a1]))
             .await
             .unwrap();
 
@@ -237,6 +237,9 @@ async fn external_changes_are_reflected_per_capability_path() {
     }
 }
 
+/// Without OBJECTID the content identity matches the re-appended copies
+/// back to their rows. With it (Stalwart) the server gives them new
+/// EMAILIDs, so they become new rows in the same threads.
 #[tokio::test]
 async fn recreated_mailbox_keeps_message_rows() {
     let fixture = Fixture::new("engine6").await;
@@ -295,7 +298,22 @@ async fn recreated_mailbox_keeps_message_rows() {
             |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
         )
         .await;
-    assert_eq!(before, after, "messages matched back by email_id");
+    let objectid = running
+        .engine
+        .runtime_status(AccountId(1))
+        .unwrap()
+        .capabilities
+        .contains(&"OBJECTID".to_owned());
+    if objectid {
+        let threads = |rows: &[(i64, i64)]| rows.iter().map(|r| r.1).collect::<Vec<_>>();
+        assert_eq!(threads(&before), threads(&after), "same threads");
+        assert!(
+            after.iter().all(|a| !before.iter().any(|b| b.0 == a.0)),
+            "re-appended copies are new server objects with new EMAILIDs: {after:?}"
+        );
+    } else {
+        assert_eq!(before, after, "messages matched back by email_id");
+    }
     running.stop().await;
 }
 

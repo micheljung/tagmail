@@ -108,6 +108,26 @@ async fn server_state(user: &str, mailbox: &str) -> Vec<String> {
     out
 }
 
+/// The UID of the message with this Message-ID, read from the headers
+/// because Stalwart's `UID SEARCH HEADER` finds nothing (docs/servers.md).
+async fn uid_of(user: &str, mailbox: &str, msgid: &str) -> Uid {
+    let mut raw = Raw::login(user).await;
+    raw.cmd(&format!("SELECT \"{mailbox}\"")).await;
+    let lines = raw
+        .cmd("UID FETCH 1:* (UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])")
+        .await;
+    raw.cmd("LOGOUT").await;
+    let mut uid = None;
+    for l in lines {
+        if let Some((_, rest)) = l.split_once("UID ") {
+            uid = rest.split_whitespace().next().and_then(|u| u.parse().ok());
+        } else if l == format!("Message-ID: <{msgid}>") {
+            return Uid(uid.expect("UID before the header"));
+        }
+    }
+    panic!("{msgid} not in {mailbox}")
+}
+
 fn has(state: &[String], id: &str, flag: &str) -> bool {
     state
         .iter()
@@ -134,7 +154,7 @@ async fn wipe_resync_keeps_labels_and_applies_queued_ops() {
     .await
     .unwrap();
     s.append(
-        "Sent",
+        sent(),
         &[Flag::Seen],
         &message(&reply, "Re: Thread", &[&root]),
     )
@@ -224,13 +244,7 @@ async fn wipe_resync_keeps_labels_and_applies_queued_ops() {
         .unwrap()
         .job_ids[0];
     s.select("INBOX", SelectOptions::default()).await.unwrap();
-    let root_uid = s
-        .uid_search(SearchCriteria::Header {
-            name: "Message-ID".into(),
-            value: root.clone(),
-        })
-        .await
-        .unwrap();
+    let root_uid: UidSet = [uid_of(user, "INBOX", &root).await].into_iter().collect();
     s.store_flags(
         &root_uid,
         StoreOp::Add,

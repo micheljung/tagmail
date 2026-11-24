@@ -44,6 +44,78 @@ secret = "pass2"
 email = ["user2@tagmail.test"]
 
 [[directory.memory.principals]]
+name = "engine1"
+class = "individual"
+secret = "engine"
+email = ["engine1@tagmail.test"]
+
+[[directory.memory.principals]]
+name = "engine2"
+class = "individual"
+secret = "engine"
+email = ["engine2@tagmail.test"]
+
+[[directory.memory.principals]]
+name = "engine3"
+class = "individual"
+secret = "engine"
+email = ["engine3@tagmail.test"]
+
+[[directory.memory.principals]]
+name = "engine4"
+class = "individual"
+secret = "engine"
+email = ["engine4@tagmail.test"]
+
+[[directory.memory.principals]]
+name = "engine5"
+class = "individual"
+secret = "engine"
+email = ["engine5@tagmail.test"]
+
+[[directory.memory.principals]]
+name = "engine6"
+class = "individual"
+secret = "engine"
+email = ["engine6@tagmail.test"]
+
+[[directory.memory.principals]]
+name = "engine7"
+class = "individual"
+secret = "engine"
+email = ["engine7@tagmail.test"]
+
+[[directory.memory.principals]]
+name = "engine8"
+class = "individual"
+secret = "engine"
+email = ["engine8@tagmail.test"]
+
+[[directory.memory.principals]]
+name = "engine9"
+class = "individual"
+secret = "engine"
+email = ["engine9@tagmail.test"]
+
+[[directory.memory.principals]]
+name = "ops1"
+class = "individual"
+secret = "engine"
+email = ["ops1@tagmail.test"]
+
+[[directory.memory.principals]]
+name = "ops2"
+class = "individual"
+secret = "engine"
+email = ["ops2@tagmail.test"]
+
+[[directory.memory.principals]]
+name = "ops3"
+class = "individual"
+secret = "engine"
+email = ["ops3@tagmail.test"]
+
+[[directory.memory.principals]]
 name = "ops4"
 class = "individual"
 secret = "engine"

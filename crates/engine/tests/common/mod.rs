@@ -719,7 +719,42 @@ impl Raw {
     }
 }
 
-pub const KEEP: &[&str] = &["INBOX", "Sent", "Drafts", "Trash", "Junk", "Archive"];
+/// `TAGMAIL_IMAP_SERVER=stalwart`: `TAGMAIL_IMAP_ADDR` is Stalwart, which
+/// has no METADATA, no `\Archive` and no Gmail-mode variant.
+pub fn stalwart() -> bool {
+    std::env::var("TAGMAIL_IMAP_SERVER").is_ok_and(|s| s == "stalwart")
+}
+
+/// Skips a test that needs a Dovecot-only feature, loudly.
+pub fn skipped_on_stalwart(test: &str, needs: &str) -> bool {
+    let skip = stalwart();
+    if skip {
+        eprintln!("{test}: needs {needs}, skipped on Stalwart");
+    }
+    skip
+}
+
+/// The `\Sent` mailbox of the server under test.
+pub fn sent() -> &'static str {
+    if stalwart() { "Sent Items" } else { "Sent" }
+}
+
+/// Mailboxes a reset empties instead of deleting. On Stalwart `Archive` is
+/// a plain folder the reset creates, which the engine archives into.
+pub fn keep() -> &'static [&'static str] {
+    if stalwart() {
+        &[
+            "INBOX",
+            "Sent Items",
+            "Drafts",
+            "Deleted Items",
+            "Junk Mail",
+            "Archive",
+        ]
+    } else {
+        &["INBOX", "Sent", "Drafts", "Trash", "Junk", "Archive"]
+    }
+}
 
 /// Deletes the user's own mailboxes, empties the special ones and drops
 /// the label registry annotation.
@@ -729,25 +764,32 @@ pub async fn reset_user(user: &str) {
 
 pub async fn reset_user_at(server: Server, user: &str) {
     let mut raw = Raw::login_at(server, user).await;
+    if stalwart() {
+        let list = raw.cmd("LIST \"\" \"Archive\"").await;
+        if list.is_empty() {
+            raw.cmd("CREATE Archive").await;
+        }
+    }
     let list = raw.cmd("LIST \"\" \"*\"").await;
     for line in list {
-        let name = line
-            .rsplit(' ')
-            .next()
-            .unwrap_or_default()
-            .trim_matches('"')
-            .to_owned();
-        if !KEEP.contains(&name.as_str()) && !name.is_empty() && !name.starts_with("[Gmail]") {
+        let name = match line.strip_suffix('"') {
+            Some(quoted) => quoted.rsplit_once('"').map_or("", |(_, n)| n),
+            None => line.rsplit(' ').next().unwrap_or_default(),
+        }
+        .to_owned();
+        if !keep().contains(&name.as_str()) && !name.is_empty() && !name.starts_with("[Gmail]") {
             raw.cmd(&format!("DELETE \"{name}\"")).await;
         }
     }
-    for name in KEEP {
-        raw.cmd(&format!("SELECT {name}")).await;
+    for name in keep() {
+        raw.cmd(&format!("SELECT \"{name}\"")).await;
         raw.cmd("UID STORE 1:* +FLAGS.SILENT (\\Deleted)").await;
         raw.cmd("EXPUNGE").await;
     }
-    raw.cmd("SETMETADATA \"\" (/private/vendor/tagmail/labels NIL)")
-        .await;
+    if !stalwart() {
+        raw.cmd("SETMETADATA \"\" (/private/vendor/tagmail/labels NIL)")
+            .await;
+    }
     raw.cmd("LOGOUT").await;
 }
 

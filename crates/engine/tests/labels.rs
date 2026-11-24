@@ -1,8 +1,8 @@
 //! Labels and ops against the Dovecot test servers (AC 5, Gmail-mode
 //! archive, rename job across a restart). Each test owns an `opsN` user;
 //! see `dovecot.rs` for how to run them. With `TAGMAIL_IMAP_SERVER=stalwart`
-//! and `TAGMAIL_IMAP_ADDR` at Stalwart only the server-agnostic smoke test
-//! runs: Stalwart has no METADATA, no `\Archive` and no Gmail mode.
+//! and `TAGMAIL_IMAP_ADDR` at Stalwart they run there too, except Gmail
+//! mode, which only the Dovecot variant has (docs/servers.md).
 #![cfg(feature = "dovecot-tests")]
 
 mod common;
@@ -22,18 +22,6 @@ use tagmail_imap::*;
 const REGISTRY_ENTRY: &str = "/private/vendor/tagmail/labels";
 /// Budget for an op or job to reach the server.
 const APPLY: Duration = Duration::from_secs(20);
-
-fn stalwart() -> bool {
-    std::env::var("TAGMAIL_IMAP_SERVER").is_ok_and(|s| s == "stalwart")
-}
-
-fn skipped_on_stalwart(test: &str) -> bool {
-    let skip = stalwart();
-    if skip {
-        eprintln!("{test}: needs Dovecot, skipped on Stalwart");
-    }
-    skip
-}
 
 fn op(id: &str, kind: OpKind, thread: ThreadId, label: Option<&str>) -> OpRequest {
     OpRequest {
@@ -86,9 +74,6 @@ async fn status(running: &Running, id: &str) -> OpStatusDto {
 
 #[tokio::test]
 async fn label_reaches_every_copy_as_a_keyword_for_other_clients() {
-    if skipped_on_stalwart("label_reaches_every_copy_as_a_keyword_for_other_clients") {
-        return;
-    }
     let user = "ops1";
     let fixture = Fixture::new(user).await;
     let mut s = second(user).await;
@@ -163,12 +148,19 @@ async fn label_reaches_every_copy_as_a_keyword_for_other_clients() {
     )
     .await;
 
-    let mut raw = Raw::login(user).await;
-    let registry = raw
-        .cmd("GETMETADATA \"\" /private/vendor/tagmail/labels")
-        .await
-        .join("\n");
-    assert!(registry.contains("\"name\":\"Work\""), "{registry}");
+    if stalwart() {
+        assert!(
+            !second(user).await.capabilities().metadata(),
+            "without METADATA the registry stays local"
+        );
+    } else {
+        let mut raw = Raw::login(user).await;
+        let registry = raw
+            .cmd("GETMETADATA \"\" /private/vendor/tagmail/labels")
+            .await
+            .join("\n");
+        assert!(registry.contains("\"name\":\"Work\""), "{registry}");
+    }
 
     running
         .engine
@@ -202,7 +194,10 @@ async fn label_reaches_every_copy_as_a_keyword_for_other_clients() {
 
 #[tokio::test]
 async fn gmail_mode_archive_only_leaves_inbox() {
-    if skipped_on_stalwart("gmail_mode_archive_only_leaves_inbox") {
+    if skipped_on_stalwart(
+        "gmail_mode_archive_only_leaves_inbox",
+        "a Gmail-mode server",
+    ) {
         return;
     }
     let user = "ops2";
