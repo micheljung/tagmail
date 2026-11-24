@@ -6,8 +6,8 @@ use tagmail_api_core::dto::{ApiVersion, VersionDto};
 
 use crate::client::{ClientResult, ServerClient};
 
-/// Oldest server API with the replica routes.
-pub const MIN_SERVER: ApiVersion = ApiVersion { major: 1, minor: 1 };
+/// Oldest server API with the replica routes and ranged mailbox rows.
+pub const MIN_SERVER: ApiVersion = ApiVersion { major: 1, minor: 2 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Compat {
@@ -60,13 +60,13 @@ mod tests {
 
     #[test]
     fn version_matrix() {
-        let client = v(1, 1);
+        let client = v(1, 2);
         let cases = [
-            (v(1, 0), v(1, 0), false),
-            (v(1, 1), v(1, 0), true),
+            (v(1, 1), v(1, 0), false),
+            (v(1, 2), v(1, 0), true),
             (v(1, 5), v(1, 1), true),
             (v(2, 0), v(1, 0), false),
-            (v(1, 2), v(1, 2), false),
+            (v(1, 3), v(1, 3), false),
         ];
         for (api, min_client, ok) in cases {
             let got = check(client, &server(api, min_client));

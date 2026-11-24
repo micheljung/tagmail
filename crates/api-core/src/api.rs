@@ -22,7 +22,7 @@ use crate::store::{
 };
 use crate::writes::WriteService;
 
-pub const API_VERSION: ApiVersion = ApiVersion { major: 1, minor: 1 };
+pub const API_VERSION: ApiVersion = ApiVersion { major: 1, minor: 2 };
 pub const MIN_CLIENT: ApiVersion = ApiVersion { major: 1, minor: 0 };
 
 /// Thread rows per `/api/threads` request (plan §3.11 pages of 100).
