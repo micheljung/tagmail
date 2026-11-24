@@ -84,7 +84,7 @@ impl ImageFetcher {
         .await
         .map_err(|e| match e {
             PinError::Blocked(why) => ProxyError::Blocked(why),
-            PinError::Unresolved(why) => ProxyError::Upstream(why),
+            PinError::NoSuchHost(why) | PinError::Unresolved(why) => ProxyError::Upstream(why),
         })
     }
 

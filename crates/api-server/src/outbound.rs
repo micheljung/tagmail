@@ -20,6 +20,7 @@ const HTTPS_PORT: u16 = 443;
 
 /// Resolves host names for outbound requests; swapped out in tests.
 pub trait Resolver: Send + Sync + 'static {
+    /// Fails with [`io::ErrorKind::NotFound`] when the name does not exist.
     fn resolve(&self, host: String) -> BoxFuture<io::Result<Vec<IpAddr>>>;
 }
 
@@ -30,11 +31,39 @@ impl Resolver for SystemResolver {
     fn resolve(&self, host: String) -> BoxFuture<io::Result<Vec<IpAddr>>> {
         Box::pin(async move {
             Ok(tokio::net::lookup_host((host.as_str(), 0))
-                .await?
+                .await
+                .map_err(|e| {
+                    if no_such_name(&e) {
+                        io::Error::new(io::ErrorKind::NotFound, e.to_string())
+                    } else {
+                        e
+                    }
+                })?
                 .map(|a| a.ip())
                 .collect())
         })
     }
+}
+
+/// `getaddrinfo` reports a name that does not exist (`EAI_NONAME`,
+/// `EAI_NODATA`) only through its message on Unix, and as
+/// `WSAHOST_NOT_FOUND`/`WSANO_DATA` on Windows; anything else (`EAI_AGAIN`
+/// for SERVFAIL and timeouts, I/O errors) is a fault of this host's resolver.
+fn no_such_name(e: &io::Error) -> bool {
+    const WSAHOST_NOT_FOUND: i32 = 11001;
+    const WSANO_DATA: i32 = 11004;
+    const MESSAGES: &[&str] = &[
+        "Name or service not known",
+        "No address associated with hostname",
+        "Name does not resolve",
+        "Name has no usable address",
+        "nodename nor servname provided, or not known",
+    ];
+    if cfg!(windows) {
+        return matches!(e.raw_os_error(), Some(WSAHOST_NOT_FOUND | WSANO_DATA));
+    }
+    let message = e.to_string();
+    MESSAGES.iter().any(|m| message.ends_with(m))
 }
 
 /// Whether `ip` is in a range that is never fetched.
@@ -107,7 +136,9 @@ impl reqwest::dns::Resolve for NoDns {
 pub enum PinError {
     /// The URL or one of its addresses is not allowed.
     Blocked(String),
-    /// The host did not resolve.
+    /// The host name does not exist or has no addresses.
+    NoSuchHost(String),
+    /// This server's resolver failed.
     Unresolved(String),
 }
 
@@ -137,14 +168,18 @@ pub async fn pin(
         None => return Err(blocked("no host".to_owned())),
         Some(url::Host::Ipv4(ip)) => vec![IpAddr::V4(ip)],
         Some(url::Host::Ipv6(ip)) => vec![IpAddr::V6(ip)],
-        Some(url::Host::Domain(host)) => resolver
-            .resolve(host.to_owned())
-            .await
-            .map_err(|e| PinError::Unresolved(format!("resolving {host}: {e}")))?,
+        Some(url::Host::Domain(host)) => resolver.resolve(host.to_owned()).await.map_err(|e| {
+            let why = format!("resolving {host}: {e}");
+            if e.kind() == io::ErrorKind::NotFound {
+                PinError::NoSuchHost(why)
+            } else {
+                PinError::Unresolved(why)
+            }
+        })?,
     };
     let ip = *ips
         .first()
-        .ok_or_else(|| PinError::Unresolved("no addresses".to_owned()))?;
+        .ok_or_else(|| PinError::NoSuchHost("no addresses".to_owned()))?;
     if let Some(bad) = ips.iter().find(|ip| !allowed_ip(**ip)) {
         return Err(blocked(format!("address {bad}")));
     }
@@ -387,6 +422,55 @@ mod tests {
         }
     }
 
+    struct Failing(io::ErrorKind);
+
+    impl Resolver for Failing {
+        fn resolve(&self, _: String) -> BoxFuture<io::Result<Vec<IpAddr>>> {
+            let kind = self.0;
+            Box::pin(async move { Err(io::Error::from(kind)) })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_missing_name_is_told_apart_from_a_failing_resolver() {
+        let url = Url::parse("https://push.example/x").unwrap();
+        let pin = |kind| {
+            let url = url.clone();
+            async move { EndpointPolicy::Strict.pin(&url, &Failing(kind)).await }
+        };
+        assert!(matches!(
+            pin(io::ErrorKind::NotFound).await,
+            Err(PinError::NoSuchHost(_))
+        ));
+        assert!(matches!(
+            pin(io::ErrorKind::TimedOut).await,
+            Err(PinError::Unresolved(_))
+        ));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn getaddrinfo_messages_for_missing_names_are_recognized() {
+        let gai = |detail: &str| {
+            io::Error::other(format!("failed to lookup address information: {detail}"))
+        };
+        for missing in [
+            "Name or service not known",
+            "No address associated with hostname",
+            "Name does not resolve",
+            "nodename nor servname provided, or not known",
+        ] {
+            assert!(no_such_name(&gai(missing)), "{missing}");
+        }
+        for fault in [
+            "Temporary failure in name resolution",
+            "Non-recoverable failure in name resolution",
+            "System error",
+        ] {
+            assert!(!no_such_name(&gai(fault)), "{fault}");
+        }
+    }
+
     #[tokio::test]
     async fn strict_pins_only_when_every_address_is_global() {
         let url = Url::parse("https://push.example/x").unwrap();
@@ -403,7 +487,7 @@ mod tests {
             pin(&["8.8.8.8", "10.0.0.1"]).await,
             Err(PinError::Blocked(_))
         ));
-        assert!(matches!(pin(&[]).await, Err(PinError::Unresolved(_))));
+        assert!(matches!(pin(&[]).await, Err(PinError::NoSuchHost(_))));
         let loopback = Fixed(vec!["127.0.0.1".parse().unwrap()]);
         assert!(EndpointPolicy::Strict.pin(&url, &loopback).await.is_err());
         let local = Url::parse("http://127.0.0.1:4000/x").unwrap();

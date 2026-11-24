@@ -692,6 +692,56 @@ async fn strict_policy_never_sends_to_private_addresses() {
     server.shutdown().await.unwrap();
 }
 
+/// Answers `gone.example` with NXDOMAIN, `empty.example` with no
+/// addresses and every other name with a resolver timeout.
+struct BrokenDns;
+
+impl Resolver for BrokenDns {
+    fn resolve(&self, host: String) -> tagmail_api_core::BoxFuture<io::Result<Vec<IpAddr>>> {
+        Box::pin(async move {
+            match host.as_str() {
+                "gone.example" => Err(io::ErrorKind::NotFound.into()),
+                "empty.example" => Ok(Vec::new()),
+                _ => Err(io::ErrorKind::TimedOut.into()),
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn a_host_that_no_longer_exists_counts_as_a_failure() {
+    let dirs = Dirs::new();
+    let strict = PushConfig {
+        policy: EndpointPolicy::Strict,
+        resolver: Arc::new(BrokenDns),
+    };
+    let server = Server::start(&dirs.config(strict), None).await.unwrap();
+    let c = owner(&server).await;
+    add_accounts(&server, &[1]).await;
+    for host in ["gone.example", "empty.example", "flaky.example"] {
+        subscribed(
+            &c,
+            &server,
+            &Browser::new().subscription(&format!("https://{host}/send")),
+        )
+        .await;
+    }
+    server
+        .feed()
+        .publish_arrivals(vec![arrival(1, 1, "Alice", "Hi")]);
+    tokio::time::sleep(BATCH_DELAY + Duration::from_secs(1)).await;
+    assert_eq!(
+        column(
+            &server,
+            "SELECT failures FROM push_subscription ORDER BY id"
+        )
+        .await,
+        [1, 1, 0],
+        "a missing host counts, a resolver timeout does not"
+    );
+    server.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn the_vapid_key_survives_a_restart_sealed() {
     let dirs = Dirs::new();

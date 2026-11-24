@@ -374,6 +374,10 @@ async fn send(
             tracing::warn!(subscription = id, %host, error = ?e, "push endpoint not resolved");
             return Outcome::LocalFault;
         }
+        Err(e @ PinError::NoSuchHost(_)) => {
+            tracing::warn!(subscription = id, %host, error = ?e, "push endpoint host is gone");
+            return Outcome::Failed;
+        }
         Err(e) => {
             tracing::warn!(subscription = id, %host, error = ?e, "push endpoint refused");
             return Outcome::Failed;
