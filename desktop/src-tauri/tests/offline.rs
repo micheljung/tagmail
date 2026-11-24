@@ -12,6 +12,7 @@
 mod app;
 
 use std::net::SocketAddr;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use app::{LIVE, Lines, app_command};
@@ -21,6 +22,7 @@ use tagmail_imap::{
     CapabilityOverride, ImapSession, Password, SearchCriteria, Security, SelectOptions,
     ServerConfig, TokioSession, UidSet,
 };
+use tagmail_store::rusqlite::{Connection, OpenFlags};
 use tempfile::TempDir;
 
 const USER: &str = "engine8";
@@ -138,6 +140,22 @@ async fn mailpit_count(subject: &str) -> u64 {
     )
     .await;
     found["messages_count"].as_u64().unwrap_or(0)
+}
+
+/// The replica turns live before its prefetch has fetched the window.
+fn raw_prefetched(data: &Path, subject: &str) -> bool {
+    let cache = tagmail_replica::Layout::new(data)
+        .replica()
+        .join("cache.db");
+    let Ok(conn) = Connection::open_with_flags(&cache, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return false;
+    };
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM message WHERE subject = ?1 AND raw_blob IS NOT NULL)",
+        [subject],
+        |r| r.get(0),
+    )
+    .unwrap_or(false)
 }
 
 async fn eventually<F, Fut>(what: &str, timeout: Duration, mut check: F)
@@ -382,6 +400,12 @@ async fn the_desktop_works_offline_and_sends_exactly_once() {
     app.wait("the live replica", START, |l| {
         l.starts_with("DESKTOP_STATUS") && l.contains(LIVE)
     })
+    .await;
+    eventually(
+        "the replica prefetched the recent message",
+        STEP,
+        || async { raw_prefetched(&desktop.path().join("data"), RECENT) },
+    )
     .await;
 
     stack.stop().await;
