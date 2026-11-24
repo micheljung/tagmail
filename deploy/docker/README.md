@@ -53,6 +53,10 @@ address pool; narrow it to your network's gateway if you can. A proxy in
 another container on the same Compose network can reach `tagmail:7878`
 directly instead.
 
+Compose prefixes the volume with the project name, which defaults to the
+directory name: in `~/tagmail` the data lives in the volume
+`tagmail_tagmail-data` (`docker volume ls`).
+
 ## Run without Compose
 
 ```sh
