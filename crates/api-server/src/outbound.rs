@@ -188,12 +188,17 @@ pub fn pinned_client(
 
 /// Which push endpoints are acceptable, at registration and on every send.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[allow(
+    clippy::manual_non_exhaustive,
+    reason = "the hidden variant is for tests, not future variants"
+)]
 pub enum EndpointPolicy {
     /// `https` to a DNS name on port 443 whose addresses are all global.
     #[default]
     Strict,
     /// Also `http`, IP literals, loopback and any port: a local mock push
     /// service. Never reachable from the command line.
+    #[doc(hidden)]
     LoopbackForTests,
 }
 

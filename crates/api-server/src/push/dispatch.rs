@@ -28,8 +28,8 @@ pub const COOLDOWN: Duration = Duration::from_secs(30);
 pub const MAX_CONCURRENT_SENDS: usize = 4;
 /// Per send, from resolving the endpoint to reading the answer.
 pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
-/// Response bytes read for the log.
-pub const MAX_LOGGED_BODY: usize = 4096;
+/// Response bytes of a refusing push service kept for the debug log.
+pub const MAX_LOGGED_BODY: usize = 256;
 /// The push service keeps an undelivered message this long.
 pub const TTL_SECS: u32 = 12 * 60 * 60;
 /// Longest honoured `Retry-After` of a push service.
@@ -48,7 +48,6 @@ enum Outcome {
     LocalFault,
 }
 
-#[derive(Debug)]
 struct Sent {
     id: i64,
     endpoint: String,
@@ -56,13 +55,32 @@ struct Sent {
     outcome: Outcome,
 }
 
+impl std::fmt::Debug for Sent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sent")
+            .field("id", &self.id)
+            .field("origin", &self.origin)
+            .field("outcome", &self.outcome)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Arrivals not yet pushed to one subscription.
-#[derive(Debug)]
 struct Pending {
     count: u32,
     newest: Option<Arrival>,
     origin: String,
     since: Instant,
+}
+
+impl std::fmt::Debug for Pending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Pending")
+            .field("count", &self.count)
+            .field("origin", &self.origin)
+            .field("since", &self.since)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Pending {
@@ -414,8 +432,7 @@ async fn send(
             _ => break,
         }
     }
-    answer.truncate(MAX_LOGGED_BODY);
-    let answer = String::from_utf8_lossy(&answer);
+    let answer = logged(&answer);
     match status {
         s if s.is_success() => {
             tracing::debug!(subscription = id, %host, status = s.as_u16(), "push delivered");
@@ -430,12 +447,67 @@ async fn send(
             Outcome::RetryAfter(wait)
         }
         StatusCode::PAYLOAD_TOO_LARGE => {
-            tracing::error!(subscription = id, %host, %answer, "push payload too large");
+            tracing::error!(subscription = id, %host, "push payload too large");
+            tracing::debug!(subscription = id, %answer, "push service answer");
             Outcome::Failed
         }
         s => {
-            tracing::warn!(subscription = id, %host, status = s.as_u16(), %answer, "push refused");
+            tracing::warn!(subscription = id, %host, status = s.as_u16(), "push refused");
+            tracing::debug!(subscription = id, %answer, "push service answer");
             Outcome::Failed
+        }
+    }
+}
+
+/// A push service's answer, capped and escaped so it cannot forge log lines.
+fn logged(answer: &[u8]) -> String {
+    let capped = &answer[..answer.len().min(MAX_LOGGED_BODY)];
+    String::from_utf8_lossy(capped).escape_debug().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use tagmail_api_core::dto::AddressDto;
+
+    use super::*;
+
+    #[test]
+    fn logged_answers_are_capped_and_escaped() {
+        const FORGED: &str = "ok\n2026 INFO forged\u{1b}[31m";
+        let hostile = format!("{FORGED}{}", "x".repeat(MAX_LOGGED_BODY * 2));
+        let logged = logged(hostile.as_bytes());
+        assert!(logged.starts_with("ok\\n2026 INFO forged\\u{1b}[31m"));
+        assert!(!logged.contains(['\n', '\u{1b}']));
+        assert_eq!(logged.matches('x').count(), MAX_LOGGED_BODY - FORGED.len());
+    }
+
+    #[test]
+    fn debug_output_hides_endpoints_and_mail() {
+        const SECRET: &str = "capability-token";
+        let sent = Sent {
+            id: 1,
+            endpoint: format!("https://push.example/{SECRET}"),
+            origin: "https://push.example".into(),
+            outcome: Outcome::Delivered,
+        };
+        let pending = Pending {
+            count: 1,
+            newest: Some(Arrival {
+                account_id: 1,
+                message_id: 1,
+                thread_id: None,
+                from: Some(AddressDto {
+                    name: Some(SECRET.into()),
+                    email: format!("{SECRET}@example.org"),
+                }),
+                subject: Some(SECRET.into()),
+                date: 0,
+            }),
+            origin: "https://push.example".into(),
+            since: Instant::now(),
+        };
+        for debug in [format!("{sent:?}"), format!("{pending:?}")] {
+            assert!(!debug.contains(SECRET), "{debug}");
         }
     }
 }

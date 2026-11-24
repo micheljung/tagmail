@@ -44,7 +44,7 @@ impl Target {
 }
 
 /// A validated `POST /api/push/subscriptions`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NewSubscription {
     pub endpoint: String,
     pub p256dh: Vec<u8>,
@@ -53,6 +53,15 @@ pub struct NewSubscription {
     pub account_ids: Option<Vec<i64>>,
     pub user_agent: Option<String>,
     pub old_endpoint: Option<String>,
+}
+
+impl std::fmt::Debug for NewSubscription {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NewSubscription")
+            .field("preview", &self.preview)
+            .field("account_ids", &self.account_ids)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -430,6 +439,23 @@ mod tests {
         })
         .await
         .unwrap()
+    }
+
+    #[test]
+    fn new_subscription_debug_hides_endpoints_and_keys() {
+        let sub = NewSubscription {
+            endpoint: NEW.into(),
+            p256dh: vec![0xab; 65],
+            auth: [0xcd; 16],
+            preview: None,
+            account_ids: None,
+            user_agent: None,
+            old_endpoint: Some(OLD.into()),
+        };
+        let debug = format!("{sub:?}");
+        for secret in ["push.example", "171", "205"] {
+            assert!(!debug.contains(secret), "{debug}");
+        }
     }
 
     #[tokio::test]
