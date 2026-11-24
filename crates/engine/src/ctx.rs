@@ -129,12 +129,12 @@ impl Ctx {
         let epoch = self.cache.epoch();
         let overlay = self.overlays.get(self.account);
         let candidates = self.candidates.clone();
-        let (out, head, arrivals, candidate_changes) = self
+        let (out, head, arrivals) = self
             .cache
             .write(move |tx| {
                 let mut w = W::new(tx, account, now)
                     .with_overlay(overlay)
-                    .with_candidates(candidates);
+                    .with_candidates(candidates.clone());
                 let out = f(&mut w)?;
                 let arrivals = w.take_arrivals();
                 let candidate_changes = w.take_candidate_changes();
@@ -143,13 +143,13 @@ impl Ctx {
                 } else {
                     None
                 };
-                Ok((out, head, arrivals, candidate_changes))
+                candidates
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .apply(candidate_changes, now);
+                Ok((out, head, arrivals))
             })
             .await?;
-        self.candidates
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .apply(candidate_changes);
         if let Some(head) = head {
             self.feed.publish(head);
         }

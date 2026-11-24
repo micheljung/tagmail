@@ -28,35 +28,48 @@ const MS_PER_SEC: i64 = 1000;
 /// may list them only later (All Mail syncs before INBOX), and their first
 /// INBOX location is then still an arrival. They are dropped once INBOX
 /// has completed a whole poll after the one in progress, so a later move
-/// into INBOX is no arrival.
+/// into INBOX is no arrival, or once they leave the arrival window, so an
+/// INBOX that never polls does not keep them.
 #[derive(Debug, Default)]
 pub struct InboxCandidates {
     inbox_polls: u64,
-    /// Message id → `inbox_polls` when inserted.
-    ids: HashMap<i64, u64>,
+    ids: HashMap<i64, Candidate>,
 }
 
-/// What one transaction does to [`InboxCandidates`], applied on commit.
+#[derive(Debug, Clone, Copy)]
+struct Candidate {
+    /// `inbox_polls` when inserted.
+    polls: u64,
+    received: i64,
+}
+
+/// What one transaction does to [`InboxCandidates`].
 #[derive(Debug, Default)]
 pub struct CandidateChanges {
-    added: Vec<i64>,
+    /// Message id and its receipt time.
+    added: Vec<(i64, i64)>,
     taken: Vec<i64>,
     inbox_polled: bool,
 }
 
 impl InboxCandidates {
-    pub fn apply(&mut self, changes: CandidateChanges) {
+    /// Called last inside the transaction, so that the next writer
+    /// transaction already sees the changes.
+    pub fn apply(&mut self, changes: CandidateChanges, now_ms: i64) {
         for id in changes.taken {
             self.ids.remove(&id);
         }
-        for id in changes.added {
-            self.ids.insert(id, self.inbox_polls);
+        for (id, received) in changes.added {
+            let polls = self.inbox_polls;
+            self.ids.insert(id, Candidate { polls, received });
         }
         if changes.inbox_polled {
             self.inbox_polls += 1;
-            let oldest = self.inbox_polls - 1;
-            self.ids.retain(|_, polls| *polls >= oldest);
         }
+        let oldest_poll = self.inbox_polls.saturating_sub(1);
+        let oldest_receipt = now_ms / MS_PER_SEC - ARRIVAL_MAX_AGE_SECS;
+        self.ids
+            .retain(|_, c| c.polls >= oldest_poll && c.received >= oldest_receipt);
     }
 }
 
@@ -333,7 +346,7 @@ impl<'a> W<'a> {
         self
     }
 
-    /// For [`InboxCandidates::apply`] once the transaction commits.
+    /// For [`InboxCandidates::apply`].
     pub fn take_candidate_changes(&mut self) -> CandidateChanges {
         std::mem::take(&mut self.candidate_changes)
     }
@@ -929,7 +942,7 @@ pub fn add_messages(w: &mut W<'_>, mailbox: i64, fetched: &[Fetched]) -> Result<
                     if w.live_inbox()? == Some(mailbox) {
                         w.push_arrival(id, m)?;
                     } else if mailbox_state(w.conn, mailbox)? == SyncState::Live {
-                        w.candidate_changes.added.push(id);
+                        w.candidate_changes.added.push((id, m.received));
                     }
                 }
                 id
@@ -1471,4 +1484,23 @@ fn thread_mailboxes(conn: &Connection, thread: i64) -> Result<BTreeMap<i64, i64>
         .query_map([thread], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<tagmail_store::rusqlite::Result<_>>()?;
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn candidates_leave_with_the_arrival_window_even_without_inbox_polls() {
+        const NOW: i64 = 1_800_000_000;
+        let mut candidates = InboxCandidates::default();
+        let changes = CandidateChanges {
+            added: vec![(1, NOW - ARRIVAL_MAX_AGE_SECS + 1), (2, NOW)],
+            ..CandidateChanges::default()
+        };
+        candidates.apply(changes, NOW * MS_PER_SEC);
+        assert_eq!(candidates.ids.len(), 2);
+        candidates.apply(CandidateChanges::default(), (NOW + 2) * MS_PER_SEC);
+        assert_eq!(candidates.ids.keys().collect::<Vec<_>>(), [&2]);
+    }
 }

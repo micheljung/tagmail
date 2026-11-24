@@ -2,6 +2,7 @@
 //! path (QRESYNC, CONDSTORE only, neither, NOMODSEQ, OBJECTID).
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use tagmail_api_core::{Arrival, EventSource};
 use tagmail_imap::{Flag, ImapSession};
@@ -808,6 +809,40 @@ async fn new_mail_listed_by_all_mail_before_the_inbox_still_arrives() {
     assert_eq!(got[0].subject.as_deref(), Some("Hi"));
     assert_eq!(sync_box(&t, &mut s, "INBOX").await, Progress::Done);
     assert_eq!(drain(&mut rx), [], "one arrival per message");
+}
+
+#[tokio::test]
+async fn the_next_transaction_sees_an_all_mail_candidate_at_once() {
+    let t = open();
+    let srv = server(QRESYNC);
+    seed(&srv);
+    sync_all(&t, &mut session(&srv)).await;
+    let archive = cache_row(&t, "Archive").await.id;
+    let inbox = cache_row(&t, "INBOX").await.id;
+    let new = crate::testutil::msg(
+        "n1",
+        "Hi",
+        "cat@x",
+        "me@x",
+        (now_secs() - 1_700_000_000) / DAY,
+    );
+    let (in_archive, in_inbox) = (vec![new.fetched(1000)], vec![new.fetched(1000)]);
+    let mut rx = t.feed.subscribe_arrivals();
+    let candidate = t
+        .ctx
+        .write(move |w| cache::add_messages(w, archive, &in_archive));
+    let listed = t
+        .ctx
+        .write(move |w| cache::add_messages(w, inbox, &in_inbox));
+    // Keeps this runtime busy while the writer thread runs both
+    // transactions back to back, before the first write's task resumes.
+    const WRITER_RUNS_BOTH: Duration = Duration::from_millis(300);
+    let stall = async { std::thread::sleep(WRITER_RUNS_BOTH) };
+    let (candidate, listed, ()) = tokio::join!(candidate, listed, stall);
+    candidate.unwrap();
+    listed.unwrap();
+    let got = drain(&mut rx);
+    assert_eq!(got.len(), 1, "{got:?}");
 }
 
 #[tokio::test]
