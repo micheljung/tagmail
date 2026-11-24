@@ -72,6 +72,13 @@ pub enum Upserted {
     TooMany,
 }
 
+#[derive(Debug)]
+pub enum Patched {
+    Done(PushSubscriptionDto),
+    NotFound,
+    UnknownAccounts(Vec<i64>),
+}
+
 fn account_ids_json(ids: Option<&[i64]>) -> Option<String> {
     ids.filter(|ids| !ids.is_empty())
         .map(|ids| serde_json::to_string(ids).expect("ids serialize"))
@@ -248,15 +255,27 @@ pub async fn upsert(
     .await
 }
 
-/// `None` when there is no such subscription.
+/// Checks the accounts in the same transaction as the write, so an account
+/// removed meanwhile can't end up in a filter.
 pub async fn patch(
     db: &ConfigDb,
     id: i64,
     current: TokenHash,
     preview: Option<bool>,
     account_ids: Option<Option<Vec<i64>>>,
-) -> Result<Option<PushSubscriptionDto>, StoreError> {
+) -> Result<Patched, StoreError> {
     db.write(move |tx| {
+        if let Some(Some(ids)) = &account_ids {
+            let known = known_accounts(tx, ids.clone())?;
+            let unknown: Vec<i64> = ids
+                .iter()
+                .filter(|id| !known.contains(id))
+                .copied()
+                .collect();
+            if !unknown.is_empty() {
+                return Ok(Patched::UnknownAccounts(unknown));
+            }
+        }
         let ids = account_ids
             .as_ref()
             .and_then(|ids| account_ids_json(ids.as_deref()));
@@ -267,9 +286,9 @@ pub async fn patch(
             params![id, preview, account_ids.is_some(), ids, session::now()],
         )?;
         if changed == 0 {
-            return Ok(None);
+            return Ok(Patched::NotFound);
         }
-        Ok(dto_by_id(tx, id, Some(&current))?)
+        Ok(dto_by_id(tx, id, Some(&current))?.map_or(Patched::NotFound, Patched::Done))
     })
     .await
 }
@@ -358,21 +377,6 @@ pub async fn exists(db: &ConfigDb, id: i64) -> Result<bool, StoreError> {
             )
             .optional()?
             .is_some())
-    })
-    .await
-}
-
-/// Accounts among `ids` that do not exist.
-pub async fn unknown_accounts(db: &ConfigDb, ids: Vec<i64>) -> Result<Vec<i64>, StoreError> {
-    db.read(move |conn| {
-        let mut stmt = conn.prepare("SELECT 1 FROM account WHERE id = ?1")?;
-        let mut unknown = Vec::new();
-        for id in ids {
-            if !stmt.exists([id])? {
-                unknown.push(id);
-            }
-        }
-        Ok(unknown)
     })
     .await
 }
@@ -474,6 +478,31 @@ mod tests {
         for secret in ["push.example", "171", "205"] {
             assert!(!debug.contains(secret), "{debug}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_patch_checks_the_accounts_in_its_own_transaction() {
+        let (_dir, db, id) = reused_row().await;
+        db.write(|tx| {
+            for account in [1, 2] {
+                tx.execute(
+                    "INSERT INTO account (id, name, imap_host, imap_port, imap_tls, smtp_host, \
+                     smtp_port, smtp_tls, username, secret_ct, secret_nonce) \
+                     VALUES (?1, 'a', 'i', 993, 'tls', 's', 465, 'tls', 'u', x'00', x'00')",
+                    [account],
+                )?;
+            }
+            tx.execute("DELETE FROM account WHERE id = 1", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let session: TokenHash = [1; 32];
+
+        let removed = patch(&db, id, session, None, Some(Some(vec![1, 2]))).await;
+        assert!(matches!(removed, Ok(Patched::UnknownAccounts(ids)) if ids == [1]));
+        let kept = patch(&db, id, session, None, Some(Some(vec![2]))).await;
+        assert!(matches!(kept, Ok(Patched::Done(dto)) if dto.account_ids == Some(vec![2])));
     }
 
     #[tokio::test]

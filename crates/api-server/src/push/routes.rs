@@ -13,13 +13,11 @@ use base64::engine::DecodePaddingMode;
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig};
 use p256::PublicKey;
 use tagmail_api_core::Response;
-use tagmail_api_core::push_dto::{
-    PushKeyDto, PushSubscribeDto, PushSubscriptionDto, PushSubscriptionPatchDto,
-};
+use tagmail_api_core::push_dto::{PushKeyDto, PushSubscribeDto, PushSubscriptionPatchDto};
 
 use super::Push;
 use super::ece::{AUTH_LEN, PUBLIC_KEY_LEN};
-use super::store::{self, NewSubscription, Upserted};
+use super::store::{self, NewSubscription, Patched, Upserted};
 use crate::auth::{Principal, error, internal, invalid, no_content, parse};
 use crate::http::{AppState, rate_limited, to_http};
 use crate::session::TokenHash;
@@ -77,18 +75,6 @@ fn account_id_set(ids: &[i64]) -> Result<Vec<i64>, Box<HttpResponse>> {
     ids.sort_unstable();
     ids.dedup();
     Ok(ids)
-}
-
-async fn known_account_ids(push: &Push, ids: &[i64]) -> Result<Vec<i64>, Box<HttpResponse>> {
-    let ids = account_id_set(ids)?;
-    match store::unknown_accounts(&push.db, ids.clone()).await {
-        Ok(unknown) if unknown.is_empty() => Ok(ids),
-        Ok(unknown) => Err(Box::new(invalid(
-            ACCOUNT_IDS,
-            format!("unknown accounts {unknown:?}"),
-        ))),
-        Err(e) => Err(Box::new(internal(e))),
-    }
 }
 
 fn validate(
@@ -227,17 +213,18 @@ pub async fn patch(
         Err(resp) => return *resp,
     };
     let account_ids = match dto.account_ids {
-        Some(Some(ids)) => match known_account_ids(&state.push, &ids).await {
+        Some(Some(ids)) => match account_id_set(&ids) {
             Ok(ids) => Some(Some(ids)),
             Err(resp) => return *resp,
         },
         other => other,
     };
-    let patched: Result<Option<PushSubscriptionDto>, _> =
-        store::patch(&state.push.db, id, session, dto.preview, account_ids).await;
-    match patched {
-        Ok(Some(dto)) => json(200, &dto),
-        Ok(None) => not_found(),
+    match store::patch(&state.push.db, id, session, dto.preview, account_ids).await {
+        Ok(Patched::Done(dto)) => json(200, &dto),
+        Ok(Patched::NotFound) => not_found(),
+        Ok(Patched::UnknownAccounts(unknown)) => {
+            invalid(ACCOUNT_IDS, format!("unknown accounts {unknown:?}"))
+        }
         Err(e) => internal(e),
     }
 }
