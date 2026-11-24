@@ -81,9 +81,10 @@ jobs:
       - name: No test hooks in the release binary
         shell: bash
         run: |
-          bin=$(ls target/${{ matrix.target }}/release/tagmail-desktop{,.exe} 2>/dev/null | head -1)
-          test -n "$bin"
-          for hook in TAGMAIL_DESKTOP_PAIR /__probe/ DESKTOP_SELFTEST; do
+          bin=target/${{ matrix.target }}/release/tagmail-desktop
+          [ -f "$bin" ] || bin="$bin.exe"
+          test -f "$bin"
+          for hook in TAGMAIL_DESKTOP_PAIR /__probe/ /__selftest/ DESKTOP_SELFTEST; do
             if grep -aq "$hook" "$bin"; then
               echo "::error::$bin contains the test hook $hook"
               exit 1
