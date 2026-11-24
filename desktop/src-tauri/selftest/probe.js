@@ -10,7 +10,7 @@ function field(win, label) {
 setInterval(() => {
   for (const win of document.querySelectorAll('section.window')) {
     const body = win.querySelector('[role="textbox"][aria-label="Message body"]');
-    if (reported.has(win) || !body) continue;
+    if (reported.has(win) || !body?.isContentEditable) continue;
     reported.add(win);
     const report = {
       to: field(win, 'To'),
