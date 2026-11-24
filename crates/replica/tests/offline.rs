@@ -126,6 +126,7 @@ async fn the_desktop_works_offline_and_sends_once_when_back() {
         ("gem", vec![2]),
         ("news", vec![]),
         ("ancient", vec![]),
+        ("other", vec![3]),
     ] {
         let resp = get(&router, &search_path(q)).await;
         assert_eq!(ids(&resp), hits, "offline search {q}");
