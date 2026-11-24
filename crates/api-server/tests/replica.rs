@@ -420,6 +420,95 @@ async fn writes_during_a_snapshot_come_through_changes() {
 }
 
 #[tokio::test]
+async fn snapshot_config_is_at_least_as_new_as_its_cursor() {
+    let (_dirs, server, owner) = start().await;
+    let desktop = device(&server, &owner, "Laptop").await;
+    let (stop, stopped) = tokio::sync::watch::channel(false);
+    let store = server.store().clone();
+    let writer = tokio::spawn(async move {
+        let mut n = 0;
+        while !*stopped.borrow() {
+            n += 1;
+            store
+                .config()
+                .write(move |tx| {
+                    tx.execute(
+                        "UPDATE account SET name = ?1 WHERE id = 1",
+                        [format!("v{n}")],
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            store
+                .cache()
+                .write(move |tx| {
+                    changes::append(
+                        tx,
+                        &NewChange {
+                            entity: Entity::Account,
+                            entity_id: 1,
+                            op: ChangeOp::Upsert,
+                            payload: Some(json!({ "n": n }).to_string()),
+                        },
+                    )
+                })
+                .await
+                .unwrap();
+        }
+    });
+
+    let mut snapshots = Vec::new();
+    for _ in 0..100 {
+        let body = desktop
+            .get(url(&server, "/api/replica/snapshot"))
+            .send()
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let records = parse(&body);
+        let ReplicaRecord::Header(header) = &records[0] else {
+            panic!("no header first");
+        };
+        let name = records
+            .iter()
+            .find_map(|r| match r {
+                ReplicaRecord::Account(a) => Some(a.name.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let version: i64 = name.trim_start_matches('v').parse().unwrap_or(0);
+        snapshots.push((header.cursor.clone(), version));
+    }
+    stop.send(true).unwrap();
+    writer.await.unwrap();
+
+    for (cursor, version) in snapshots {
+        let changes: Value = desktop
+            .get(url(
+                &server,
+                &format!("/api/changes?since={cursor}&limit=1"),
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        if let Some(next) = changes["changes"][0]["payload"]["n"].as_i64() {
+            assert!(
+                version >= next - 1,
+                "config v{version} misses change {} at or before {cursor}",
+                next - 1
+            );
+        }
+    }
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn snapshots_are_limited_per_device_and_overall() {
     let (_dirs, server, owner) = start().await;
     fill(&server, 20_000).await;

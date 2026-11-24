@@ -32,7 +32,7 @@ use tagmail_api_core::{API_VERSION, ProxyError, Response, Store};
 use tagmail_core::Flags;
 use tagmail_store::rusqlite::{self, Connection, OpenFlags, OptionalExtension, ToSql};
 use tagmail_store::{BlobKey, BlobStore, CONFIG_SCHEMA, changes};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 
 use crate::auth::{Principal, error, invalid};
 use crate::http::{AppState, to_http};
@@ -150,19 +150,18 @@ pub async fn snapshot(
         return to_http(resp);
     };
     let store = state.api.store();
-    let config = match config_records(store, None).await {
-        Ok(records) => records,
-        Err(e) => {
-            tracing::error!(error = %e, "reading config for a snapshot");
-            return error(500, "internal", "internal error");
-        }
-    };
     let blobs = store.blobs().clone();
     let path = state.replica.cache_path.clone();
-    ndjson(slot, path, move |conn, sink| {
+    let (cursor_fixed, cursor_rx) = oneshot::channel();
+    let (config_tx, config_rx) = oneshot::channel::<Vec<ReplicaRecord>>();
+    let response = ndjson(slot, path, move |conn, sink| {
         let tx = conn.unchecked_transaction()?;
         let epoch = changes::read_epoch(&tx)?;
         let cursor = changes::head(&tx, epoch)?;
+        let _ = cursor_fixed.send(());
+        let config = config_rx
+            .blocking_recv()
+            .context("snapshot config not read")?;
         let cache_schema: i64 = tx.pragma_query_value(None, "user_version", |r| r.get(0))?;
         sink.record(&ReplicaRecord::Header(SnapshotHeader {
             format: SNAPSHOT_FORMAT,
@@ -184,7 +183,20 @@ pub async fn snapshot(
         texts(&tx, &blobs, &Scope::All, window_start, sink)?;
         tx.finish()?;
         Ok(())
-    })
+    });
+    if cursor_rx.await.is_err() {
+        return error(500, "internal", "internal error");
+    }
+    match config_records(store, None).await {
+        Ok(records) => {
+            let _ = config_tx.send(records);
+            response
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "reading config for a snapshot");
+            error(500, "internal", "internal error")
+        }
+    }
 }
 
 /// `POST /api/replica/rows`.
