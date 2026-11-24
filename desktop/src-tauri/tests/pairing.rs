@@ -65,12 +65,15 @@ fn json_of(resp: &HttpResponse) -> Value {
     serde_json::from_slice(resp.body()).unwrap()
 }
 
-async fn open(env: &Env, emitted: &Recorder) -> Shell<Desktop> {
+async fn open(env: &Env, emitted: &Recorder) -> (Arc<Desktop>, Shell<Desktop>) {
     let desktop = Desktop::open(env.desktop.path(), false, Arc::new(emitted.clone()))
         .await
         .unwrap();
     let (control, _) = EventControl::new();
-    Shell::new(desktop, Box::new(NoAssets), control)
+    (
+        Arc::clone(&desktop),
+        Shell::new(desktop, Box::new(NoAssets), control),
+    )
 }
 
 async fn inbox(shell: &Shell<Desktop>) -> Option<Vec<i64>> {
@@ -83,7 +86,8 @@ async fn pairs_syncs_resumes_and_unpairs() {
     let env = Env::new();
     let owner = env.start().await;
     let emitted = Recorder::default();
-    let shell = open(&env, &emitted).await;
+    let (desktop, shell) = open(&env, &emitted).await;
+    assert_eq!(desktop.unread_inbox().await, None);
 
     let before = call(&shell, Method::GET, "/api/views/inbox/index", Value::Null).await;
     assert_eq!(json_of(&before)["error"], "unpaired");
@@ -138,6 +142,7 @@ async fn pairs_syncs_resumes_and_unpairs() {
             .is_some_and(|ids| ids.first() == Some(&50))
     })
     .await;
+    assert_eq!(desktop.unread_inbox().await, Some(1));
 
     let op = call(
         &shell,
@@ -169,8 +174,8 @@ async fn pairs_syncs_resumes_and_unpairs() {
     assert!(draft.status().is_success(), "{:?}", json_of(&draft));
     assert_eq!(json_of(&draft)["attachments"][0]["name"], "notes.txt");
 
-    drop(shell);
-    let resumed = open(&env, &emitted).await;
+    drop((desktop, shell));
+    let (_, resumed) = open(&env, &emitted).await;
     eventually("the resumed replica", SYNC, || async {
         inbox(&resumed)
             .await

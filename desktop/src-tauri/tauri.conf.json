@@ -29,5 +29,15 @@
     "category": "Productivity",
     "shortDescription": "Gmail-like client for your own IMAP mail",
     "license": "AGPL-3.0-only"
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "mailto",
+          "tagmail"
+        ]
+      }
+    }
   }
 }

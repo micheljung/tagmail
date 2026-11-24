@@ -9,8 +9,12 @@ use serde_json::Value;
 use tagmail_desktop::backend::Backend;
 use tagmail_desktop::desktop::Desktop;
 use tagmail_desktop::events::{self, Emit, EventControl};
+use tagmail_desktop::mailto::LinkQueue;
 use tagmail_desktop::protocol::{Asset, Assets, HttpResponse, Shell};
+use tauri::webview::PageLoadEvent;
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, Wry};
+
+mod native;
 
 #[cfg(windows)]
 const ORIGIN: &str = "http://app.localhost/";
@@ -93,6 +97,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 shell: Box::new(shell),
                 selftest: Some(test),
             },
+            None,
         );
     }
     // Test builds keep the token in a file so CI needs no keychain.
@@ -101,7 +106,14 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let desktop = tauri::async_runtime::block_on(Desktop::open(&dir, keychain, emit))?;
     #[cfg(feature = "test-hooks")]
     selftest::auto_pair(&desktop);
-    let shell = shell(app, desktop);
+    let links = Arc::new(LinkQueue::new(Box::new(AppEmit(handle.clone()))));
+    let shell = shell(app, Arc::clone(&desktop)).with_links(Arc::clone(&links));
+    #[cfg(feature = "test-hooks")]
+    let shell = if std::env::var_os("TAGMAIL_DESKTOP_PROBE").is_some() {
+        shell.with_index_head(tagmail_desktop::selftest::PROBE_HEAD.to_owned())
+    } else {
+        shell
+    };
     open(
         app,
         AppState {
@@ -109,15 +121,36 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             #[cfg(feature = "test-hooks")]
             selftest: None,
         },
-    )
+        Some(Arc::clone(&links)),
+    )?;
+    if let Some(window) = app.get_webview_window(native::WINDOW) {
+        let desktop = Arc::clone(&desktop);
+        let main = window.as_ref().window();
+        window.on_window_event(move |event| native::on_window_event(&main, event, &desktop));
+    }
+    native::install(app, desktop, links)?;
+    Ok(())
 }
 
-fn open(app: &mut tauri::App, state: AppState) -> Result<(), Box<dyn std::error::Error>> {
+fn open(
+    app: &mut tauri::App,
+    state: AppState,
+    links: Option<Arc<LinkQueue>>,
+) -> Result<(), Box<dyn std::error::Error>> {
     app.manage(Arc::new(state));
-    WebviewWindowBuilder::new(app, "main", WebviewUrl::CustomProtocol(ORIGIN.parse()?))
-        .title("Tagmail")
-        .inner_size(1200.0, 800.0)
-        .build()?;
+    WebviewWindowBuilder::new(
+        app,
+        native::WINDOW,
+        WebviewUrl::CustomProtocol(ORIGIN.parse()?),
+    )
+    .title("Tagmail")
+    .inner_size(1200.0, 800.0)
+    .on_page_load(move |_, payload| {
+        if let (Some(links), PageLoadEvent::Started) = (&links, payload.event()) {
+            links.unready();
+        }
+    })
+    .build()?;
     Ok(())
 }
 
@@ -196,10 +229,15 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
-    tauri::Builder::default()
+    native::plugins(tauri::Builder::default())
         .register_asynchronous_uri_scheme_protocol("app", |ctx, req, responder| {
             let state = ctx.app_handle().state::<Arc<AppState>>().inner().clone();
             tauri::async_runtime::spawn(async move {
+                #[cfg(feature = "test-hooks")]
+                if let Some(resp) = tagmail_desktop::selftest::probe(&req) {
+                    responder.respond(resp);
+                    return;
+                }
                 #[cfg(feature = "test-hooks")]
                 if let Some(test) = &state.selftest
                     && let Some(resp) = test.handle(&req).await

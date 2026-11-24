@@ -17,6 +17,8 @@ use crate::protocol::HttpResponse;
 use crate::state::Local;
 
 pub const PREFIX: &str = "/__selftest/";
+const PROBE_PREFIX: &str = "/__probe/";
+pub const PROBE_HEAD: &str = r#"<script type="module" src="/__probe/probe.js"></script>"#;
 pub const INDEX_HEAD: &str = r#"<script type="module" src="/__selftest/selftest.js"></script>"#;
 pub const THREADS: i64 = 60;
 pub const RENDER_MESSAGE: i64 = 1;
@@ -83,6 +85,20 @@ impl SelfTest {
         };
         Some(resp)
     }
+}
+
+/// The compose probe (`TAGMAIL_DESKTOP_PROBE=1`): prints each compose
+/// window's fields as a `DESKTOP_PROBE {json}` line. `None` outside its paths.
+pub fn probe(req: &http::Request<Vec<u8>>) -> Option<HttpResponse> {
+    let rest = req.uri().path().strip_prefix(PROBE_PREFIX)?;
+    Some(match (req.method(), rest) {
+        (&Method::GET, "probe.js") => file("text/javascript", include_str!("../selftest/probe.js")),
+        (&Method::POST, "report") => {
+            println!("DESKTOP_PROBE {}", String::from_utf8_lossy(req.body()));
+            json_response(&json!({}))
+        }
+        _ => status(StatusCode::NOT_FOUND, "no such probe route"),
+    })
 }
 
 fn file(content_type: &str, body: &str) -> HttpResponse {

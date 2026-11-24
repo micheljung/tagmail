@@ -44,7 +44,8 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev xvfb
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            libayatana-appindicator3-dev xvfb dbus xdg-utils
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.100"
@@ -63,8 +64,15 @@ jobs:
       - run: cargo test --locked -p tagmail-desktop --features test-hooks
       - run: cargo build --locked -p tagmail-desktop --features app,test-hooks
       # Exits 0 only when every in-webview check in selftest/selftest.js passed.
-      - run: TAGMAIL_DESKTOP_DATA_DIR="$RUNNER_TEMP/desktop" xvfb-run -a target/debug/tagmail-desktop
+      # Single-instance and notifications need a session bus.
+      - run: TAGMAIL_DESKTOP_DATA_DIR="$RUNNER_TEMP/desktop" dbus-run-session -- xvfb-run -a target/debug/tagmail-desktop
         timeout-minutes: 5
+      # AC 17 (D-Bus notification, tray count) and AC 18 (xdg-open mailto:).
+      - run: >-
+          dbus-run-session -- xvfb-run -a
+          cargo test --locked -p tagmail-desktop --features app,test-hooks
+          --test notify --test mailto -- --test-threads=1
+        timeout-minutes: 10
 
   # Build everywhere; the in-webview self-test is informational until
   # WKWebView and WebView2 have been checked by hand (release checklist).

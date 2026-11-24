@@ -21,7 +21,15 @@ required-features = ["app"]
 [features]
 # The Tauri shell needs WebKitGTK dev libs on Linux; the lib does not, so the
 # main CI job builds and tests it without them.
-app = ["dep:tauri", "dep:tauri-build", "dep:tracing-subscriber"]
+app = [
+    "dep:tauri",
+    "dep:tauri-build",
+    "dep:tauri-plugin-autostart",
+    "dep:tauri-plugin-deep-link",
+    "dep:tauri-plugin-notification",
+    "dep:tauri-plugin-single-instance",
+    "dep:tracing-subscriber",
+]
 # Self-test page, fixture data and env overrides; never in release builds.
 test-hooks = []
 
@@ -29,6 +37,7 @@ test-hooks = []
 form_urlencoded.workspace = true
 http = "1"
 keyring = { version = "4", default-features = false, features = ["v1"] }
+percent-encoding.workspace = true
 reqwest = { workspace = true, features = ["rustls-no-provider", "json"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -36,12 +45,24 @@ tagmail-api-core = { workspace = true, features = ["sqlite"] }
 tagmail-core.workspace = true
 tagmail-replica = { path = "../../crates/replica" }
 tagmail-store.workspace = true
-tauri = { version = "2.12", optional = true }
+tauri = { version = "2.12", optional = true, features = ["image-png", "tray-icon"] }
+tauri-plugin-autostart = { version = "2.7", optional = true }
+tauri-plugin-deep-link = { version = "2.6", optional = true }
+tauri-plugin-notification = { version = "2.8", optional = true }
+tauri-plugin-single-instance = { version = "2.5", optional = true, features = ["deep-link"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 tracing.workspace = true
 tracing-subscriber = { workspace = true, optional = true }
 url.workspace = true
 zeroize.workspace = true
+
+[[test]]
+name = "notify"
+required-features = ["app", "test-hooks"]
+
+[[test]]
+name = "mailto"
+required-features = ["app", "test-hooks"]
 
 [build-dependencies]
 tauri-build = { version = "2.7", optional = true }

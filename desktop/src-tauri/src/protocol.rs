@@ -13,6 +13,7 @@ use tagmail_core::ChangeCursor;
 
 use crate::backend::Backend;
 use crate::events::EventControl;
+use crate::mailto::LinkQueue;
 
 pub const INDEX: &str = "index.html";
 
@@ -64,6 +65,7 @@ pub struct Shell<B> {
     assets: Box<dyn Assets>,
     events: EventControl,
     index_suffix: Option<String>,
+    links: Option<Arc<LinkQueue>>,
 }
 
 impl<B: Backend> Shell<B> {
@@ -73,7 +75,14 @@ impl<B: Backend> Shell<B> {
             assets,
             events,
             index_suffix: None,
+            links: None,
         }
+    }
+
+    /// Links (mailto, pair) delivered once the SPA asked for the status.
+    pub fn with_links(mut self, links: Arc<LinkQueue>) -> Shell<B> {
+        self.links = Some(links);
+        self
     }
 
     /// Appended to the `<head>` of HTML assets (the SPA has only
@@ -167,7 +176,13 @@ impl<B: Backend> Shell<B> {
                     }
                 }
             }
-            (&Method::GET, "status") => api::Response::json(200, &backend.status()),
+            (&Method::GET, "status") => {
+                let status = api::Response::json(200, &backend.status());
+                if let Some(links) = &self.links {
+                    links.ready();
+                }
+                status
+            }
             (&Method::POST, "pair") => match parse::<DesktopPairDto>(body) {
                 Ok(dto) => match backend.pair(dto.server, dto.code).await {
                     Ok(status) => api::Response::json(200, &status),

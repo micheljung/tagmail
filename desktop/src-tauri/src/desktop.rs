@@ -51,7 +51,14 @@ pub struct Desktop {
     running: Mutex<Option<Running>>,
     events: broadcast::Sender<ReplicaEvent>,
     last_sync: AtomicI64,
+    changed: watch::Sender<u64>,
+    settings_tx: watch::Sender<DesktopSettingsDto>,
 }
+
+const UNREAD_INBOX: &str = "SELECT count(DISTINCT t.id) FROM thread t \
+     JOIN thread_mailbox tm ON tm.thread_id = t.id \
+     JOIN mailbox mb ON mb.id = tm.mailbox_id \
+     WHERE mb.name = 'INBOX' COLLATE NOCASE AND t.unread_count > 0 AND t.merged_into IS NULL";
 
 fn json(value: &impl serde::Serialize) -> Value {
     serde_json::to_value(value).expect("DTOs serialize infallibly")
@@ -120,7 +127,9 @@ impl Desktop {
             durable,
             tokens: TokenStore::new(data_dir.join(TOKEN_FILE), keychain),
             emit,
+            settings_tx: watch::Sender::new(settings.clone()),
             settings: Mutex::new(settings),
+            changed: watch::Sender::new(0),
             running: Mutex::new(None),
             events: broadcast::channel(EVENT_BUFFER).0,
             last_sync: AtomicI64::new(0),
@@ -139,6 +148,31 @@ impl Desktop {
     /// New mail, write and replace events of whichever replica runs.
     pub fn subscribe(&self) -> broadcast::Receiver<ReplicaEvent> {
         self.events.subscribe()
+    }
+
+    /// Bumped whenever local mail may have changed (pulls, local writes,
+    /// a new replica), e.g. to recount the tray's unread number.
+    pub fn changes(&self) -> watch::Receiver<u64> {
+        self.changed.subscribe()
+    }
+
+    pub fn settings_changes(&self) -> watch::Receiver<DesktopSettingsDto> {
+        self.settings_tx.subscribe()
+    }
+
+    /// Unread INBOX conversations of the local replica.
+    pub async fn unread_inbox(&self) -> Option<i64> {
+        let store = self.replica()?.store()?;
+        store
+            .cache()
+            .read(|c| Ok(c.query_row(UNREAD_INBOX, [], |r| r.get(0))?))
+            .await
+            .map_err(|e| tracing::warn!(error = %e, "counting unread mail failed"))
+            .ok()
+    }
+
+    fn bump(&self) {
+        self.changed.send_modify(|n| *n = n.wrapping_add(1));
     }
 
     pub fn replica(&self) -> Option<Arc<Replica>> {
@@ -192,6 +226,7 @@ impl Desktop {
         if let Some(old) = self.lock_running().take() {
             let _ = old.stop.send(true);
         }
+        self.bump();
     }
 
     fn synced(&self) {
@@ -200,7 +235,10 @@ impl Desktop {
     }
 
     fn publish_status(&self) {
-        self.emit.emit(STATUS, json(&self.status()));
+        let status = json(&self.status());
+        #[cfg(feature = "test-hooks")]
+        println!("DESKTOP_STATUS {status}");
+        self.emit.emit(STATUS, status);
     }
 
     async fn exchange(server: &Url, code: &str) -> Result<DeviceTokenDto, api::Response> {
@@ -260,6 +298,7 @@ async fn watch_replica(
                 head.borrow_and_update();
                 let Some(desktop) = desktop.upgrade() else { return };
                 desktop.synced();
+                desktop.bump();
             }
             event = events.recv() => {
                 let Some(desktop) = desktop.upgrade() else { return };
@@ -268,6 +307,7 @@ async fn watch_replica(
                         if matches!(event, ReplicaEvent::Replaced) {
                             desktop.emit.emit(RESET, json(&api::gone_error()));
                             desktop.publish_status();
+                            desktop.bump();
                         }
                         let _ = desktop.events.send(event);
                     }
@@ -417,6 +457,7 @@ impl Backend for Desktop {
             replica.set_settings(settings::replica_settings(&next));
         }
         *current = next.clone();
+        self.settings_tx.send_replace(next.clone());
         Ok(next)
     }
 }
