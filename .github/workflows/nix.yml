@@ -1,0 +1,60 @@
+name: Nix
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - flake.nix
+      - flake.lock
+      - deploy/nix/**
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .cargo/**
+      - crates/**
+      - xtask/**
+      - desktop/src-tauri/Cargo.toml
+      - package.json
+      - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - packages/**
+      - web/**
+      - .github/workflows/nix.yml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  nix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: system-features = nixos-test benchmark big-parallel kvm
+      - uses: nix-community/cache-nix-action@v6
+        with:
+          primary-key: nix-${{ runner.os }}-${{ hashFiles('flake.lock', 'Cargo.lock', 'pnpm-lock.yaml') }}
+          restore-prefixes-first-match: nix-${{ runner.os }}-
+          gc-max-store-size-linux: 8G
+      - name: pnpm dependency hash
+        run: |
+          nix build .#tagmail-web.pnpmDeps -L || {
+            echo "::error file=deploy/nix/package.nix::pnpm-lock.yaml changed: replace the pnpmDeps hash with the 'got:' hash above (deploy/nix/README.md, Updating hashes)"
+            exit 1
+          }
+      - run: nix build .#tagmail-server -L
+      - run: ./result/bin/tagmail-server --version
+      - run: nix flake check -L
