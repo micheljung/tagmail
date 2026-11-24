@@ -55,6 +55,14 @@ from its gateway `172.30.78.1` only. If that subnet clashes with one of
 yours, change both. A proxy in another container on the same Compose
 network can reach `tagmail:7878` directly instead; trust its address then.
 
+The example runs the container with a read-only root file system (the
+server writes only to `/data` and temporary files to `/tmp`), without
+capabilities and without privilege escalation.
+
+The example uses `:latest` for brevity; pin a version such as
+`ghcr.io/micheljung/tagmail:0.1.0` so that an upgrade happens only when you
+change it (see [Upgrade](#upgrade)).
+
 Compose prefixes the volume with the project name, which defaults to the
 directory name: in `~/tagmail` the data lives in the volume
 `tagmail_tagmail-data` (`docker volume ls`).
@@ -68,6 +76,7 @@ a fixed subnet and trust its gateway:
 docker network create --subnet 172.30.78.0/24 --gateway 172.30.78.1 tagmail
 docker volume create tagmail-data
 docker run -d --name tagmail --network tagmail -p 127.0.0.1:7878:7878 \
+  --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
   -v tagmail-data:/data \
   -v "$PWD/master.key:/run/secrets/tagmail_master_key:ro" \
   ghcr.io/micheljung/tagmail:latest \
@@ -75,6 +84,8 @@ docker run -d --name tagmail --network tagmail -p 127.0.0.1:7878:7878 \
 ```
 
 ## Upgrade
+
+Change the version in `compose.yml`'s `image:`, then:
 
 ```sh
 docker compose pull
