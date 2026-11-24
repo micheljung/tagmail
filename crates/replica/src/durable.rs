@@ -15,7 +15,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/durable/V3__intent_sent_at.sql"),
 ];
 
-const BOUND_SERVER_KEY: &str = "bound_server";
+pub const BOUND_SERVER_KEY: &str = "bound_server";
 pub const FROM_OTHER_SERVER: &str = "From another server";
 
 pub const DURABLE_SCHEMA: i64 = MIGRATIONS.len() as i64;
@@ -72,6 +72,11 @@ impl Durable {
             .conn()
             .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
             .optional()?)
+    }
+
+    /// The identity of the server the rows are bound to.
+    pub fn bound_server(&self) -> Result<Option<String>> {
+        self.meta(BOUND_SERVER_KEY)
     }
 
     /// Binds the durable rows to `server`. On a change of server, every
@@ -202,6 +207,10 @@ mod tests {
         let a = Url::parse("https://a.example/").unwrap();
         let b = Url::parse("https://b.example/").unwrap();
         assert_eq!(durable.bind_server(&a).unwrap(), Binding::Bound);
+        assert_eq!(
+            durable.bound_server().unwrap().as_deref(),
+            Some("https://a.example")
+        );
         durable
             .conn()
             .execute(
