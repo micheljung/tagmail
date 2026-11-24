@@ -4,6 +4,8 @@ const PORT = Number(process.env.E2E_PORT ?? 4180);
 const MOBILE_ONLY = '**/mobile.spec.ts';
 /** CDP-only checks (installability, push delivery). */
 const CHROMIUM_ONLY = '**/pwa.spec.ts';
+/** Regenerates docs/images (`pnpm run screenshots`); never part of a normal run. */
+const SCREENSHOTS = process.env.TAGMAIL_SCREENSHOTS === '1';
 const noSandbox = process.env.PW_NO_SANDBOX === '1' ? ['--no-sandbox'] : [];
 
 export default defineConfig({
@@ -35,7 +37,16 @@ export default defineConfig({
 			testMatch: MOBILE_ONLY,
 			use: { ...devices['Pixel 7'], launchOptions: { args: noSandbox } }
 		},
-		{ name: 'mobile-webkit', testMatch: MOBILE_ONLY, use: { ...devices['iPhone 13'] } }
+		{ name: 'mobile-webkit', testMatch: MOBILE_ONLY, use: { ...devices['iPhone 13'] } },
+		...(SCREENSHOTS
+			? [
+					{
+						name: 'docs-screenshots',
+						testMatch: '**/docs-screenshots.ts',
+						use: { ...devices['Desktop Chrome'], launchOptions: { args: noSandbox } }
+					}
+				]
+			: [])
 	],
 	webServer: {
 		command: 'node e2e/mock/server.ts',
