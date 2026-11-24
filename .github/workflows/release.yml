@@ -122,7 +122,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # The bundles need the build host's glibc or newer at runtime.
+          - os: ubuntu-22.04
             bundles: appimage,deb,rpm
             target: x86_64-unknown-linux-gnu
           - os: windows-latest

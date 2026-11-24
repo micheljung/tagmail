@@ -182,7 +182,7 @@ it against `SHA256SUMS` as [above](#release-archive):
 The installers are **not signed**, so the system warns before the first
 start.
 
-**Linux**
+**Linux** (glibc 2.35 or newer, e.g. Ubuntu 22.04, Debian 12, Fedora 36)
 
 - AppImage: `chmod +x Tagmail_*.AppImage`, then run it.
 - Debian, Ubuntu: `sudo apt install ./Tagmail_*.deb`
