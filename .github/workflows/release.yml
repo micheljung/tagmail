@@ -1,7 +1,7 @@
 name: Release
 
-# Pull requests and manual runs build every asset and publish nothing. A
-# v* tag publishes the GitHub Release and the image; tags containing '-'
+# Pull requests and manual runs (also on a tag) build every asset and
+# publish nothing. A pushed v* tag publishes the GitHub Release and the image; tags containing '-'
 # are prereleases and leave :latest alone. No Flatpak until after 1.0
 # (owner decision).
 on:
@@ -44,12 +44,14 @@ jobs:
       - uses: actions/checkout@v7
       - name: Versions agree
         id: check
+        env:
+          PUBLISH: ${{ github.event_name == 'push' && github.ref_type == 'tag' }}
         run: |
           cargo=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
           tauri=$(jq -r .version desktop/src-tauri/tauri.conf.json)
           web=$(jq -r .version web/package.json)
           echo "Cargo $cargo, tauri.conf.json $tauri, web $web"
-          if [ "$GITHUB_REF_TYPE" = tag ]; then
+          if [ "$PUBLISH" = true ]; then
             version=${GITHUB_REF_NAME#v}
           else
             version=$cargo
@@ -203,7 +205,7 @@ jobs:
           if-no-files-found: error
 
   image-check:
-    if: github.ref_type != 'tag'
+    if: github.event_name != 'push' || github.ref_type != 'tag'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -246,7 +248,7 @@ jobs:
           if-no-files-found: error
 
   image:
-    if: github.ref_type == 'tag'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [version, checksums]
     runs-on: ubuntu-latest
     permissions:
@@ -292,7 +294,7 @@ jobs:
             type=gha,scope=docker-arm64
 
   release:
-    if: github.ref_type == 'tag'
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [version, checksums, image]
     runs-on: ubuntu-latest
     permissions:
