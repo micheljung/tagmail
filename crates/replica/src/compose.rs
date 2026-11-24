@@ -736,7 +736,10 @@ impl Replica {
             return Err(ComposeError::Conflict("the message was sent".into()));
         }
         let reached_server = o.attempts > 0 || o.state == OutboxState::Submitted;
-        if reached_server {
+        let other_server = o.error.as_deref() == Some(FROM_OTHER_SERVER)
+            || draft_by_client_id(&self.durable().conn(), &o.client_id)?
+                .is_some_and(|d| d.other_server);
+        if reached_server && !other_server {
             self.cancel_on_server(&o.op_id).await?;
         }
         self.durable()

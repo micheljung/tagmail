@@ -156,7 +156,11 @@ impl Replica {
     }
 
     async fn delete_server_draft(&self, d: &Draft) -> Result<()> {
-        if let Some(sid) = d.server_draft_id {
+        let current = compose::draft_by_client_id(&self.durable().conn(), &d.client_id)?;
+        if let Some(sid) = current
+            .filter(|d| !d.other_server)
+            .and_then(|d| d.server_draft_id)
+        {
             let builder = self
                 .client()
                 .request(Method::DELETE, &format!("api/drafts/{sid}"))?
@@ -303,7 +307,7 @@ impl Replica {
         self.durable().conn().execute(
             "UPDATE draft SET server_draft_id = coalesce(?2, server_draft_id),
                      synced_version = ?3, sync_error = ?4
-                 WHERE id = ?1",
+                 WHERE id = ?1 AND other_server = 0",
             params![d.id, server_id, d.version, error],
         )?;
         Ok(())
@@ -316,10 +320,14 @@ impl Replica {
         error: Option<&str>,
         next_at: Option<i64>,
     ) -> Result<()> {
-        self.durable().conn().execute(
-            "UPDATE outbox SET state = ?2, error = ?3, next_at = ?4 WHERE id = ?1",
-            params![o.id, state.as_str(), error, next_at],
+        let changed = self.durable().conn().execute(
+            "UPDATE outbox SET state = ?2, error = ?3, next_at = ?4
+             WHERE id = ?1 AND NOT (state = 'failed' AND error IS ?5)",
+            params![o.id, state.as_str(), error, next_at, FROM_OTHER_SERVER],
         )?;
+        if changed == 0 {
+            return Ok(());
+        }
         self.publish_outbox(o.id, Some((state, error.map(str::to_owned))))
             .await;
         Ok(())
@@ -327,6 +335,9 @@ impl Replica {
 
     /// A sent message leaves no draft behind, as on the server.
     async fn finish(&self, o: &OutboxRow) -> Result<()> {
+        if self.quarantined(o)? {
+            return Ok(());
+        }
         let files = {
             let mut conn = self.durable().conn();
             let tx = conn.transaction()?;
@@ -383,7 +394,7 @@ impl Replica {
                 .await;
         };
         let _sending = self.send_lock().lock().await;
-        if compose::outbox_by_id(&self.durable().conn(), o.id)?.is_none() {
+        if self.send_target(o)? != Some(draft_id) {
             return Ok(());
         }
         let body = json!({ "opId": o.op_id, "draftId": draft_id });
@@ -410,6 +421,28 @@ impl Replica {
                 }
             },
         }
+    }
+
+    /// The server draft `o` sends, unless the item is gone or belongs to
+    /// another server.
+    fn send_target(&self, o: &OutboxRow) -> Result<Option<i64>> {
+        if self.quarantined(o)? {
+            return Ok(None);
+        }
+        Ok(
+            compose::draft_by_client_id(&self.durable().conn(), &o.client_id)?
+                .and_then(|d| d.server_draft_id),
+        )
+    }
+
+    /// Gone, or left behind by pairing with another server.
+    fn quarantined(&self, o: &OutboxRow) -> Result<bool> {
+        let conn = self.durable().conn();
+        let live = compose::outbox_by_id(&conn, o.id)?.is_some_and(|o| {
+            !(o.state == OutboxState::Failed && o.error.as_deref() == Some(FROM_OTHER_SERVER))
+        });
+        Ok(!live
+            || compose::draft_by_client_id(&conn, &o.client_id)?.is_none_or(|d| d.other_server))
     }
 
     async fn apply_status(
@@ -445,16 +478,10 @@ impl Replica {
                         .await?
                 }
                 None => {
-                    let Some(draft_id) =
-                        compose::draft_by_client_id(&self.durable().conn(), &o.client_id)?
-                            .and_then(|d| d.server_draft_id)
-                    else {
+                    let _sending = self.send_lock().lock().await;
+                    let Some(draft_id) = self.send_target(&o)? else {
                         continue;
                     };
-                    let _sending = self.send_lock().lock().await;
-                    if compose::outbox_by_id(&self.durable().conn(), o.id)?.is_none() {
-                        continue;
-                    }
                     let body = json!({ "opId": o.op_id, "draftId": draft_id });
                     match self
                         .client()
