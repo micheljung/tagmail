@@ -178,7 +178,7 @@ After the gate, still with the same server, it pairs a device and streams
 `/api/replica/snapshot` once (NDJSON bytes, seconds, server peak RSS), then
 imports it with `tagmail-replica` (seconds, records, disk). With
 `--desktop <tagmail-desktop built with app,test-hooks>` it also starts the
-app under `xvfb-run`, paired through `TAGMAIL_DESKTOP_PAIR`, waits for its
+app under `dbus-run-session` and `xvfb-run`, paired through `TAGMAIL_DESKTOP_PAIR`, waits for its
 first bootstrap, idles `--desktop-idle-secs` (60) and reads VmRSS of the
 app and its `WebKitWebProcess`/`WebKitNetworkProcess`. All of this is
 reported in `replicaBootstrap` and `desktop`, never gated.

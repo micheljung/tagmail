@@ -26,6 +26,7 @@ const POLL: Duration = Duration::from_secs(1);
 /// `comm` of the app's own process (15 characters, untruncated).
 const DESKTOP_PROCESS: &str = "tagmail-desktop";
 const WEBKIT_PREFIX: &str = "WebKit";
+const DESKTOP_LOG_TAIL: usize = 20;
 
 pub(crate) struct Cost {
     pub(crate) ndjson_bytes: u64,
@@ -260,7 +261,7 @@ fn kill_tree(root: u32) {
     let _ = Command::new("kill").args(&pids).status();
 }
 
-/// Starts the desktop app under `xvfb-run`, pairing it through
+/// Starts the desktop app under `dbus-run-session` and `xvfb-run`, pairing it through
 /// `TAGMAIL_DESKTOP_PAIR`; waits for its first bootstrap to be installed,
 /// idles, and reads the RSS of its process tree.
 pub(crate) fn desktop(
@@ -272,8 +273,8 @@ pub(crate) fn desktop(
     let code = pairing_code(running)?;
     let data = work.join("desktop-data");
     let log = fs::File::create(work.join("desktop.log"))?;
-    let mut child = Command::new("xvfb-run")
-        .arg("-a")
+    let mut child = Command::new("dbus-run-session")
+        .args(["--", "xvfb-run", "-a"])
         .arg(binary)
         .env("TAGMAIL_DESKTOP_DATA_DIR", &data)
         .env(
@@ -313,5 +314,10 @@ pub(crate) fn desktop(
     })();
     kill_tree(pid);
     let _ = child.wait();
-    result.with_context(|| format!("desktop log: {}", work.join("desktop.log").display()))
+    result.with_context(|| {
+        let log = fs::read_to_string(work.join("desktop.log")).unwrap_or_default();
+        let tail: Vec<&str> = log.lines().rev().take(DESKTOP_LOG_TAIL).collect();
+        let tail: Vec<&str> = tail.into_iter().rev().collect();
+        format!("desktop log tail:\n{}", tail.join("\n"))
+    })
 }
