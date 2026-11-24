@@ -2,8 +2,8 @@
 //! mailboxes, messages and locations, derived labels and thread rows, and
 //! the change-log entries describing them (plan §3.2–3.6).
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::{Value, json};
 use tagmail_api_core::Arrival;
@@ -23,6 +23,42 @@ use crate::threading::{self, ThreadInput};
 /// Older mail is restored from elsewhere, not news (contract §5).
 const ARRIVAL_MAX_AGE_SECS: i64 = 24 * 3600;
 const MS_PER_SEC: i64 = 1000;
+
+/// Recent messages that a live mailbox other than INBOX inserted. INBOX
+/// may list them only later (All Mail syncs before INBOX), and their first
+/// INBOX location is then still an arrival. They are dropped once INBOX
+/// has completed a whole poll after the one in progress, so a later move
+/// into INBOX is no arrival.
+#[derive(Debug, Default)]
+pub struct InboxCandidates {
+    inbox_polls: u64,
+    /// Message id → `inbox_polls` when inserted.
+    ids: HashMap<i64, u64>,
+}
+
+/// What one transaction does to [`InboxCandidates`], applied on commit.
+#[derive(Debug, Default)]
+pub struct CandidateChanges {
+    added: Vec<i64>,
+    taken: Vec<i64>,
+    inbox_polled: bool,
+}
+
+impl InboxCandidates {
+    pub fn apply(&mut self, changes: CandidateChanges) {
+        for id in changes.taken {
+            self.ids.remove(&id);
+        }
+        for id in changes.added {
+            self.ids.insert(id, self.inbox_polls);
+        }
+        if changes.inbox_polled {
+            self.inbox_polls += 1;
+            let oldest = self.inbox_polls - 1;
+            self.ids.retain(|_, polls| *polls >= oldest);
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SyncState {
@@ -269,6 +305,8 @@ pub struct W<'a> {
     /// The account's INBOX if it is live, read once per transaction.
     live_inbox: Option<Option<i64>>,
     arrivals: Vec<Arrival>,
+    candidates: Arc<Mutex<InboxCandidates>>,
+    candidate_changes: CandidateChanges,
 }
 
 impl<'a> W<'a> {
@@ -285,7 +323,44 @@ impl<'a> W<'a> {
             views: None,
             live_inbox: None,
             arrivals: Vec::new(),
+            candidates: Arc::default(),
+            candidate_changes: CandidateChanges::default(),
         }
+    }
+
+    pub fn with_candidates(mut self, candidates: Arc<Mutex<InboxCandidates>>) -> W<'a> {
+        self.candidates = candidates;
+        self
+    }
+
+    /// For [`InboxCandidates::apply`] once the transaction commits.
+    pub fn take_candidate_changes(&mut self) -> CandidateChanges {
+        std::mem::take(&mut self.candidate_changes)
+    }
+
+    fn is_candidate(&self, message: i64) -> bool {
+        self.candidates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .ids
+            .contains_key(&message)
+    }
+
+    fn push_arrival(&mut self, message: i64, m: &NewMessage) -> Result<()> {
+        let thread_id = self.conn.query_row(
+            "SELECT thread_id FROM message WHERE id = ?1",
+            [message],
+            |r| r.get(0),
+        )?;
+        self.arrivals.push(Arrival {
+            account_id: self.account,
+            message_id: message,
+            thread_id,
+            from: m.from.first().cloned(),
+            subject: m.subject.clone(),
+            date: m.date,
+        });
+        Ok(())
     }
 
     pub fn with_overlay(mut self, overlay: Arc<AccountOverlay>) -> W<'a> {
@@ -715,7 +790,7 @@ pub fn finish_sync(
             Some(json!({ "syncState": "live" })),
         );
     }
-    Ok(())
+    note_inbox_poll(w, mailbox)
 }
 
 fn mailbox_state(conn: &Connection, mailbox: i64) -> Result<SyncState> {
@@ -732,6 +807,16 @@ pub fn mark_polled(w: &mut W<'_>, mailbox: i64) -> Result<()> {
         "UPDATE mailbox SET last_poll_at = ?2 WHERE id = ?1",
         params![mailbox, w.now_ms],
     )?;
+    note_inbox_poll(w, mailbox)
+}
+
+fn note_inbox_poll(w: &mut W<'_>, mailbox: i64) -> Result<()> {
+    let inbox: bool = w.conn.query_row(
+        "SELECT name = 'INBOX' COLLATE NOCASE FROM mailbox WHERE id = ?1",
+        [mailbox],
+        |r| r.get(0),
+    )?;
+    w.candidate_changes.inbox_polled |= inbox;
     Ok(())
 }
 
@@ -812,6 +897,8 @@ pub fn add_messages(w: &mut W<'_>, mailbox: i64, fetched: &[Fetched]) -> Result<
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
+        let unseen_recent = !f.location.flags.contains(Flags::SEEN)
+            && m.date >= w.now_ms / MS_PER_SEC - ARRIVAL_MAX_AGE_SECS;
         let id = match existing {
             Some((id, tombstoned, snippet)) => {
                 if tombstoned.is_some() {
@@ -826,27 +913,24 @@ pub fn add_messages(w: &mut W<'_>, mailbox: i64, fetched: &[Fetched]) -> Result<
                         params![id, m.snippet],
                     )?;
                 }
+                if unseen_recent
+                    && w.live_inbox()? == Some(mailbox)
+                    && w.is_candidate(id)
+                    && !has_location_in(w, mailbox, id)?
+                {
+                    w.candidate_changes.taken.push(id);
+                    w.push_arrival(id, m)?;
+                }
                 id
             }
             None => {
                 let id = insert_message(w, m)?;
-                if !f.location.flags.contains(Flags::SEEN)
-                    && m.date >= w.now_ms / MS_PER_SEC - ARRIVAL_MAX_AGE_SECS
-                    && w.live_inbox()? == Some(mailbox)
-                {
-                    let thread_id = w.conn.query_row(
-                        "SELECT thread_id FROM message WHERE id = ?1",
-                        [id],
-                        |r| r.get(0),
-                    )?;
-                    w.arrivals.push(Arrival {
-                        account_id: w.account,
-                        message_id: id,
-                        thread_id,
-                        from: m.from.first().cloned(),
-                        subject: m.subject.clone(),
-                        date: m.date,
-                    });
+                if unseen_recent {
+                    if w.live_inbox()? == Some(mailbox) {
+                        w.push_arrival(id, m)?;
+                    } else if mailbox_state(w.conn, mailbox)? == SyncState::Live {
+                        w.candidate_changes.added.push(id);
+                    }
                 }
                 id
             }
@@ -866,6 +950,12 @@ pub fn add_messages(w: &mut W<'_>, mailbox: i64, fetched: &[Fetched]) -> Result<
         w.touch_message(id);
     }
     Ok(())
+}
+
+fn has_location_in(w: &W<'_>, mailbox: i64, message: i64) -> Result<bool> {
+    Ok(w.conn
+        .prepare_cached("SELECT 1 FROM location WHERE mailbox_id = ?1 AND message_id = ?2")?
+        .exists(params![mailbox, message])?)
 }
 
 /// What a location row stores for a server state: the projected state,

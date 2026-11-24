@@ -762,6 +762,57 @@ async fn a_known_message_copied_into_the_inbox_is_no_arrival() {
 }
 
 #[tokio::test]
+async fn new_mail_listed_by_all_mail_before_the_inbox_still_arrives() {
+    let t = open();
+    let srv = server(QRESYNC);
+    seed(&srv);
+    let mut s = session(&srv);
+    sync_all(&t, &mut s).await;
+    let mut rx = t.feed.subscribe_arrivals();
+    {
+        let mut srv = lock(&srv);
+        let uid = srv.append(
+            "INBOX",
+            FakeMsg::new("n1@x", "Hi", "cat@x", "me@x", now_secs()),
+        );
+        srv.copy_msg("INBOX", uid, "Archive");
+    }
+    assert_eq!(sync_box(&t, &mut s, "Archive").await, Progress::Done);
+    assert_eq!(drain(&mut rx), []);
+    assert_eq!(sync_box(&t, &mut s, "INBOX").await, Progress::Done);
+    let got = drain(&mut rx);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].subject.as_deref(), Some("Hi"));
+    assert_eq!(sync_box(&t, &mut s, "INBOX").await, Progress::Done);
+    assert_eq!(drain(&mut rx), [], "one arrival per message");
+}
+
+#[tokio::test]
+async fn a_recent_message_moved_into_the_inbox_after_a_full_poll_is_no_arrival() {
+    let t = open();
+    let srv = server(QRESYNC);
+    seed(&srv);
+    let mut s = session(&srv);
+    sync_all(&t, &mut s).await;
+    lock(&srv).append(
+        "Archive",
+        FakeMsg::new("n1@x", "Hi", "cat@x", "me@x", now_secs()),
+    );
+    assert_eq!(sync_box(&t, &mut s, "Archive").await, Progress::Done);
+    for _ in 0..2 {
+        assert_eq!(sync_box(&t, &mut s, "INBOX").await, Progress::Done);
+    }
+    let mut rx = t.feed.subscribe_arrivals();
+    {
+        let mut srv = lock(&srv);
+        let uid = srv.uid_of("Archive", "n1@x").unwrap();
+        srv.copy_msg("Archive", uid, "INBOX");
+    }
+    assert_eq!(sync_box(&t, &mut s, "INBOX").await, Progress::Done);
+    assert_eq!(drain(&mut rx), []);
+}
+
+#[tokio::test]
 async fn a_rolled_back_transaction_publishes_no_arrivals() {
     let t = open();
     let srv = server(QRESYNC);

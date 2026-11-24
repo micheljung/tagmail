@@ -1,8 +1,8 @@
 //! What one account's sync needs from the outside: the cache, the blob
 //! store and the change feed it publishes to after each commit.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tagmail_api_core::ChangeFeed;
@@ -11,7 +11,7 @@ use tagmail_store::rusqlite::Connection;
 use tagmail_store::{BlobStore, CacheDb, changes};
 use tokio::sync::Semaphore;
 
-use crate::cache::W;
+use crate::cache::{InboxCandidates, W};
 use crate::error::Result;
 use crate::overlay::Overlays;
 
@@ -38,6 +38,7 @@ pub struct Ctx {
     pub overlays: Arc<Overlays>,
     blob_writes: Arc<Semaphore>,
     clock: Arc<AtomicI64>,
+    candidates: Arc<Mutex<InboxCandidates>>,
 }
 
 fn wall_ms() -> i64 {
@@ -61,6 +62,7 @@ impl Ctx {
             overlays: Arc::default(),
             blob_writes: Arc::new(Semaphore::new(MAX_BLOB_WRITES)),
             clock: Arc::new(AtomicI64::new(0)),
+            candidates: Arc::default(),
         }
     }
 
@@ -126,20 +128,28 @@ impl Ctx {
         let now = self.tick();
         let epoch = self.cache.epoch();
         let overlay = self.overlays.get(self.account);
-        let (out, head, arrivals) = self
+        let candidates = self.candidates.clone();
+        let (out, head, arrivals, candidate_changes) = self
             .cache
             .write(move |tx| {
-                let mut w = W::new(tx, account, now).with_overlay(overlay);
+                let mut w = W::new(tx, account, now)
+                    .with_overlay(overlay)
+                    .with_candidates(candidates);
                 let out = f(&mut w)?;
                 let arrivals = w.take_arrivals();
+                let candidate_changes = w.take_candidate_changes();
                 let head = if w.finish()? {
                     Some(changes::head(tx, epoch)?)
                 } else {
                     None
                 };
-                Ok((out, head, arrivals))
+                Ok((out, head, arrivals, candidate_changes))
             })
             .await?;
+        self.candidates
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .apply(candidate_changes);
         if let Some(head) = head {
             self.feed.publish(head);
         }
