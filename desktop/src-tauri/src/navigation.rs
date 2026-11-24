@@ -48,7 +48,11 @@ pub fn navigate(url: &Url) -> Navigation {
 
 /// A new window (`target="_blank"`, `window.open`): never opened in-app.
 pub fn new_window(url: Url) -> Navigation {
-    external(url)
+    if in_app(&url) || app_blob(&url) {
+        Navigation::Deny
+    } else {
+        external(url)
+    }
 }
 
 #[cfg(test)]
@@ -106,7 +110,12 @@ mod tests {
 
     #[test]
     fn new_windows_never_open_in_app() {
-        assert_eq!(new_window(url("app://localhost/inbox")), Navigation::Deny);
+        let app = url(ORIGIN);
+        assert_eq!(new_window(app.join("inbox").unwrap()), Navigation::Deny);
+        assert_eq!(
+            new_window(url(&format!("blob:{ORIGIN}0b6c1d36"))),
+            Navigation::Deny
+        );
         assert_eq!(
             new_window(url("https://github.com/micheljung/tagmail/releases")),
             Navigation::External(url("https://github.com/micheljung/tagmail/releases"))
