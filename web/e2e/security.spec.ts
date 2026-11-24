@@ -11,6 +11,19 @@ declare global {
 
 const FRAME = 'iframe[title^="Message from"]';
 
+/**
+ * WebKit starts a lazy iframe only once it is in the viewport, and the
+ * frame above it grows when it loads and can push it out before that, so
+ * each frame is brought into view only after the ones above have settled.
+ */
+async function loadFrames(page: Page) {
+	const frames = page.locator(FRAME);
+	for (let i = 0, n = await frames.count(); i < n; i++) {
+		await frames.nth(i).scrollIntoViewIfNeeded();
+		await expect(frames.nth(i).locator('..')).toHaveClass(/\bloaded\b/);
+	}
+}
+
 async function openHostileMessage(page: Page): Promise<string[]> {
 	const attacker: string[] = [];
 	await page.route(`${ATTACKER}/**`, (route) => {
@@ -23,6 +36,7 @@ async function openHostileMessage(page: Page): Promise<string[]> {
 		'sandbox',
 		'allow-same-origin allow-popups allow-popups-to-escape-sandbox'
 	);
+	await loadFrames(page);
 	const frame = page.frameLocator(FRAME).last();
 	await expect(frame.getByText('Nothing to see here.')).toBeVisible();
 	await frame.locator('#jslink').click();
