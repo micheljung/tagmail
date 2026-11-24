@@ -12,6 +12,10 @@ use thiserror::Error;
 use url::Url;
 
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+/// Longest silence on any read, streams included: three server SSE
+/// heartbeats.
+pub const STREAM_IDLE: Duration = Duration::from_secs(75);
+const TCP_KEEPALIVE: Duration = Duration::from_secs(30);
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// A success this recent counts as online.
 pub const ONLINE_WINDOW: Duration = Duration::from_secs(30);
@@ -85,6 +89,15 @@ pub struct ServerClient {
 
 impl ServerClient {
     pub fn new(server: &Url, token: Option<String>) -> ClientResult<ServerClient> {
+        ServerClient::with_idle(server, token, STREAM_IDLE)
+    }
+
+    /// A client that gives up on a connection silent for `idle`.
+    pub fn with_idle(
+        server: &Url,
+        token: Option<String>,
+        idle: Duration,
+    ) -> ClientResult<ServerClient> {
         if !is_secure(server) {
             return Err(ClientError::Insecure(server.to_string()));
         }
@@ -105,6 +118,8 @@ impl ServerClient {
         let http = reqwest::Client::builder()
             .tls_backend_preconfigured(tls)
             .connect_timeout(REQUEST_TIMEOUT)
+            .read_timeout(idle)
+            .tcp_keepalive(TCP_KEEPALIVE)
             .user_agent(concat!("tagmail-desktop/", env!("CARGO_PKG_VERSION")))
             .build()
             .map_err(|e| ClientError::Decode(format!("client: {e}")))?;
@@ -275,6 +290,23 @@ pub(crate) mod tests {
             }
         });
         (url, heads)
+    }
+
+    /// Answers with `head` and the start of a body, then stays silent
+    /// with the connection open.
+    pub(crate) async fn stalled(head: &'static str, body: &'static str) -> Url {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0; 8192];
+            let _ = sock.read(&mut buf).await.unwrap();
+            sock.write_all(format!("HTTP/1.1 200 OK\r\n{head}\r\n{body}").as_bytes())
+                .await
+                .unwrap();
+            tokio::time::sleep(Duration::from_secs(60)).await;
+        });
+        url
     }
 
     async fn closed_port() -> Url {

@@ -116,4 +116,29 @@ mod tests {
         assert_eq!(b.next().await.unwrap(), Some(Doorbell::Reset));
         assert_eq!(b.next().await.unwrap(), None);
     }
+
+    #[tokio::test]
+    async fn a_silent_stream_goes_offline() {
+        let url = crate::client::tests::stalled(
+            "content-type: text/event-stream\r\ntransfer-encoding: chunked\r\n",
+            "d\r\n: heartbeat\n\n\r\n",
+        )
+        .await;
+        let client =
+            ServerClient::with_idle(&url, None, std::time::Duration::from_millis(300)).unwrap();
+        let since = ChangeCursor {
+            epoch: tagmail_core::CacheEpoch(1),
+            seq: 0,
+        };
+        let mut bells = connect(&client, since).await.unwrap();
+
+        let next = tokio::time::timeout(std::time::Duration::from_secs(5), bells.next())
+            .await
+            .expect("the read gives up on its own");
+
+        assert!(
+            matches!(next, Err(Error::Client(crate::ClientError::Offline(_)))),
+            "{next:?}"
+        );
+    }
 }

@@ -272,4 +272,31 @@ mod tests {
         assert_eq!(meta.cursor.seq, 7);
         store.close().await.unwrap();
     }
+
+    #[tokio::test]
+    async fn a_snapshot_that_stops_mid_stream_gives_up() {
+        let url = crate::client::tests::stalled(
+            "content-type: application/x-ndjson\r\ntransfer-encoding: chunked\r\n",
+            "2\r\n{\"\r\n",
+        )
+        .await;
+        let client =
+            ServerClient::with_idle(&url, None, std::time::Duration::from_millis(300)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::new(dir.path());
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            import_snapshot(&client, &layout, 90),
+        )
+        .await
+        .expect("the import gives up on its own");
+
+        assert!(
+            matches!(result, Err(Error::Incomplete(_))),
+            "{:?}",
+            result.err()
+        );
+        assert!(!layout.replica_tmp().exists());
+    }
 }
