@@ -52,6 +52,16 @@ describe('Connectivity', () => {
 		expect(c.offline).toBe(true);
 	});
 
+	it('keeps a request failure from before it started watching', () => {
+		const c = new Connectivity();
+		const recovered = vi.fn();
+		c.onRecovered(recovered);
+		c.report(false);
+		c.watch(fakeWindow(true).target as unknown as Window);
+		expect(c.offline).toBe(true);
+		expect(recovered).not.toHaveBeenCalled();
+	});
+
 	it('reports each return online once, from the browser or a request', async () => {
 		vi.useFakeTimers();
 		const win = fakeWindow(false);
@@ -79,7 +89,28 @@ describe('Connectivity', () => {
 		vi.useRealTimers();
 	});
 
-	it('ignores drops too short to have lost anything', async () => {
+	it('ignores browser drops too short to have lost anything', async () => {
+		vi.useFakeTimers();
+		const win = fakeWindow(true);
+		const c = new Connectivity();
+		c.watch(win.target as unknown as Window);
+		const recovered = vi.fn();
+		c.onRecovered(recovered);
+
+		win.set(false);
+		await vi.advanceTimersByTimeAsync(RECOVERY_MIN_OFFLINE_MS - 1);
+		win.set(true);
+		await vi.advanceTimersByTimeAsync(RECOVERY_INTERVAL_MS);
+		expect(recovered).not.toHaveBeenCalled();
+
+		win.set(false);
+		await vi.advanceTimersByTimeAsync(RECOVERY_MIN_OFFLINE_MS);
+		win.set(true);
+		expect(recovered).toHaveBeenCalledOnce();
+		vi.useRealTimers();
+	});
+
+	it('recovers after a short outage that a failed request reported', async () => {
 		vi.useFakeTimers();
 		const c = new Connectivity();
 		c.watch(fakeWindow(true).target as unknown as Window);
@@ -87,15 +118,32 @@ describe('Connectivity', () => {
 		c.onRecovered(recovered);
 
 		c.report(false);
-		await vi.advanceTimersByTimeAsync(RECOVERY_MIN_OFFLINE_MS - 1);
-		c.report(true);
-		await vi.advanceTimersByTimeAsync(RECOVERY_INTERVAL_MS);
-		expect(recovered).not.toHaveBeenCalled();
-
-		c.report(false);
-		await vi.advanceTimersByTimeAsync(RECOVERY_MIN_OFFLINE_MS);
+		await vi.advanceTimersByTimeAsync(RECOVERY_MIN_OFFLINE_MS / 2);
 		c.report(true);
 		expect(recovered).toHaveBeenCalledOnce();
+		vi.useRealTimers();
+	});
+
+	it('keeps a throttled recovery until the app is back online', async () => {
+		vi.useFakeTimers();
+		const win = fakeWindow(true);
+		const c = new Connectivity();
+		c.watch(win.target as unknown as Window);
+		const recovered = vi.fn();
+		c.onRecovered(recovered);
+		const outage = async (ms: number) => {
+			win.set(false);
+			await vi.advanceTimersByTimeAsync(ms);
+			win.set(true);
+		};
+
+		await outage(RECOVERY_MIN_OFFLINE_MS);
+		expect(recovered).toHaveBeenCalledOnce();
+		await outage(RECOVERY_MIN_OFFLINE_MS);
+		const blip = RECOVERY_MIN_OFFLINE_MS / 2;
+		await vi.advanceTimersByTimeAsync(RECOVERY_INTERVAL_MS - RECOVERY_MIN_OFFLINE_MS - blip / 2);
+		await outage(blip);
+		expect(recovered).toHaveBeenCalledTimes(2);
 		vi.useRealTimers();
 	});
 

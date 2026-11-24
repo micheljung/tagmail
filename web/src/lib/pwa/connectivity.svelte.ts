@@ -1,6 +1,6 @@
 const PROBE_FIRST_MS = 1000;
 const PROBE_MAX_MS = 30_000;
-/** A blip shorter than this is not worth reloading everything. */
+/** A browser offline blip shorter than this is not worth reloading everything. */
 const RECOVERY_MIN_OFFLINE_MS = 2000;
 /** On a flaky network, reloading after each blip would itself keep the link saturated. */
 const RECOVERY_INTERVAL_MS = 10_000;
@@ -19,6 +19,8 @@ export class Connectivity {
 	#probeDelay = PROBE_FIRST_MS;
 	#hidden: () => boolean = () => false;
 	#offlineSince: number | null = null;
+	#requestFailed = false;
+	#recoveryPending = false;
 	#lastRecovery = -Infinity;
 	#recoveryTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -42,7 +44,8 @@ export class Connectivity {
 				if (this.#online) this.#reachable = true;
 			});
 		const visibility = () => this.#schedule();
-		update();
+		// A request may already have failed; only an "online" event says that changed.
+		this.#settle(() => (this.#online = target.navigator.onLine));
 		target.addEventListener('online', update);
 		target.addEventListener('offline', update);
 		doc.addEventListener('visibilitychange', visibility);
@@ -60,6 +63,7 @@ export class Connectivity {
 
 	report(reachable: boolean): void {
 		this.#settle(() => (this.#reachable = reachable));
+		if (!reachable) this.#requestFailed = true;
 	}
 
 	/**
@@ -83,20 +87,27 @@ export class Connectivity {
 
 	#recover(): void {
 		const since = this.#offlineSince;
+		const requestFailed = this.#requestFailed;
 		this.#offlineSince = null;
-		if (since === null || Date.now() - since < RECOVERY_MIN_OFFLINE_MS) return;
-		const wait = this.#lastRecovery + RECOVERY_INTERVAL_MS - Date.now();
-		if (wait <= 0) {
-			this.#notify();
-			return;
+		this.#requestFailed = false;
+		// A failed request may have lost data however short the outage was.
+		if (requestFailed || (since !== null && Date.now() - since >= RECOVERY_MIN_OFFLINE_MS)) {
+			this.#recoveryPending = true;
 		}
-		this.#recoveryTimer ??= setTimeout(() => {
-			this.#recoveryTimer = undefined;
-			if (!this.offline) this.#notify();
-		}, wait);
+		this.#flushRecovery();
 	}
 
-	#notify(): void {
+	#flushRecovery(): void {
+		if (!this.#recoveryPending || this.offline) return;
+		const wait = this.#lastRecovery + RECOVERY_INTERVAL_MS - Date.now();
+		if (wait > 0) {
+			this.#recoveryTimer ??= setTimeout(() => {
+				this.#recoveryTimer = undefined;
+				this.#flushRecovery();
+			}, wait);
+			return;
+		}
+		this.#recoveryPending = false;
 		this.#lastRecovery = Date.now();
 		for (const callback of this.#recovered) callback();
 	}
