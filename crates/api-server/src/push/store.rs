@@ -195,6 +195,14 @@ pub async fn upsert(
                 id
             }
             None => {
+                let others: i64 = tx.query_row(
+                    &format!("SELECT count(*) {LIVE_FROM} AND p.endpoint IS NOT ?3"),
+                    params![now, idle_secs(session_idle), sub.old_endpoint],
+                    |r| r.get(0),
+                )?;
+                if others >= MAX_SUBSCRIPTIONS {
+                    return Ok(Upserted::TooMany);
+                }
                 let renewed: Option<(bool, Option<String>)> = match &sub.old_endpoint {
                     Some(old) => tx
                         .query_row(
@@ -213,14 +221,6 @@ pub async fn upsert(
                 } else {
                     old_ids.flatten()
                 };
-                let count: i64 = tx.query_row(
-                    &format!("SELECT count(*) {LIVE_FROM}"),
-                    params![now, idle_secs(session_idle)],
-                    |r| r.get(0),
-                )?;
-                if count >= MAX_SUBSCRIPTIONS {
-                    return Ok(Upserted::TooMany);
-                }
                 tx.execute(
                     "INSERT INTO push_subscription (session_hash, endpoint, p256dh, auth, \
                      preview, account_ids, user_agent, created_at, updated_at) \

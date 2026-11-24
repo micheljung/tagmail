@@ -560,6 +560,64 @@ async fn idle_sessions_get_no_pushes_and_hold_no_slots() {
 }
 
 #[tokio::test]
+async fn a_capped_renewal_keeps_the_old_row() {
+    let dirs = Dirs::new();
+    let server = Server::start(&dirs.config(loopback()), None).await.unwrap();
+    let idle = owner(&server).await;
+    let live = owner(&server).await;
+    let mock = Mock::start().await;
+    let browser = Browser::new();
+    subscribed(&idle, &server, &browser.subscription(&mock.endpoint("old"))).await;
+    let past_idle = DEFAULT_SESSION_IDLE.as_secs() as i64 + 60;
+    server
+        .store()
+        .config()
+        .write(move |tx| {
+            let idle: Vec<u8> =
+                tx.query_row("SELECT session_hash FROM push_subscription", [], |r| {
+                    r.get(0)
+                })?;
+            tx.execute(
+                "UPDATE session SET last_seen_at = last_seen_at - ?2 WHERE id_hash = ?1",
+                params![idle, past_idle],
+            )?;
+            let live: Vec<u8> = tx.query_row(
+                "SELECT id_hash FROM session WHERE id_hash != ?1",
+                [&idle],
+                |r| r.get(0),
+            )?;
+            for i in 0..MAX_SUBSCRIPTIONS {
+                tx.execute(
+                    "INSERT INTO push_subscription (session_hash, endpoint, p256dh, auth) \
+                     VALUES (?1, ?2, zeroblob(65), zeroblob(16))",
+                    params![live, format!("https://push.example/{i}")],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let renew = |old: String| {
+        let mut body = browser.subscription(&mock.endpoint("new"));
+        json_merge(&mut body, json!({"oldEndpoint": old}));
+        body
+    };
+
+    let capped = subscribe(&live, &server, &renew(mock.endpoint("old"))).await;
+    assert_eq!(capped.status(), 409);
+    let old = column(
+        &server,
+        "SELECT count(*) FROM push_subscription WHERE endpoint LIKE '%/old'",
+    )
+    .await;
+    assert_eq!(old, [1], "the refused renewal keeps the old row");
+
+    let renewed = subscribe(&live, &server, &renew("https://push.example/0".into())).await;
+    assert_eq!(renewed.status(), 201, "renewing a live row frees its slot");
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
 async fn local_faults_do_not_count_against_a_subscription() {
     let dirs = Dirs::new();
     let server = Server::start(&dirs.config(loopback()), None).await.unwrap();
