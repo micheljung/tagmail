@@ -15,7 +15,12 @@ interface PushStub {
 interface MockPush {
 	posted: { endpoint: string; keys: { p256dh: string; auth: string } }[];
 	tests: number[];
-	subscriptions: { id: number; preview: boolean; current: boolean }[];
+	subscriptions: {
+		id: number;
+		preview: boolean;
+		accountIds: number[] | null;
+		current: boolean;
+	}[];
 }
 
 /**
@@ -195,6 +200,52 @@ test('re-registering after the server lost the subscription keeps its settings',
 		.poll(async () => (await mockPush(page)).subscriptions)
 		.toMatchObject([{ preview: false }]);
 	await expect(page.getByLabel('Show sender and subject')).not.toBeChecked();
+});
+
+test('a saved account that was removed since is left out when registering again', async ({
+	page
+}) => {
+	const removedAccount = 99;
+	await stubPush(page, { existing: VAPID_PUBLIC_KEY });
+	await openSettings(page);
+	await page.getByLabel('Show sender and subject').uncheck();
+	await expect.poll(async () => (await mockPush(page)).subscriptions[0]?.preview).toBe(false);
+	await page.evaluate(
+		(prefs) =>
+			new Promise<void>((resolve, reject) => {
+				const open = indexedDB.open('tagmail-push');
+				open.onsuccess = () => {
+					const tx = open.result.transaction('prefs', 'readwrite');
+					tx.objectStore('prefs').put(prefs, 'device');
+					tx.oncomplete = () => resolve();
+					tx.onerror = () => reject(new Error('saving the push settings failed'));
+				};
+			}),
+		{ endpoint: ENDPOINT, preview: false, accountIds: [removedAccount] }
+	);
+	const before = (await mockPush(page)).posted.length;
+
+	await page.reload();
+	await expect.poll(async () => (await mockPush(page)).posted.length).toBeGreaterThan(before);
+	await expect(page.locator('[data-push-state="enabled"]')).toBeVisible();
+	await expect(page.getByRole('alert')).toHaveCount(0);
+	expect((await mockPush(page)).subscriptions).toMatchObject([
+		{ preview: false, accountIds: null }
+	]);
+});
+
+test('Settings still lists the other devices when registering again fails', async ({ page }) => {
+	await stubPush(page, { existing: VAPID_PUBLIC_KEY });
+	await page.request.post('/__mock/push/other-device');
+	await page.route('/api/push/subscriptions', (route) =>
+		route.request().method() === 'POST'
+			? route.fulfill({ status: 500, json: { error: 'internal', message: 'Server error' } })
+			: route.fallback()
+	);
+	await openSettings(page);
+	await expect(page.getByRole('alert')).toBeVisible();
+	await expect(page.locator('[data-push-device]')).toContainText('Chrome on Android');
+	await expect(page.getByRole('button', { name: 'Enable notifications' })).toBeVisible();
 });
 
 test('a subscription made with an old server key is replaced', async ({ page }) => {

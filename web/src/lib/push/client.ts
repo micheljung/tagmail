@@ -1,4 +1,6 @@
 import type {
+	AccountsDto,
+	AccountDto,
 	PushKeyDto,
 	PushSubscribeDto,
 	PushSubscriptionDto,
@@ -41,6 +43,7 @@ export function pushAvailability(env: PushEnv): PushAvailability {
 }
 
 export interface PushApi {
+	accounts(): Promise<AccountDto[]>;
 	pushKey(): Promise<PushKeyDto>;
 	pushSubscriptions(): Promise<PushSubscriptionDto[]>;
 	subscribePush(subscription: PushSubscribeDto): Promise<PushSubscriptionDto>;
@@ -61,12 +64,33 @@ function sameKey(subscription: PushSubscription, publicKey: string): boolean {
 }
 
 type Settings = Pick<PushSubscribeDto, 'preview' | 'accountIds'>;
+type RegisterApi = Pick<PushApi, 'accounts' | 'subscribePush'>;
 
-function settingsOf(prefs: PushPrefs | undefined): Settings {
+const REJECTED_STATUSES = [400, 422];
+
+/** The server refused the account filter, e.g. an older server naming a removed account. */
+function rejectsAccounts(error: unknown): boolean {
+	if (typeof error !== 'object' || error === null) return false;
+	const { status, field } = error as { status?: unknown; field?: unknown };
+	return typeof status === 'number' && REJECTED_STATUSES.includes(status) && field === 'accountIds';
+}
+
+/**
+ * The saved settings, without accounts removed since they were saved; none
+ * left means all accounts. If the accounts can't be listed the saved filter
+ * is sent as is and a refusal is handled by `register`.
+ */
+async function settingsOf(api: RegisterApi, prefs: PushPrefs | undefined): Promise<Settings> {
 	if (!prefs) return {};
-	return prefs.accountIds === null
-		? { preview: prefs.preview }
-		: { preview: prefs.preview, accountIds: prefs.accountIds };
+	if (prefs.accountIds === null) return { preview: prefs.preview };
+	const known = await api.accounts().then(
+		(accounts) => new Set(accounts.map((a) => a.id)),
+		() => null
+	);
+	const accountIds = known ? prefs.accountIds.filter((id) => known.has(id)) : prefs.accountIds;
+	return accountIds.length > 0
+		? { preview: prefs.preview, accountIds }
+		: { preview: prefs.preview };
 }
 
 /**
@@ -75,7 +99,7 @@ function settingsOf(prefs: PushPrefs | undefined): Settings {
  * server replaces that row instead of keeping a dead one.
  */
 async function register(
-	api: Pick<PushApi, 'subscribePush'>,
+	api: RegisterApi,
 	prefs: PushPrefStore,
 	subscription: PushSubscription,
 	saved: PushPrefs | undefined,
@@ -83,12 +107,19 @@ async function register(
 ): Promise<PushSubscriptionDto> {
 	const json = subscription.toJSON();
 	const { endpoint } = subscription;
-	const row = await api.subscribePush({
+	const { accountIds, ...settings } = await settingsOf(api, saved);
+	const dto: PushSubscribeDto = {
 		endpoint,
 		keys: { p256dh: json.keys?.p256dh ?? '', auth: json.keys?.auth ?? '' },
-		...settingsOf(saved),
+		...settings,
 		...(previousEndpoint && previousEndpoint !== endpoint ? { oldEndpoint: previousEndpoint } : {})
-	});
+	};
+	const row = await (accountIds
+		? api.subscribePush({ ...dto, accountIds }).catch((error: unknown) => {
+				if (!rejectsAccounts(error)) throw error;
+				return api.subscribePush(dto);
+			})
+		: api.subscribePush(dto));
 	await prefs.set({ endpoint, preview: row.preview, accountIds: row.accountIds });
 	return row;
 }
@@ -185,7 +216,7 @@ export async function updatePush(
  */
 export async function renewPush(
 	manager: PushManager,
-	api: Pick<PushApi, 'pushKey' | 'subscribePush'>,
+	api: Pick<PushApi, 'accounts' | 'pushKey' | 'subscribePush'>,
 	prefs: PushPrefStore,
 	old: PushSubscription | null
 ): Promise<PushSubscriptionDto> {
@@ -199,13 +230,20 @@ export async function renewPush(
 /** The push API over plain `fetch`, for the service worker. */
 export function fetchPushApi(
 	fetcher: typeof fetch = fetch
-): Pick<PushApi, 'pushKey' | 'subscribePush'> {
+): Pick<PushApi, 'accounts' | 'pushKey' | 'subscribePush'> {
 	const json = async <T>(path: string, init?: RequestInit): Promise<T> => {
 		const response = await fetcher(path, { credentials: 'same-origin', ...init });
-		if (!response.ok) throw new Error(`${path} answered ${response.status}`);
+		if (!response.ok) {
+			const body = (await response.json().catch(() => ({}))) as { field?: string };
+			throw Object.assign(new Error(`${path} answered ${response.status}`), {
+				status: response.status,
+				field: body.field
+			});
+		}
 		return (await response.json()) as T;
 	};
 	return {
+		accounts: async () => (await json<AccountsDto>('/api/accounts')).accounts,
 		pushKey: () => json<PushKeyDto>('/api/push/key'),
 		subscribePush: (subscription) =>
 			json<PushSubscriptionDto>('/api/push/subscriptions', {

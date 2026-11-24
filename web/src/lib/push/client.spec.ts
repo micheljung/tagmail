@@ -1,4 +1,4 @@
-import type { PushSubscribeDto, PushSubscriptionDto } from '@tagmail/api-types';
+import type { AccountDto, PushSubscribeDto, PushSubscriptionDto } from '@tagmail/api-types';
 import { describe, expect, it, vi } from 'vitest';
 import {
 	base64url,
@@ -85,13 +85,16 @@ function memoryPrefs(initial?: PushPrefs): PushPrefStore & { value: PushPrefs | 
 }
 
 const SAVED: PushPrefs = { endpoint: 'https://push.example/a', preview: false, accountIds: [2] };
+const refusal = { status: 422, field: 'accountIds' };
+const SAVED_KEYS = { p256dh: 'p', auth: 'a' };
 
-function fakeApi(key: Uint8Array, rows: PushSubscriptionDto[] = []) {
+function fakeApi(key: Uint8Array, rows: PushSubscriptionDto[] = [], accountIds = [1, 2, 3]) {
 	const posted: PushSubscribeDto[] = [];
 	const removePushSubscription = vi.fn<(id: number) => Promise<void>>(() => Promise.resolve());
 	const api: PushApi & { posted: PushSubscribeDto[]; removed: typeof removePushSubscription } = {
 		posted,
 		removed: removePushSubscription,
+		accounts: () => Promise.resolve(accountIds.map((id) => ({ id }) as AccountDto)),
 		pushKey: () => Promise.resolve({ publicKey: base64url(key) }),
 		pushSubscriptions: () => Promise.resolve(rows),
 		subscribePush: (dto) => {
@@ -194,6 +197,58 @@ describe('syncPush', () => {
 			memoryPrefs({ ...SAVED, accountIds: null })
 		);
 		expect(api.posted[0]).not.toHaveProperty('accountIds');
+	});
+
+	it('leaves out accounts removed since the settings were saved', async () => {
+		const sub = new FakeSubscription('https://push.example/a', OLD_KEY);
+		const api = fakeApi(OLD_KEY, [], [1, 3]);
+		await syncPush(
+			asManager(new FakeManager(sub)),
+			api,
+			memoryPrefs({ ...SAVED, accountIds: [2, 3] })
+		);
+		expect(api.posted[0].accountIds).toEqual([3]);
+	});
+
+	it('falls back to all accounts when every saved account was removed', async () => {
+		const sub = new FakeSubscription('https://push.example/a', OLD_KEY);
+		const api = fakeApi(OLD_KEY, [], [1]);
+		const prefs = memoryPrefs(SAVED);
+		await syncPush(asManager(new FakeManager(sub)), api, prefs);
+		expect(api.posted[0]).not.toHaveProperty('accountIds');
+		expect(prefs.value).toMatchObject({ preview: false, accountIds: null });
+	});
+
+	it('registers without the account filter once when the server refuses it', async () => {
+		const sub = new FakeSubscription('https://push.example/a', OLD_KEY);
+		const api = fakeApi(OLD_KEY);
+		api.accounts = () => Promise.reject(new Error('offline'));
+		const accepting = fakeApi(OLD_KEY);
+		api.subscribePush = (dto) => {
+			api.posted.push(dto);
+			return dto.accountIds
+				? Promise.reject(Object.assign(new Error('unknown accounts'), refusal))
+				: accepting.subscribePush(dto);
+		};
+		const prefs = memoryPrefs(SAVED);
+		const mine = await syncPush(asManager(new FakeManager(sub)), api, prefs);
+		expect(api.posted).toMatchObject([{ accountIds: [2] }, { preview: false }]);
+		expect(api.posted[1]).not.toHaveProperty('accountIds');
+		expect(mine).toMatchObject({ preview: false, accountIds: null });
+		expect(prefs.value).toEqual({ ...SAVED, accountIds: null });
+	});
+
+	it('does not retry other failures', async () => {
+		const sub = new FakeSubscription('https://push.example/a', OLD_KEY);
+		const api = fakeApi(OLD_KEY);
+		api.subscribePush = (dto) => {
+			api.posted.push(dto);
+			return Promise.reject(Object.assign(new Error('bad keys'), { ...refusal, field: 'keys' }));
+		};
+		await expect(
+			syncPush(asManager(new FakeManager(sub)), api, memoryPrefs(SAVED))
+		).rejects.toThrow('bad keys');
+		expect(api.posted).toHaveLength(1);
 	});
 
 	it('names the saved endpoint when the browser renewed it unnoticed', async () => {
@@ -353,6 +408,26 @@ describe('fetchPushApi', () => {
 	it('fails on an error status', async () => {
 		const fetcher = () => Promise.resolve(new Response('', { status: 401 }));
 		await expect(fetchPushApi(fetcher).pushKey()).rejects.toThrow('401');
+	});
+
+	it('reports the status and the refused field', async () => {
+		const fetcher = () =>
+			Promise.resolve(
+				new Response(JSON.stringify({ error: 'invalid', message: 'x', field: 'accountIds' }), {
+					status: 422
+				})
+			);
+		await expect(
+			fetchPushApi(fetcher).subscribePush({ endpoint: 'https://push.example/a', keys: SAVED_KEYS })
+		).rejects.toMatchObject(refusal);
+	});
+
+	it('lists the accounts', async () => {
+		const fetcher = vi.fn<typeof fetch>(() =>
+			Promise.resolve(new Response(JSON.stringify({ accounts: [{ id: 4 }] })))
+		);
+		expect(await fetchPushApi(fetcher).accounts()).toEqual([{ id: 4 }]);
+		expect(fetcher.mock.calls[0][0]).toBe('/api/accounts');
 	});
 });
 

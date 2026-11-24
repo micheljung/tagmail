@@ -45,7 +45,10 @@
 		manager = registration?.pushManager ?? null;
 		if (availability === 'ready' && !manager) availability = 'unsupported';
 		if (manager && Notification.permission === 'granted')
-			mine = await syncPush(manager, api, pushPrefs);
+			mine = await syncPush(manager, api, pushPrefs).catch((e: unknown) => {
+				error = errorText(e);
+				return null;
+			});
 		await refresh();
 	}
 

@@ -4,6 +4,7 @@ import type {
 	PushSubscriptionDto,
 	PushSubscriptionPatchDto
 } from '../../../packages/api-types/src/index.ts';
+import { accountState } from './accounts.ts';
 import type { WriteContext } from './write.ts';
 
 /** Mock of `/api/push/*`; the key is a real P-256 point so browsers accept it. */
@@ -29,6 +30,14 @@ export function resetPush(): void {
 	nextId = 1;
 	posted = [];
 	tests = [];
+}
+
+/** Like a server before fix #2, which refused a POST naming a removed account. */
+const UNKNOWN_ACCOUNTS = { error: 'invalid', message: 'unknown accounts', field: 'accountIds' };
+
+function unknownAccounts(ids: number[] | null | undefined): boolean {
+	const known = new Set(accountState().accounts.map((a) => a.id));
+	return (ids ?? []).some((id) => !known.has(id));
 }
 
 const dto = (row: Row): PushSubscriptionDto => {
@@ -61,6 +70,7 @@ export async function pushApi(
 			return ok(422, { error: 'invalid', message: 'bad endpoint', field: 'endpoint' });
 		if (!body.keys?.p256dh || !body.keys?.auth)
 			return ok(422, { error: 'invalid', message: 'bad keys', field: 'keys.p256dh' });
+		if (unknownAccounts(body.accountIds)) return ok(422, UNKNOWN_ACCOUNTS);
 		const known = rows.find((r) => r.endpoint === body.endpoint);
 		if (known) {
 			known.current = true;
@@ -93,6 +103,7 @@ export async function pushApi(
 	}
 	if (method === 'PATCH') {
 		const patch = await json<PushSubscriptionPatchDto>();
+		if (unknownAccounts(patch.accountIds)) return ok(422, UNKNOWN_ACCOUNTS);
 		if (patch.preview !== undefined) row.preview = patch.preview;
 		if (patch.accountIds !== undefined) row.accountIds = patch.accountIds;
 		return ok(200, dto(row));
