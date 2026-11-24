@@ -86,8 +86,25 @@ jobs:
         run: |
           cargo xtask dovecot load --from "$SEED_DIR" --user user1
           cargo xtask dovecot load --from "$SEED2_DIR" --user user2
-      - name: Idle RSS gate
-        run: cargo xtask bench-rss --account user1:pass1 --account user2:pass2 --out target/bench-rss.json
+      - name: Install WebKitGTK and Xvfb for the desktop app
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev xvfb
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # tauri::generate_context! embeds web/build at compile time.
+      - run: pnpm --filter @tagmail/web run build
+      - name: Build the desktop app
+        run: cargo build --release --locked -p tagmail-desktop --features app,test-hooks
+      - name: Idle RSS gate, then the desktop replica (not gated)
+        run: >
+          cargo xtask bench-rss --account user1:pass1 --account user2:pass2
+          --desktop target/release/tagmail-desktop --out target/bench-rss.json
       - name: Upload result
         if: always()
         uses: actions/upload-artifact@v6

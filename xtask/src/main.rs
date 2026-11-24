@@ -3,6 +3,7 @@ mod bench_rss;
 mod bench_search;
 mod harness;
 mod probe_server;
+mod proc_tree;
 mod seed;
 
 use std::net::SocketAddr;
@@ -80,6 +81,13 @@ enum Command {
         /// (for Docker daemons whose published ports are unreachable)
         #[arg(long)]
         in_dovecot_network: bool,
+        /// `tagmail-desktop` built with `app,test-hooks`: after the gate it
+        /// pairs, bootstraps and idles under `xvfb-run` (reported, not gated)
+        #[arg(long)]
+        desktop: Option<PathBuf>,
+        /// Desktop idle period before its RSS is read
+        #[arg(long, default_value_t = 60)]
+        desktop_idle_secs: u64,
     },
     /// Search gate (AC 11): sync the seeded accounts with tagmail-server,
     /// run the named queries through the API and fail if the warm p95
@@ -227,6 +235,8 @@ fn main() -> Result<()> {
             sync_timeout_secs,
             out,
             in_dovecot_network,
+            desktop,
+            desktop_idle_secs,
         } => {
             if window_secs == 0 || window_secs > idle_secs {
                 bail!("--window-secs must be between 1 and --idle-secs");
@@ -240,6 +250,8 @@ fn main() -> Result<()> {
                 limit_mb,
                 sync_timeout: Duration::from_secs(sync_timeout_secs),
                 out,
+                desktop,
+                desktop_idle: Duration::from_secs(desktop_idle_secs),
             };
             if in_dovecot_network {
                 bench_rss::run_in_dovecot_network(&opts)?;

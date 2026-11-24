@@ -3,10 +3,12 @@
 //! streamed once to measure its size and the server's peak RSS, then
 //! imported by `tagmail-replica` as the desktop app does.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{ErrorKind, Read as _, Write as _};
 use std::net::TcpStream;
 use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,9 +17,15 @@ use serde_json::{Value, json};
 use tagmail_replica::{Layout, Phase, Replica, ServerClient, Settings};
 
 use crate::bench_rss::{Running, check_alive, http, proc_status_kib, reset_peak_rss};
+use crate::proc_tree;
 
 const SNAPSHOT_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const DEVICE_NAME: &str = "bench";
+const DESKTOP_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(1800);
+const POLL: Duration = Duration::from_secs(1);
+/// `comm` of the app's own process (15 characters, untruncated).
+const DESKTOP_PROCESS: &str = "tagmail-desktop";
+const WEBKIT_PREFIX: &str = "WebKit";
 
 pub(crate) struct Cost {
     pub(crate) ndjson_bytes: u64,
@@ -56,8 +64,8 @@ impl Cost {
     }
 }
 
-/// Pairs a device through the owner session; returns its bearer token.
-pub(crate) fn pair(running: &Running) -> Result<String> {
+/// A pairing code from the owner session.
+fn pairing_code(running: &Running) -> Result<String> {
     let (status, body) = http(
         running.addr,
         "POST",
@@ -69,7 +77,12 @@ pub(crate) fn pair(running: &Running) -> Result<String> {
         bail!("POST /api/pairing: {status} {body}");
     }
     let code: Value = serde_json::from_str(&body)?;
-    let code = code["code"].as_str().context("pairing code")?;
+    Ok(code["code"].as_str().context("pairing code")?.to_owned())
+}
+
+/// Pairs a device through the owner session; returns its bearer token.
+pub(crate) fn pair(running: &Running) -> Result<String> {
+    let code = pairing_code(running)?;
     let exchange = json!({ "code": code, "name": DEVICE_NAME }).to_string();
     let (status, body) = http(
         running.addr,
@@ -186,4 +199,119 @@ pub(crate) fn measure(running: &mut Running, pid: u32, work: &Path) -> Result<Co
         records,
         replica_disk_bytes: disk_bytes(&dir).context("measuring the replica")?,
     })
+}
+
+pub(crate) struct DesktopRun {
+    pub(crate) bootstrap_seconds: f64,
+    /// VmRSS per process name of the app's process tree after the idle.
+    pub(crate) rss_kib: BTreeMap<String, u64>,
+}
+
+impl DesktopRun {
+    fn rust_kib(&self) -> u64 {
+        self.rss_kib.get(DESKTOP_PROCESS).copied().unwrap_or(0)
+    }
+
+    fn webkit_kib(&self) -> u64 {
+        self.rss_kib
+            .iter()
+            .filter(|(name, _)| name.starts_with(WEBKIT_PREFIX))
+            .map(|(_, kib)| kib)
+            .sum()
+    }
+
+    pub(crate) fn json(&self) -> Value {
+        let mib = |kib: u64| crate::bench_rss::round(kib as f64 / 1024.0);
+        json!({
+            "bootstrapSeconds": crate::bench_rss::round(self.bootstrap_seconds),
+            "rustRssMib": mib(self.rust_kib()),
+            "webkitRssMib": mib(self.webkit_kib()),
+            "totalRssMib": mib(self.rust_kib() + self.webkit_kib()),
+            "processRssMib": self.rss_kib.iter().map(|(n, k)| (n.clone(), mib(*k))).collect::<BTreeMap<_, _>>(),
+        })
+    }
+
+    pub(crate) fn summary(&self) -> String {
+        let per_process: Vec<String> = self
+            .rss_kib
+            .iter()
+            .filter(|(name, _)| name.starts_with(WEBKIT_PREFIX))
+            .map(|(name, kib)| format!("{name} {:.1}", *kib as f64 / 1024.0))
+            .collect();
+        format!(
+            "bootstrap {:.1} s; RSS after idle: app {:.1} MiB + WebKit {:.1} MiB ({}) = {:.1} MiB",
+            self.bootstrap_seconds,
+            self.rust_kib() as f64 / 1024.0,
+            self.webkit_kib() as f64 / 1024.0,
+            per_process.join(", "),
+            (self.rust_kib() + self.webkit_kib()) as f64 / 1024.0,
+        )
+    }
+}
+
+/// Kills `root` and its descendants, children first.
+fn kill_tree(root: u32) {
+    let pids: Vec<String> = proc_tree::tree(root)
+        .unwrap_or_default()
+        .into_iter()
+        .rev()
+        .map(|(pid, _)| pid.to_string())
+        .collect();
+    let _ = Command::new("kill").args(&pids).status();
+}
+
+/// Starts the desktop app under `xvfb-run`, pairing it through
+/// `TAGMAIL_DESKTOP_PAIR`; waits for its first bootstrap to be installed,
+/// idles, and reads the RSS of its process tree.
+pub(crate) fn desktop(
+    running: &Running,
+    binary: &Path,
+    work: &Path,
+    idle: Duration,
+) -> Result<DesktopRun> {
+    let code = pairing_code(running)?;
+    let data = work.join("desktop-data");
+    let log = fs::File::create(work.join("desktop.log"))?;
+    let mut child = Command::new("xvfb-run")
+        .arg("-a")
+        .arg(binary)
+        .env("TAGMAIL_DESKTOP_DATA_DIR", &data)
+        .env(
+            "TAGMAIL_DESKTOP_PAIR",
+            format!("http://{},{code}", running.addr),
+        )
+        .stdin(Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log)
+        .spawn()
+        .context("starting the desktop app under xvfb-run")?;
+    let pid = child.id();
+    let result = (|| {
+        let started = Instant::now();
+        let replica = Layout::new(&data);
+        while !(replica.replica().join("cache.db").exists() && !replica.replica_tmp().exists()) {
+            if let Some(status) = child.try_wait()? {
+                bail!("the desktop app exited with {status}");
+            }
+            if started.elapsed() > DESKTOP_BOOTSTRAP_TIMEOUT {
+                bail!(
+                    "no bootstrap within {} s",
+                    DESKTOP_BOOTSTRAP_TIMEOUT.as_secs()
+                );
+            }
+            std::thread::sleep(POLL);
+        }
+        let bootstrap_seconds = started.elapsed().as_secs_f64();
+        std::thread::sleep(idle);
+        if let Some(status) = child.try_wait()? {
+            bail!("the desktop app exited with {status} while idle");
+        }
+        Ok(DesktopRun {
+            bootstrap_seconds,
+            rss_kib: proc_tree::tree_rss_kib(pid)?,
+        })
+    })();
+    kill_tree(pid);
+    let _ = child.wait();
+    result.with_context(|| format!("desktop log: {}", work.join("desktop.log").display()))
 }

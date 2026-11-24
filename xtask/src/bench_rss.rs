@@ -55,6 +55,9 @@ pub struct Options {
     pub limit_mb: u64,
     pub sync_timeout: Duration,
     pub out: PathBuf,
+    /// `tagmail-desktop` with `app,test-hooks`, measured after the gate.
+    pub desktop: Option<PathBuf>,
+    pub desktop_idle: Duration,
 }
 
 /// Builds static binaries and runs the benchmark in a container sharing the
@@ -391,6 +394,10 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
     let pass =
         sse_connected && window_max_kib * BYTES_PER_KIB <= opts.limit_mb * BYTES_PER_MB as u64;
     let replica = bench_replica::measure(&mut running, pid, work);
+    let desktop = opts
+        .desktop
+        .as_deref()
+        .map(|app| bench_replica::desktop(&running, app, work, opts.desktop_idle));
     stop(&mut running);
     let (replica_json, replica_row) = match replica {
         Ok(cost) => (cost.json(), cost.summary()),
@@ -407,6 +414,15 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
         }
     };
     println!("replica bootstrap (not gated): {replica_row}");
+    let (desktop_json, desktop_row) = match desktop {
+        None => (Value::Null, "not run (no --desktop)".to_owned()),
+        Some(Ok(run)) => (run.json(), run.summary()),
+        Some(Err(e)) => (
+            json!({ "error": format!("{e:#}") }),
+            format!("failed: {e:#}"),
+        ),
+    };
+    println!("desktop app (not gated): {desktop_row}");
     let sse_bytes = sse.reader.join().unwrap_or(0);
     let result = json!({
         "scenario": SCENARIO,
@@ -433,6 +449,7 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
         "renderPeakMib": round(mib(render.peak_kib)),
         "renderPeakDeltaMib": round(mib(render.peak_kib.saturating_sub(render.before_kib))),
         "replicaBootstrap": replica_json,
+        "desktop": desktop_json,
         "idleRssKib": samples.iter().map(|(_, kib)| kib).collect::<Vec<_>>(),
     });
     if let Some(dir) = opts.out.parent() {
@@ -467,7 +484,8 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
          | Open + render {HUGE_SUBJECT} | {:.1} ms |\n\
          | Peak RSS during render (not gated) | {:.1} MiB (+{:.1} MiB) |\n\
          | SSE connected through idle | {sse_connected} |\n\
-         | Replica bootstrap (not gated) | {replica_row} |\n",
+         | Replica bootstrap (not gated) | {replica_row} |\n\
+         | Desktop app (not gated) | {desktop_row} |\n",
         opts.window.as_secs(),
         mb(window_max_kib),
         mib(window_max_kib),

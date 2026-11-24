@@ -174,6 +174,15 @@ cargo xtask dovecot load --from target/seed2 --user user2
 cargo xtask bench-rss
 ```
 
+After the gate, still with the same server, it pairs a device and streams
+`/api/replica/snapshot` once (NDJSON bytes, seconds, server peak RSS), then
+imports it with `tagmail-replica` (seconds, records, disk). With
+`--desktop <tagmail-desktop built with app,test-hooks>` it also starts the
+app under `xvfb-run`, paired through `TAGMAIL_DESKTOP_PAIR`, waits for its
+first bootstrap, idles `--desktop-idle-secs` (60) and reads VmRSS of the
+app and its `WebKitWebProcess`/`WebKitNetworkProcess`. All of this is
+reported in `replicaBootstrap` and `desktop`, never gated.
+
 With a remote Docker daemon, `--in-dovecot-network` builds static binaries
 and runs the benchmark in the Dovecot container's network namespace. These
 binaries use musl's allocator, so their RSS is not comparable with the
