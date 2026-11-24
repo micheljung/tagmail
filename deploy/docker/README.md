@@ -28,8 +28,10 @@ sudo chmod 400 master.key
 Compose mounts a file secret with its host owner and mode, so the file must
 belong to uid 65532 for the server to read it. With rootless Docker or
 Podman, use the host uid that maps to 65532 in the container. Keep the key
-out of the data volume and back it up together with the volume: without it
-the stored passwords cannot be decrypted.
+out of the data volume and back it up too, but store it apart from the data
+backups, e.g. in a password manager ([backup](../../docs/backup.md)):
+without it the stored passwords cannot be decrypted, and anyone holding both
+can read them.
 
 ## Run with Compose
 

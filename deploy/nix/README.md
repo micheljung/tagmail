@@ -113,8 +113,10 @@ sudo sh -c 'umask 077; openssl rand -hex 32 > /etc/tagmail/master.key'
 ```
 
 or manage it with sops-nix or agenix and point `masterKeyFile` at the
-decrypted secret. Back it up together with `dataDir`
-([backup](../../docs/backup.md)): without it, the stored account passwords are lost.
+decrypted secret. Back it up too, but store it apart from the backups of
+`dataDir`, e.g. in a password manager ([backup](../../docs/backup.md)):
+without it the stored account passwords are lost, and anyone holding both
+can read them.
 
 ## Updating hashes
 
