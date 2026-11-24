@@ -172,7 +172,7 @@ impl Dispatcher {
     }
 
     async fn targets(&self) -> Option<(Vec<Target>, BTreeSet<String>)> {
-        match store::targets(&self.push.db).await {
+        match store::targets(&self.push.db, self.push.session_idle).await {
             Ok(found) => Some(found),
             Err(e) => {
                 tracing::error!(error = %e, "loading push subscriptions");
@@ -258,7 +258,7 @@ impl Dispatcher {
     }
 
     async fn send_test(&mut self, id: i64) {
-        match store::target_by_id(&self.push.db, id).await {
+        match store::target_by_id(&self.push.db, id, self.push.session_idle).await {
             Ok(Some(target)) => self.spawn_send(target, payload::test(), None),
             Ok(None) => {}
             Err(e) => tracing::error!(error = %e, "loading push subscription"),

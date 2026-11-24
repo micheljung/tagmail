@@ -172,6 +172,7 @@ impl Server {
             store.vault().clone(),
             config.auth.public_origin.as_ref(),
             tls.clone(),
+            config.auth.session_idle,
         );
         let dispatcher = push::dispatch::spawn(
             push.clone(),

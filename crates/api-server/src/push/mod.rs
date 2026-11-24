@@ -69,6 +69,7 @@ pub struct Push {
     policy: EndpointPolicy,
     resolver: Arc<dyn Resolver>,
     tls: rustls::ClientConfig,
+    session_idle: Duration,
     tests: mpsc::Sender<i64>,
     writes: RateLimiter,
     test_limit: RateLimiter<i64>,
@@ -83,6 +84,7 @@ impl Push {
         vault: Arc<Vault>,
         public_origin: Option<&Url>,
         tls: rustls::ClientConfig,
+        session_idle: Duration,
     ) -> (Arc<Push>, mpsc::Receiver<i64>) {
         let (tests, test_rx) = mpsc::channel(store::MAX_SUBSCRIPTIONS as usize);
         let push = Push {
@@ -91,6 +93,7 @@ impl Push {
             policy: config.policy,
             resolver: config.resolver.clone(),
             tls,
+            session_idle,
             tests,
             writes: RateLimiter::new(PUSH_WRITES, PUSH_WRITES_GLOBAL),
             test_limit: RateLimiter::new(PUSH_TESTS, PUSH_TESTS_GLOBAL),

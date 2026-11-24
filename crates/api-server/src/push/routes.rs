@@ -188,7 +188,7 @@ pub async fn subscribe(
         Ok(sub) => sub,
         Err(resp) => return *resp,
     };
-    match store::upsert(&state.push.db, session, sub).await {
+    match store::upsert(&state.push.db, session, sub, state.push.session_idle).await {
         Ok(Upserted::Created(dto)) => json(201, &dto),
         Ok(Upserted::Updated(dto)) => json(200, &dto),
         Ok(Upserted::TooMany) => error(

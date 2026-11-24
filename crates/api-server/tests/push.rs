@@ -20,8 +20,10 @@ use p256::elliptic_curve::Generate;
 use serde_json::{Value, json};
 use tagmail_api_core::Arrival;
 use tagmail_api_core::dto::AddressDto;
+use tagmail_api_server::auth::DEFAULT_SESSION_IDLE;
 use tagmail_api_server::outbound::{EndpointPolicy, Resolver};
 use tagmail_api_server::push::ece;
+use tagmail_api_server::push::store::MAX_SUBSCRIPTIONS;
 use tagmail_api_server::push::{PUSH_WRITES, PushConfig};
 use tagmail_api_server::{Config, Server};
 use tagmail_store::rusqlite::params;
@@ -494,6 +496,64 @@ async fn logout_deletes_the_subscription_and_stops_pushes() {
     server
         .feed()
         .publish_arrivals(vec![arrival(1, 1, "Alice", "Hi")]);
+    mock.quiet().await;
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn idle_sessions_get_no_pushes_and_hold_no_slots() {
+    let dirs = Dirs::new();
+    let server = Server::start(&dirs.config(loopback()), None).await.unwrap();
+    let idle = owner(&server).await;
+    let live = owner(&server).await;
+    add_accounts(&server, &[1]).await;
+    let mut mock = Mock::start().await;
+    let browser = Browser::new();
+    subscribed(
+        &idle,
+        &server,
+        &browser.subscription(&mock.endpoint("idle")),
+    )
+    .await;
+    let past_idle = DEFAULT_SESSION_IDLE.as_secs() as i64 + 60;
+    server
+        .store()
+        .config()
+        .write(move |tx| {
+            let session: Vec<u8> =
+                tx.query_row("SELECT session_hash FROM push_subscription", [], |r| {
+                    r.get(0)
+                })?;
+            tx.execute(
+                "UPDATE session SET last_seen_at = last_seen_at - ?2 WHERE id_hash = ?1",
+                params![session, past_idle],
+            )?;
+            for i in 1..MAX_SUBSCRIPTIONS {
+                tx.execute(
+                    "INSERT INTO push_subscription (session_hash, endpoint, p256dh, auth) \
+                     VALUES (?1, ?2, zeroblob(65), zeroblob(16))",
+                    params![session, format!("https://push.example/{i}")],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    server
+        .feed()
+        .publish_arrivals(vec![arrival(1, 1, "Alice", "Hi")]);
+    mock.quiet().await;
+
+    subscribed(
+        &live,
+        &server,
+        &browser.subscription(&mock.endpoint("live")),
+    )
+    .await;
+    server
+        .feed()
+        .publish_arrivals(vec![arrival(1, 2, "Alice", "Hi")]);
+    assert_eq!(mock.next().await.path, "/push/live");
     mock.quiet().await;
     server.shutdown().await.unwrap();
 }

@@ -3,6 +3,7 @@
 //! logout, revocation and expiry.
 
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use tagmail_api_core::push_dto::PushSubscriptionDto;
 use tagmail_store::rusqlite::{self, OptionalExtension, Row, params};
@@ -10,7 +11,7 @@ use tagmail_store::{ConfigDb, Error as StoreError};
 
 use crate::session::{self, TokenHash};
 
-/// Subscriptions over all sessions.
+/// Subscriptions over all live sessions.
 pub const MAX_SUBSCRIPTIONS: i64 = 20;
 /// Consecutive failed sends after which a subscription is dropped.
 pub const MAX_FAILURES: i64 = 10;
@@ -133,6 +134,7 @@ pub async fn upsert(
     db: &ConfigDb,
     session: TokenHash,
     sub: NewSubscription,
+    session_idle: Duration,
 ) -> Result<Upserted, StoreError> {
     db.write(move |tx| {
         let now = session::now();
@@ -184,8 +186,11 @@ pub async fn upsert(
                 } else {
                     old_ids.flatten()
                 };
-                let count: i64 =
-                    tx.query_row("SELECT count(*) FROM push_subscription", [], |r| r.get(0))?;
+                let count: i64 = tx.query_row(
+                    &format!("SELECT count(*) {LIVE_FROM}"),
+                    params![now, idle_secs(session_idle)],
+                    |r| r.get(0),
+                )?;
                 if count >= MAX_SUBSCRIPTIONS {
                     return Ok(Upserted::TooMany);
                 }
@@ -261,16 +266,28 @@ fn target(r: &Row<'_>) -> rusqlite::Result<Target> {
     })
 }
 
-const TARGET_SQL: &str = "SELECT p.id, p.endpoint, p.p256dh, p.auth, p.preview, p.account_ids \
-     FROM push_subscription p JOIN session s ON s.id_hash = p.session_hash \
-     WHERE s.expires_at > ?1";
+/// Rows whose session is neither expired nor idle; binds now as `?1` and
+/// the idle timeout in seconds as `?2`, like `session::session`.
+const LIVE_FROM: &str = "FROM push_subscription p JOIN session s ON s.id_hash = p.session_hash \
+     WHERE s.expires_at > ?1 AND s.last_seen_at > ?1 - ?2";
+
+fn idle_secs(idle: Duration) -> i64 {
+    i64::try_from(idle.as_secs()).unwrap_or(i64::MAX)
+}
+
+fn target_sql() -> String {
+    format!("SELECT p.id, p.endpoint, p.p256dh, p.auth, p.preview, p.account_ids {LIVE_FROM}")
+}
 
 /// Subscriptions of live sessions, and the owner's own addresses.
-pub async fn targets(db: &ConfigDb) -> Result<(Vec<Target>, BTreeSet<String>), StoreError> {
-    db.read(|conn| {
-        let mut stmt = conn.prepare(&format!("{TARGET_SQL} ORDER BY p.id"))?;
+pub async fn targets(
+    db: &ConfigDb,
+    session_idle: Duration,
+) -> Result<(Vec<Target>, BTreeSet<String>), StoreError> {
+    db.read(move |conn| {
+        let mut stmt = conn.prepare(&format!("{} ORDER BY p.id", target_sql()))?;
         let targets = stmt
-            .query_map([session::now()], target)?
+            .query_map(params![session::now(), idle_secs(session_idle)], target)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         if targets.is_empty() {
             return Ok((targets, BTreeSet::new()));
@@ -287,12 +304,16 @@ pub async fn targets(db: &ConfigDb) -> Result<(Vec<Target>, BTreeSet<String>), S
     .await
 }
 
-pub async fn target_by_id(db: &ConfigDb, id: i64) -> Result<Option<Target>, StoreError> {
+pub async fn target_by_id(
+    db: &ConfigDb,
+    id: i64,
+    session_idle: Duration,
+) -> Result<Option<Target>, StoreError> {
     db.read(move |conn| {
         Ok(conn
             .query_row(
-                &format!("{TARGET_SQL} AND p.id = ?2"),
-                params![session::now(), id],
+                &format!("{} AND p.id = ?3", target_sql()),
+                params![session::now(), idle_secs(session_idle), id],
                 target,
             )
             .optional()?)
