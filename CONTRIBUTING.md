@@ -52,3 +52,14 @@ After a visible UI change, regenerate them with
   obvious
 
 All contributions are licensed under the AGPL-3.0, the project's license.
+
+## Releases
+
+Set the same version in `Cargo.toml` (workspace), `desktop/src-tauri/tauri.conf.json`,
+`web/package.json` and `packages/api-types/package.json`, update `Cargo.lock`, and
+push a `v<version>` tag. The **Release** workflow then publishes the image,
+the server tarballs, the desktop installers and `SHA256SUMS`. Pre-release
+versions must be numeric (`1.2.0-1`, not `1.2.0-rc.1`), because the Windows MSI
+bundler rejects anything else; they are published as GitHub prereleases and
+do not move the `latest` image tag. Before a release, run
+[the desktop checklist](docs/dev/release-checklist.md).

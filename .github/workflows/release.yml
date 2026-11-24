@@ -71,6 +71,10 @@ jobs:
               echo "::error::version $version has build metadata, which image tags cannot carry"
               exit 1
               ;;
+            *-*[!0-9]*)
+              echo "::error::pre-release $version must be numeric (e.g. 1.2.0-1): the MSI bundler rejects anything else"
+              exit 1
+              ;;
           esac
           for v in "$cargo" "$tauri" "$web"; do
             if [ "$v" != "$version" ]; then
