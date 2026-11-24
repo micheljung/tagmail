@@ -603,6 +603,48 @@ async fn removing_an_account_purges_its_rows_and_reports_them() {
 }
 
 #[tokio::test]
+async fn removing_an_account_drops_it_from_push_account_filters() {
+    let (a, b) = (seeded("a", 1), seeded("b", 1));
+    let f = fixture(&[account(1, 2, &a), account(2, 2, &b)], config(|_| {})).await;
+    let filters = [Some("[2]"), Some("[1,2]"), Some("[2,1]"), Some("[1]"), None];
+    f.stores
+        .config
+        .write(move |tx| {
+            tx.execute(
+                "INSERT INTO session (id_hash, expires_at) VALUES (x'01', ?1)",
+                [i64::MAX],
+            )?;
+            for (n, ids) in filters.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO push_subscription (session_hash, endpoint, p256dh, auth, \
+                     preview, account_ids) VALUES (x'01', ?1, zeroblob(65), zeroblob(16), 0, ?2)",
+                    params![format!("https://push.example/{n}"), ids],
+                )?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+    f.engine.remove_account(AccountId(2)).await.unwrap();
+    let rows: Vec<(Option<String>, bool)> = f
+        .stores
+        .config
+        .read(|c| {
+            let mut stmt =
+                c.prepare("SELECT account_ids, preview FROM push_subscription ORDER BY id")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<tagmail_store::rusqlite::Result<_>>()?)
+        })
+        .await
+        .unwrap();
+    let ids: Vec<Option<&str>> = rows.iter().map(|(ids, _)| ids.as_deref()).collect();
+    assert_eq!(ids, [None, Some("[1]"), Some("[1]"), Some("[1]"), None]);
+    assert!(rows.iter().all(|(_, preview)| !preview));
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn stopping_an_account_does_not_wait_for_another_accounts_blob_writes() {
     let (a, b) = (seeded("a", 1), seeded("b", 1));
     let f = fixture(&[account(1, 2, &a), account(2, 2, &b)], config(|_| {})).await;

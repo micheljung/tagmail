@@ -58,34 +58,40 @@ fn limit_writes(
         .map_err(|wait| Box::new(rate_limited(wait, "too many changes; try again later")))
 }
 
-async fn valid_account_ids(push: &Push, ids: &[i64]) -> Result<Vec<i64>, Box<HttpResponse>> {
-    const FIELD: &str = "accountIds";
+const ACCOUNT_IDS: &str = "accountIds";
+
+fn account_id_set(ids: &[i64]) -> Result<Vec<i64>, Box<HttpResponse>> {
     if ids.is_empty() {
         return Err(Box::new(invalid(
-            FIELD,
+            ACCOUNT_IDS,
             "name at least one account, or none for all",
         )));
     }
     if ids.len() > MAX_ACCOUNT_IDS {
         return Err(Box::new(invalid(
-            FIELD,
+            ACCOUNT_IDS,
             format!("at most {MAX_ACCOUNT_IDS} accounts"),
         )));
     }
     let mut ids = ids.to_vec();
     ids.sort_unstable();
     ids.dedup();
+    Ok(ids)
+}
+
+async fn known_account_ids(push: &Push, ids: &[i64]) -> Result<Vec<i64>, Box<HttpResponse>> {
+    let ids = account_id_set(ids)?;
     match store::unknown_accounts(&push.db, ids.clone()).await {
         Ok(unknown) if unknown.is_empty() => Ok(ids),
         Ok(unknown) => Err(Box::new(invalid(
-            FIELD,
+            ACCOUNT_IDS,
             format!("unknown accounts {unknown:?}"),
         ))),
         Err(e) => Err(Box::new(internal(e))),
     }
 }
 
-async fn validate(
+fn validate(
     push: &Push,
     dto: PushSubscribeDto,
     headers: &HeaderMap,
@@ -108,10 +114,7 @@ async fn validate(
         .ok()
         .and_then(|a| a.try_into().ok())
         .ok_or_else(|| Box::new(invalid("keys.auth", "not 16 bytes of base64url")))?;
-    let account_ids = match &dto.account_ids {
-        Some(ids) => Some(valid_account_ids(push, ids).await?),
-        None => None,
-    };
+    let account_ids = dto.account_ids.as_deref().map(account_id_set).transpose()?;
     let user_agent = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
@@ -184,7 +187,7 @@ pub async fn subscribe(
         Ok(dto) => dto,
         Err(resp) => return *resp,
     };
-    let sub = match validate(&state.push, dto, &headers).await {
+    let sub = match validate(&state.push, dto, &headers) {
         Ok(sub) => sub,
         Err(resp) => return *resp,
     };
@@ -224,7 +227,7 @@ pub async fn patch(
         Err(resp) => return *resp,
     };
     let account_ids = match dto.account_ids {
-        Some(Some(ids)) => match valid_account_ids(&state.push, &ids).await {
+        Some(Some(ids)) => match known_account_ids(&state.push, &ids).await {
             Ok(ids) => Some(Some(ids)),
             Err(resp) => return *resp,
         },

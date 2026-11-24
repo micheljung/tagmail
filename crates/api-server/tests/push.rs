@@ -751,7 +751,6 @@ async fn subscriptions_are_validated_capped_and_rate_limited() {
         (field(json!({"keys": {"p256dh": "AAAA"}})), "keys.p256dh"),
         (field(json!({"keys": {"auth": "AAAA"}})), "keys.auth"),
         (field(json!({"accountIds": []})), "accountIds"),
-        (field(json!({"accountIds": [1, 999]})), "accountIds"),
     ] {
         let resp = subscribe(&c, &server, &body).await;
         assert_eq!(resp.status(), 422, "{body}");
@@ -802,6 +801,46 @@ async fn subscriptions_are_validated_capped_and_rate_limited() {
     }
     let limited = limited.expect("writes share one rate limit");
     assert!(limited.headers().contains_key("retry-after"));
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_re_post_drops_removed_accounts_and_a_patch_rejects_them() {
+    let dirs = Dirs::new();
+    let server = Server::start(&dirs.config(loopback()), None).await.unwrap();
+    let c = owner(&server).await;
+    add_accounts(&server, &[1, 2]).await;
+    let mock = Mock::start().await;
+    let browser = Browser::new();
+    let mut body = browser.subscription(&mock.endpoint("a"));
+    json_merge(&mut body, json!({"preview": false, "accountIds": [1, 999]}));
+    let created = subscribe(&c, &server, &body).await;
+    assert_eq!(created.status(), 201);
+    let created: Value = created.json().await.unwrap();
+    assert_eq!(created["accountIds"], json!([1]));
+
+    json_merge(&mut body, json!({"preview": null, "accountIds": [999]}));
+    let reposted = subscribe(&c, &server, &body).await;
+    assert_eq!(reposted.status(), 200);
+    let reposted: Value = reposted.json().await.unwrap();
+    assert_eq!(
+        (&reposted["preview"], &reposted["accountIds"]),
+        (&json!(false), &Value::Null),
+        "no known account left means all accounts"
+    );
+
+    let patched = c
+        .patch(url(
+            &server,
+            &format!("/api/push/subscriptions/{}", created["id"]),
+        ))
+        .json(&json!({"accountIds": [2, 999]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(patched.status(), 422);
+    let err: Value = patched.json().await.unwrap();
+    assert_eq!(err["field"], "accountIds");
     server.shutdown().await.unwrap();
 }
 

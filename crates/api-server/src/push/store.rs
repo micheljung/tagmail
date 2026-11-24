@@ -50,6 +50,7 @@ pub struct NewSubscription {
     pub p256dh: Vec<u8>,
     pub auth: [u8; 16],
     pub preview: Option<bool>,
+    /// Ids of removed accounts are dropped; none left means all accounts.
     pub account_ids: Option<Vec<i64>>,
     pub user_agent: Option<String>,
     pub old_endpoint: Option<String>,
@@ -72,7 +73,19 @@ pub enum Upserted {
 }
 
 fn account_ids_json(ids: Option<&[i64]>) -> Option<String> {
-    ids.map(|ids| serde_json::to_string(ids).expect("ids serialize"))
+    ids.filter(|ids| !ids.is_empty())
+        .map(|ids| serde_json::to_string(ids).expect("ids serialize"))
+}
+
+fn known_accounts(conn: &rusqlite::Connection, ids: Vec<i64>) -> rusqlite::Result<Vec<i64>> {
+    let mut stmt = conn.prepare("SELECT 1 FROM account WHERE id = ?1")?;
+    let mut known = Vec::with_capacity(ids.len());
+    for id in ids {
+        if stmt.exists([id])? {
+            known.push(id);
+        }
+    }
+    Ok(known)
 }
 
 fn parse_account_ids(json: Option<String>) -> rusqlite::Result<Option<Vec<i64>>> {
@@ -146,6 +159,11 @@ pub async fn upsert(
     session_idle: Duration,
 ) -> Result<Upserted, StoreError> {
     db.write(move |tx| {
+        let mut sub = sub;
+        sub.account_ids = sub
+            .account_ids
+            .map(|ids| known_accounts(tx, ids))
+            .transpose()?;
         let now = session::now();
         let existing: Option<i64> = tx
             .query_row(

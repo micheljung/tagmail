@@ -884,6 +884,14 @@ impl<F: ConnectorFactory> Engine<F> {
             .config
             .write(move |tx| {
                 tx.execute("DELETE FROM op_seen WHERE account_id = ?1", [id.0])?;
+                // A filter left empty means "all accounts", as before it was set.
+                tx.execute(
+                    "UPDATE push_subscription SET account_ids = \
+                     (SELECT CASE WHEN count(*) = 0 THEN NULL ELSE json_group_array(value) END \
+                      FROM json_each(account_ids) WHERE value != ?1) \
+                     WHERE EXISTS (SELECT 1 FROM json_each(account_ids) WHERE value = ?1)",
+                    [id.0],
+                )?;
                 tx.execute("DELETE FROM account WHERE id = ?1", [id.0])?;
                 Ok(())
             })
