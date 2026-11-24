@@ -698,7 +698,7 @@ async fn an_initial_sync_publishes_no_arrivals() {
 #[tokio::test]
 async fn only_new_unseen_recent_inbox_mail_arrives() {
     let now = now_secs();
-    let cases: [(&str, ServerChange); 4] = [
+    let cases: [(&str, ServerChange); 5] = [
         (
             "flag change",
             Box::new(|s| {
@@ -730,10 +730,33 @@ async fn only_new_unseen_recent_inbox_mail_arrives() {
                 );
             }),
         ),
+        (
+            "received over a day ago, whatever its Date header says",
+            Box::new(move |s| {
+                s.append(
+                    "INBOX",
+                    FakeMsg::new("n1@x", "Hi", "cat@x", "me@x", now).received(now - 2 * DAY),
+                );
+            }),
+        ),
     ];
     for (case, change) in cases {
         assert_eq!(arrivals_after(change).await, [], "{case}");
     }
+}
+
+#[tokio::test]
+async fn arrivals_are_dated_by_receipt_not_by_the_date_header() {
+    let received = now_secs() - 60;
+    let got = arrivals_after(|s| {
+        s.append(
+            "INBOX",
+            FakeMsg::new("n1@x", "Hi", "cat@x", "me@x", received - 3 * DAY).received(received),
+        );
+    })
+    .await;
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert_eq!(got[0].date, received);
 }
 
 #[tokio::test]

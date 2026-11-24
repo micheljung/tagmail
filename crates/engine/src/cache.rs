@@ -358,7 +358,7 @@ impl<'a> W<'a> {
             thread_id,
             from: m.from.first().cloned(),
             subject: m.subject.clone(),
-            date: m.date,
+            date: m.received,
         });
         Ok(())
     }
@@ -898,7 +898,7 @@ pub fn add_messages(w: &mut W<'_>, mailbox: i64, fetched: &[Fetched]) -> Result<
             )
             .optional()?;
         let unseen_recent = !f.location.flags.contains(Flags::SEEN)
-            && m.date >= w.now_ms / MS_PER_SEC - ARRIVAL_MAX_AGE_SECS;
+            && m.received >= w.now_ms / MS_PER_SEC - ARRIVAL_MAX_AGE_SECS;
         let id = match existing {
             Some((id, tombstoned, snippet)) => {
                 if tombstoned.is_some() {

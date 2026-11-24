@@ -152,6 +152,7 @@ impl Msg {
                 in_reply_to: self.refs.last().map(|r| format!("{r}@test")),
                 refs: self.refs.iter().map(|r| format!("{r}@test")).collect(),
                 date: 1_700_000_000 + self.day * 86_400,
+                received: 1_700_000_000 + self.day * 86_400,
                 subject: Some(self.subject.to_owned()),
                 subject_norm: normalize_subject(self.subject),
                 from: vec![addr(self.from)],

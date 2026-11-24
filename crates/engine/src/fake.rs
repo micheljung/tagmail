@@ -26,6 +26,8 @@ pub struct FakeMsg {
     pub from: String,
     pub to: String,
     pub date: i64,
+    /// INTERNALDATE when it differs from `date`.
+    pub received: Option<i64>,
     pub refs: Vec<String>,
     pub body: String,
     pub flags: Vec<Flag>,
@@ -43,6 +45,7 @@ impl FakeMsg {
             from: from.to_owned(),
             to: to.to_owned(),
             date,
+            received: None,
             refs: Vec::new(),
             body: format!("Body of {id}"),
             flags: Vec::new(),
@@ -77,6 +80,7 @@ impl FakeMsg {
             from: first(m.from()),
             to: first(m.to()),
             date: m.date().map_or(0, |d| d.to_timestamp()),
+            received: None,
             refs,
             body: m.body_text(0).unwrap_or_default().into_owned(),
             flags: flags.to_vec(),
@@ -92,6 +96,11 @@ impl FakeMsg {
 
     pub fn flags(mut self, flags: &[Flag]) -> FakeMsg {
         self.flags = flags.to_vec();
+        self
+    }
+
+    pub fn received(mut self, at: i64) -> FakeMsg {
+        self.received = Some(at);
         self
     }
 
@@ -489,7 +498,7 @@ impl FakeSession {
             meta.header_fields = Some(lines.into_bytes());
         }
         if full {
-            meta.internal_date = Some(m.date);
+            meta.internal_date = Some(m.received.unwrap_or(m.date));
             meta.size = Some(u32::try_from(m.body.len() + 200).unwrap_or(u32::MAX));
             meta.envelope = Some(Envelope {
                 date: Some(m.date_header().into_bytes()),

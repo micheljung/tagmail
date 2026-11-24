@@ -30,6 +30,9 @@ pub struct NewMessage {
     pub refs: Vec<String>,
     /// Unix seconds: `Date` header, else INTERNALDATE.
     pub date: i64,
+    /// Unix seconds the server received it: INTERNALDATE, else `date`.
+    /// Unlike the `Date` header, the sender cannot choose it.
+    pub received: i64,
     pub subject: Option<String>,
     pub subject_norm: String,
     pub from: Vec<AddressDto>,
@@ -273,6 +276,7 @@ fn new_message(meta: &MessageMeta) -> NewMessage {
         in_reply_to,
         refs,
         date,
+        received: meta.internal_date.unwrap_or(date),
         subject_norm: subject
             .as_deref()
             .map(normalize_subject)

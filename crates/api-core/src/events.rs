@@ -29,7 +29,8 @@ pub struct Arrival {
     pub thread_id: Option<i64>,
     pub from: Option<AddressDto>,
     pub subject: Option<String>,
-    /// Unix seconds.
+    /// Unix seconds the server received it (INTERNALDATE), not the
+    /// sender-chosen `Date` header.
     pub date: i64,
 }
 
