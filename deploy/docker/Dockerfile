@@ -62,7 +62,7 @@ COPY .cargo .cargo
 COPY crates crates
 COPY desktop/src-tauri desktop/src-tauri
 COPY xtask xtask
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry-$TARGETARCH \
     --mount=type=cache,target=/src/target,id=tagmail-target-$TARGETARCH \
     cargo zigbuild --release --locked --target "$(cat /target)" \
       -p tagmail-api-server --bin tagmail-server \
