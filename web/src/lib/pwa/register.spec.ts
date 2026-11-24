@@ -87,6 +87,15 @@ describe('registerServiceWorker', () => {
 		expect(reload).not.toHaveBeenCalled();
 	});
 
+	it('offers no update when the first install claims the page before "installed" is seen', async () => {
+		const { container, updates } = await setup(false);
+		const worker = new FakeWorker();
+		container.registration.install(worker);
+		container.controller = {};
+		worker.moveTo('installed');
+		expect(updates).toHaveLength(0);
+	});
+
 	it('offers an installed update and reloads once after it takes over', async () => {
 		const { container, updates, reload } = await setup(true);
 		const worker = new FakeWorker();
