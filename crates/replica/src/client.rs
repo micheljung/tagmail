@@ -33,6 +33,19 @@ pub enum ClientError {
     Status { status: u16 },
     #[error("unexpected server response: {0}")]
     Decode(String),
+    #[error("the server address must use https: {0}")]
+    Insecure(String),
+}
+
+/// Plain http only reaches this machine.
+pub fn is_secure(server: &Url) -> bool {
+    match (server.scheme(), server.host()) {
+        ("https", _) => true,
+        ("http", Some(url::Host::Domain(d))) => d.eq_ignore_ascii_case("localhost"),
+        ("http", Some(url::Host::Ipv4(ip))) => ip.is_loopback(),
+        ("http", Some(url::Host::Ipv6(ip))) => ip.is_loopback(),
+        _ => false,
+    }
 }
 
 pub type ClientResult<T> = Result<T, ClientError>;
@@ -72,6 +85,9 @@ pub struct ServerClient {
 
 impl ServerClient {
     pub fn new(server: &Url, token: Option<String>) -> ClientResult<ServerClient> {
+        if !is_secure(server) {
+            return Err(ClientError::Insecure(server.to_string()));
+        }
         let mut base = server.clone();
         if !base.path().ends_with('/') {
             base.set_path(&format!("{}/", base.path()));
@@ -364,5 +380,22 @@ pub(crate) mod tests {
             req.url().as_str(),
             "https://example.org/tagmail/api/version"
         );
+    }
+
+    #[test]
+    fn plain_http_only_to_this_machine() {
+        let secure = |s: &str| is_secure(&Url::parse(s).unwrap());
+        assert!(secure("https://mail.example"));
+        assert!(secure("http://localhost:8080"));
+        assert!(secure("http://127.0.0.2/"));
+        assert!(secure("http://[::1]:9000/"));
+        assert!(!secure("http://mail.example"));
+        assert!(!secure("http://192.168.1.2"));
+        assert!(!secure("http://localhost.evil.example"));
+        assert!(!secure("ftp://localhost"));
+        assert!(matches!(
+            ServerClient::new(&Url::parse("http://mail.example").unwrap(), None),
+            Err(ClientError::Insecure(_))
+        ));
     }
 }

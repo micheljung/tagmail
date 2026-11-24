@@ -220,7 +220,7 @@ impl Durable {
     pub fn retry_intent(&self, op_id: &str) -> Result<bool> {
         Ok(self.conn().execute(
             "UPDATE intent SET state = 'pending', attempts = 0, next_at = NULL, error = NULL, \
-             created_at = max(created_at, ?2) WHERE op_id = ?1 AND state = 'failed'",
+             created_at = max(created_at, ?2) WHERE op_id = ?1 AND state = 'failed' AND other_server = 0",
             params![op_id, crate::sync::now() - INTENT_TTL_SECS + 1],
         )? == 1)
     }

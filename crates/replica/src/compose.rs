@@ -20,6 +20,7 @@ use tagmail_api_core::identities::{IdentityPatch, NewIdentity};
 use tagmail_api_core::store::BoxFuture;
 use tagmail_store::changes::{self, ChangeOp, Entity, NewChange};
 
+use crate::durable::FROM_OTHER_SERVER;
 use crate::sync::{Replica, now};
 
 /// Edits settle this long before a draft is saved on the server.
@@ -56,6 +57,7 @@ pub struct Draft {
     pub synced_version: Option<i64>,
     pub sync_error: Option<String>,
     pub deleted: bool,
+    pub other_server: bool,
 }
 
 impl Draft {
@@ -136,7 +138,7 @@ pub struct OutboxRow {
 }
 
 const DRAFT_COLUMNS: &str = "id, client_id, server_draft_id, account_id, content, version, \
-     updated_at, synced_version, sync_error, deleted_at";
+     updated_at, synced_version, sync_error, deleted_at, other_server";
 
 fn draft_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Draft> {
     let content: String = r.get(4)?;
@@ -153,6 +155,7 @@ fn draft_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Draft> {
         synced_version: r.get(7)?,
         sync_error: r.get(8)?,
         deleted: r.get::<_, Option<i64>>(9)?.is_some(),
+        other_server: r.get(10)?,
     })
 }
 
@@ -683,6 +686,9 @@ impl Replica {
                 });
             }
             let d = draft_by_id(&tx, draft_id)?.ok_or(ComposeError::NotFound("draft"))?;
+            if d.other_server {
+                return Err(ComposeError::Conflict(FROM_OTHER_SERVER.into()));
+            }
             if d.content.to.is_empty() && d.content.cc.is_empty() && d.content.bcc.is_empty() {
                 return Err(invalid("to", "the draft has no recipients"));
             }
@@ -746,6 +752,10 @@ impl Replica {
             return Err(ComposeError::Conflict(
                 "only failed items can be retried".into(),
             ));
+        }
+        if draft_by_client_id(&self.durable().conn(), &o.client_id)?.is_some_and(|d| d.other_server)
+        {
+            return Err(ComposeError::Conflict(FROM_OTHER_SERVER.into()));
         }
         let state = if self.retry_on_server(&o.op_id).await? {
             OutboxState::Submitted

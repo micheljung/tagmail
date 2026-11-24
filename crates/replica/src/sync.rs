@@ -15,7 +15,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast, watch};
 use crate::bootstrap;
 use crate::client::{ClientError, ServerClient};
 use crate::db::{self, Expected, Layout, Opened};
-use crate::durable::Durable;
+use crate::durable::{Binding, Durable};
 use crate::error::{Error, Result};
 use crate::events::{self, Doorbell};
 use crate::import::Arrival;
@@ -97,6 +97,9 @@ impl Replica {
     ) -> Result<Arc<Replica>> {
         std::fs::create_dir_all(layout.root())?;
         let durable = Durable::open(&layout.durable())?;
+        if durable.bind_server(client.server())? == Binding::Changed {
+            tracing::warn!(server = %client.server(), "paired with another server; earlier unsent changes stay local");
+        }
         let (store, cursor) = match db::open(&layout, Expected::current(), None)? {
             Opened::Ready(dbs) => {
                 let (store, meta) = dbs.into_store().await?;

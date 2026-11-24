@@ -5,10 +5,17 @@ use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
 use rusqlite::{Connection, OptionalExtension, params};
+use url::Url;
 
 use crate::error::{Error, Result};
 
-const MIGRATIONS: &[&str] = &[include_str!("../migrations/durable/V1__init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../migrations/durable/V1__init.sql"),
+    include_str!("../migrations/durable/V2__server_binding.sql"),
+];
+
+const BOUND_SERVER_KEY: &str = "bound_server";
+pub const FROM_OTHER_SERVER: &str = "From another server";
 
 pub const DURABLE_SCHEMA: i64 = MIGRATIONS.len() as i64;
 
@@ -16,6 +23,22 @@ const BUSY_TIMEOUT_MS: i64 = 5000;
 
 pub struct Durable {
     conn: Mutex<Connection>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Binding {
+    /// First pairing, or the same server again: everything is kept.
+    Bound,
+    /// Another server: open intents and unsent mail failed, drafts kept
+    /// locally only.
+    Changed,
+}
+
+/// The server's identity: scheme, host, port and path, without a trailing
+/// slash, query or fragment.
+pub fn server_identity(server: &Url) -> String {
+    let path = server.path().trim_end_matches('/');
+    format!("{}{path}", server.origin().ascii_serialization())
 }
 
 impl Durable {
@@ -48,6 +71,51 @@ impl Durable {
             .conn()
             .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
             .optional()?)
+    }
+
+    /// Binds the durable rows to `server`. On a change of server, every
+    /// open intent and unsent outbox item fails with [`FROM_OTHER_SERVER`]
+    /// and the drafts lose their server ids and stay local.
+    pub fn bind_server(&self, server: &Url) -> Result<Binding> {
+        let identity = server_identity(server);
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let bound: Option<String> = tx
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [BOUND_SERVER_KEY],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let binding = match bound {
+            Some(b) if b != identity => {
+                tx.execute(
+                    "UPDATE intent SET other_server = 1, state = 'failed', error = ?1, next_at = NULL
+                     WHERE state IN ('pending', 'sent')",
+                    [FROM_OTHER_SERVER],
+                )?;
+                tx.execute("UPDATE intent SET other_server = 1", [])?;
+                tx.execute(
+                    "UPDATE outbox SET state = 'failed', error = ?1, next_at = NULL
+                     WHERE state != 'sent'",
+                    [FROM_OTHER_SERVER],
+                )?;
+                tx.execute(
+                    "UPDATE draft SET other_server = 1, server_draft_id = NULL, synced_version = NULL",
+                    [],
+                )?;
+                tx.execute("UPDATE draft_attachment SET server_upload_id = NULL", [])?;
+                Binding::Changed
+            }
+            _ => Binding::Bound,
+        };
+        tx.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![BOUND_SERVER_KEY, identity],
+        )?;
+        tx.commit()?;
+        Ok(binding)
     }
 
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
@@ -112,6 +180,48 @@ mod tests {
             })
             .unwrap();
         assert_eq!(state, "pending");
+    }
+
+    #[test]
+    fn a_server_is_known_by_origin_and_path() {
+        let id = |s: &str| server_identity(&Url::parse(s).unwrap());
+        assert_eq!(id("https://Mail.Example:443/"), "https://mail.example");
+        assert_eq!(
+            id("https://mail.example/tm/"),
+            id("https://mail.example/tm")
+        );
+        assert_ne!(id("https://mail.example"), id("https://mail.example:8443"));
+        assert_ne!(id("https://mail.example"), id("https://other.example"));
+    }
+
+    #[test]
+    fn binding_to_another_server_fails_open_work_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let durable = Durable::open(&dir.path().join("d.db")).unwrap();
+        let a = Url::parse("https://a.example/").unwrap();
+        let b = Url::parse("https://b.example/").unwrap();
+        assert_eq!(durable.bind_server(&a).unwrap(), Binding::Bound);
+        durable
+            .conn()
+            .execute(
+                "INSERT INTO intent (op_id, seq, kind, account_id, email_ids, created_at, state)
+                 VALUES ('op-1', 1, 'archive', 7, '[]', 0, 'sent')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(durable.bind_server(&a).unwrap(), Binding::Bound);
+        assert_eq!(durable.bind_server(&b).unwrap(), Binding::Changed);
+        let (state, error, other): (String, String, bool) = durable
+            .conn()
+            .query_row("SELECT state, error, other_server FROM intent", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })
+            .unwrap();
+        assert_eq!(
+            (state.as_str(), error.as_str(), other),
+            ("failed", FROM_OTHER_SERVER, true)
+        );
+        assert_eq!(durable.bind_server(&b).unwrap(), Binding::Bound);
     }
 
     #[test]

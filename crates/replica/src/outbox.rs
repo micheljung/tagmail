@@ -18,6 +18,7 @@ use crate::client::ClientError;
 use crate::compose::{
     self, DRAFT_DEBOUNCE, Draft, OutboxRow, OutboxState, delete_draft_row, remove_files,
 };
+use crate::durable::FROM_OTHER_SERVER;
 use crate::error::{Error, Result};
 use crate::sync::{Replica, now};
 
@@ -129,6 +130,7 @@ impl Replica {
         let settled = now() - DRAFT_DEBOUNCE.as_secs() as i64;
         for d in drafts.iter().filter(|d| {
             !d.deleted
+                && !d.other_server
                 && d.dirty()
                 && !queued.contains(&d.client_id)
                 && (d.updated_at <= settled || d.content.save_now)
@@ -343,6 +345,11 @@ impl Replica {
         let Some(d) = compose::draft_by_client_id(&self.durable().conn(), &o.client_id)? else {
             return Ok(());
         };
+        if d.other_server {
+            return self
+                .set_outbox(o, OutboxState::Failed, Some(FROM_OTHER_SERVER), None)
+                .await;
+        }
         self.durable().conn().execute(
             "UPDATE outbox SET attempts = attempts + 1 WHERE id = ?1",
             [o.id],

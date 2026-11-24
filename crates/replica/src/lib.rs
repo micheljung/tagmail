@@ -25,7 +25,7 @@ pub mod writes;
 pub use client::{ClientError, Link, ServerClient};
 pub use compose::DesktopCompose;
 pub use db::{Discard, Expected, Layout, LocalDbs, Opened, ReplicaMeta};
-pub use durable::Durable;
+pub use durable::{Binding, Durable};
 pub use error::{Error, Result};
 pub use router::Router;
 pub use sync::{Phase, Replica, ReplicaEvent, Settings};
