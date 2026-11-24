@@ -30,6 +30,7 @@ use crate::sync::{Replica, now};
 const RETRY_BASE_SECS: i64 = 5;
 const RETRY_MAX_SECS: i64 = 600;
 pub const DISCARDED_ON_SERVER: &str = "discarded on the server";
+pub const NOT_ON_SERVER: &str = "No longer on the server";
 
 /// The keyword a label intent projects: the account's spelling, else the
 /// label encoded as a new keyword.
@@ -434,22 +435,9 @@ impl Replica {
                 "api/ops/{}",
                 percent_encoding::utf8_percent_encode(&i.op_id, percent_encoding::NON_ALPHANUMERIC)
             );
-            let verdict = match self.client().get_json::<OpDto>(&path).await {
-                Ok(op) => match op.status {
-                    OpStatusDto::Pending => None,
-                    OpStatusDto::Done => Some((IntentState::Done, None)),
-                    OpStatusDto::Failed => Some((IntentState::Failed, op.error)),
-                },
-                Err(ClientError::Api { status: 404, .. } | ClientError::Status { status: 404 }) => {
-                    Some((IntentState::Done, None))
-                }
-                Err(
-                    e @ (ClientError::Offline(_) | ClientError::Unauthorized | ClientError::Gone),
-                ) => return Ok(Some(e)),
-                Err(e) => {
-                    tracing::debug!(op = %i.op_id, error = %e, "op verdict unknown");
-                    None
-                }
+            let verdict = match op_verdict(self.client().get_json::<OpDto>(&path).await) {
+                Ok(verdict) => verdict,
+                Err(e) => return Ok(Some(e)),
             };
             match verdict {
                 Some((state, error)) => {
@@ -673,9 +661,44 @@ impl WriteService for DesktopWrites {
     }
 }
 
+type Verdict = Option<(IntentState, Option<String>)>;
+
+/// The verdict of `GET /api/ops/{opId}`, or the error that stops the flush.
+/// The server forgets pending ops it discards, so a missing op failed.
+fn op_verdict(
+    answer: std::result::Result<OpDto, ClientError>,
+) -> std::result::Result<Verdict, ClientError> {
+    Ok(match answer {
+        Ok(op) => match op.status {
+            OpStatusDto::Pending => None,
+            OpStatusDto::Done => Some((IntentState::Done, None)),
+            OpStatusDto::Failed => Some((IntentState::Failed, op.error)),
+        },
+        Err(ClientError::Api { status: 404, .. } | ClientError::Status { status: 404 }) => {
+            Some((IntentState::Failed, Some(NOT_ON_SERVER.to_owned())))
+        }
+        Err(e @ (ClientError::Offline(_) | ClientError::Unauthorized | ClientError::Gone)) => {
+            return Err(e);
+        }
+        Err(e) => {
+            tracing::debug!(error = %e, "op verdict unknown");
+            None
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_op_the_server_no_longer_knows_failed() {
+        let verdict = op_verdict(Err(ClientError::Status { status: 404 })).unwrap();
+        assert_eq!(
+            verdict,
+            Some((IntentState::Failed, Some(NOT_ON_SERVER.to_owned())))
+        );
+    }
 
     #[test]
     fn backoff_grows_and_caps() {
