@@ -15,7 +15,8 @@ async function expectScreenshot(
 	testInfo: TestInfo
 ): Promise<void> {
 	const before = cspViolations.length;
-	await expect(page).toHaveScreenshot(name, SCREENSHOT);
+	// The message body renders in the host's own sans-serif, which differs between machines.
+	await expect(page).toHaveScreenshot(name, { ...SCREENSHOT, mask: [page.locator('iframe')] });
 	if (testInfo.project.name !== 'webkit') return;
 	// WebKit's inspector injects an inline style element while it captures.
 	const during = cspViolations.splice(before);
