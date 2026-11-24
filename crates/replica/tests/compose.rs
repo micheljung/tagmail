@@ -207,3 +207,81 @@ async fn a_draft_without_recipients_is_not_sent() {
     assert!(compose.send("send-2".into(), draft.id).await.is_err());
     assert!(compose.outbox().await.unwrap().is_empty());
 }
+
+async fn mark_sent_on_server(f: &Fixture, op_id: &'static str) {
+    for _ in 0..200 {
+        let changed = f
+            .server
+            .store()
+            .config()
+            .write(move |tx| {
+                Ok(tx.execute(
+                    "UPDATE outbox SET state = 'sent' WHERE op_id = ?1 AND state != 'sending'",
+                    [op_id],
+                )?)
+            })
+            .await
+            .unwrap();
+        if changed == 1 {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("the server outbox item stays in flight");
+}
+
+async fn outbox_changes(replica: &Replica) -> Vec<(String, Option<String>)> {
+    replica
+        .store()
+        .unwrap()
+        .cache()
+        .read(|c| {
+            let mut stmt = c.prepare(
+                "SELECT op, payload FROM change_log WHERE entity = 'outbox' ORDER BY seq",
+            )?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(rows)
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_finished_send_is_published_as_sent() {
+    let f = Fixture::start().await;
+    let replica = f.replica().await;
+    let compose = DesktopCompose(Arc::clone(&replica));
+    let me = identity(&compose).await;
+    let draft = compose
+        .create_draft(input(me, "Done", Vec::new()))
+        .await
+        .unwrap()
+        .draft;
+    compose.send("send-3".into(), draft.id).await.unwrap();
+    replica.flush().await.unwrap();
+    mark_sent_on_server(&f, "send-3").await;
+    replica
+        .durable()
+        .conn()
+        .execute("UPDATE outbox SET state = 'submitted'", [])
+        .unwrap();
+
+    replica.flush().await.unwrap();
+
+    assert!(compose.outbox().await.unwrap().is_empty());
+    let changes = outbox_changes(&replica).await;
+    let sent = changes
+        .iter()
+        .position(|(op, p)| {
+            op == "upsert"
+                && p.as_deref()
+                    .is_some_and(|p| serde_json::from_str::<Value>(p).unwrap()["status"] == "sent")
+        })
+        .unwrap_or_else(|| panic!("no sent change in {changes:?}"));
+    assert!(
+        changes[sent + 1..].iter().all(|(op, _)| op == "delete"),
+        "{changes:?}"
+    );
+}

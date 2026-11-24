@@ -333,6 +333,8 @@ impl Replica {
             files
         };
         remove_files(files);
+        self.publish_outbox(o.id, Some((OutboxState::Sent, None)))
+            .await;
         self.publish_outbox(o.id, None).await;
         Ok(())
     }
