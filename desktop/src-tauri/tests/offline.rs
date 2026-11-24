@@ -428,10 +428,8 @@ async fn the_desktop_works_offline_and_sends_exactly_once() {
     stack.start().await;
     step("online").unwrap();
     let online = next_probe(&mut app, "online", ONLINE).await;
-    assert!(
-        [json!([]), json!(["sent"])].contains(&online["outbox"]),
-        "{online}"
-    );
+    assert_eq!(online["sentSeen"], true, "{online}");
+    assert_eq!(online["outbox"], json!([]), "{online}");
     eventually("the first send in Mailpit", SYNC, || async {
         mailpit_count(FIRST).await >= 1
     })

@@ -12,6 +12,23 @@ const SENT_WAIT_MS = 120_000;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const post = { 'content-type': 'application/json', 'x-requested-with': 'tagmail' };
 
+const sentIds = new Set();
+
+async function watchSent() {
+  const internals = window.__TAURI_INTERNALS__;
+  await internals.invoke('plugin:event|listen', {
+    event: 'api:changes',
+    target: { kind: 'Any' },
+    handler: internals.transformCallback((e) => {
+      for (const c of e.payload.changes) {
+        if (c.entity === 'outbox' && c.op.kind !== 'delete' && c.payload?.status === 'sent') {
+          sentIds.add(c.id);
+        }
+      }
+    }),
+  });
+}
+
 async function step(name) {
   while ((await fetch(`/__probe/step?name=${name}`)).status !== 200) await sleep(200);
 }
@@ -92,15 +109,25 @@ async function send(which) {
     send: sent.status,
     error: sent.ok ? null : await sent.json(),
     outbox: await outbox(which),
+    ids: await outboxIds(which),
   };
 }
 
-async function outbox(which) {
+async function items(which) {
   const { items } = await (await fetch('/api/outbox')).json();
-  return items.filter((i) => i.opId === SENDS[which].opId).map((i) => i.status);
+  return items.filter((i) => i.opId === SENDS[which].opId);
+}
+
+async function outbox(which) {
+  return (await items(which)).map((i) => i.status);
+}
+
+async function outboxIds(which) {
+  return (await items(which)).map((i) => i.id);
 }
 
 async function run() {
+  await watchSent();
   await step('offline');
   const inbox = await view('inbox');
   const rows = inbox.ids.length
@@ -108,25 +135,22 @@ async function run() {
     : [];
   const recent = rows.find((r) => r.subject === RECENT);
   const old = rows.find((r) => r.subject === OLD);
-  await report({
+  const offline = {
     stage: 'offline',
     subjects: rows.map((r) => r.subject),
     recent: recent ? await open(recent.id) : null,
     old: old ? await open(old.id) : null,
     searchRecent: { ...(await view('search:seagull')), want: recent?.id ?? null },
     searchOld: await view('search:lighthouse'),
-    send: await send('first'),
-  });
+  };
+  const first = await send('first');
+  await report({ ...offline, send: first });
 
   await step('online');
   const deadline = Date.now() + SENT_WAIT_MS;
-  let states = await outbox('first');
-  // A finished send leaves the list of unsynced work or shows as sent.
-  while (states.some((s) => s !== 'sent') && Date.now() < deadline) {
-    await sleep(500);
-    states = await outbox('first');
-  }
-  await report({ stage: 'online', outbox: states });
+  const seen = () => first.ids?.length > 0 && first.ids.every((id) => sentIds.has(id));
+  while (!seen() && Date.now() < deadline) await sleep(500);
+  await report({ stage: 'online', sentSeen: seen(), outbox: await outbox('first') });
 
   await step('offline2');
   await report({ stage: 'offline2', send: await send('second') });
