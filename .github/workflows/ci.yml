@@ -16,6 +16,58 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  required-files:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Project files
+        run: |
+          status=0
+          for f in LICENSE README.md CONTRIBUTING.md SECURITY.md \
+            docs/install.md docs/backup.md docs/servers.md \
+            docs/security.md docs/architecture.md docs/shortcuts.md; do
+            if [ ! -s "$f" ]; then
+              echo "::error file=$f::$f is missing or empty"
+              status=1
+            fi
+          done
+          # SHA-256 of https://www.gnu.org/licenses/agpl-3.0.txt
+          agpl=0d96a4ff68ad6d4b6f1f30f713b18d5184912ba8dd389f86aa7710db079abcb0
+          if [ -f LICENSE ] && ! echo "$agpl  LICENSE" | sha256sum -c --quiet; then
+            echo "::error file=LICENSE::LICENSE is not the AGPL-3.0 text"
+            status=1
+          fi
+          exit $status
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Internal links, anchors and images
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          lycheeVersion: v0.24.2
+          args: >-
+            --offline --include-fragments --no-progress
+            README.md CONTRIBUTING.md SECURITY.md 'docs/**/*.md'
+          jobSummary: false
+
+  docs-external:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v7
+      - name: External links
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          lycheeVersion: v0.24.2
+          args: >-
+            --include-fragments --no-progress
+            --max-retries 3 --timeout 20
+            --accept '100..=103,200..=299,429'
+            README.md CONTRIBUTING.md SECURITY.md 'docs/**/*.md'
+          jobSummary: false
+
   rust:
     runs-on: ubuntu-latest
     steps:
