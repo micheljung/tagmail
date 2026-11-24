@@ -77,6 +77,13 @@ impl Stack {
 
     /// Seeded as described by [`Stack::seed`].
     pub async fn start() -> Stack {
+        let stack = Stack::empty().await;
+        stack.seed().await;
+        stack
+    }
+
+    /// An account without cache rows, and a paired device.
+    pub async fn empty() -> Stack {
         let (data, keys) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
         let listen = free_port();
         let server = Stack::boot(&data, &keys, listen).await;
@@ -136,7 +143,7 @@ impl Stack {
             .json()
             .await
             .unwrap();
-        let stack = Stack {
+        Stack {
             data,
             keys,
             desktop: tempfile::tempdir().unwrap(),
@@ -145,9 +152,7 @@ impl Stack {
             owner,
             token: device["token"].as_str().unwrap().to_owned(),
             account,
-        };
-        stack.seed().await;
-        stack
+        }
     }
 
     pub fn server(&self) -> &Server {
@@ -160,6 +165,11 @@ impl Stack {
 
     pub async fn restart(&mut self) {
         self.server = Some(Stack::boot(&self.data, &self.keys, self.listen).await);
+    }
+
+    /// The server's cache is rebuilt with a new epoch; call while stopped.
+    pub fn wipe_cache(&self) {
+        tagmail_store::CacheDb::wipe(&self.data.path().join(tagmail_api_server::CACHE_DB)).unwrap();
     }
 
     pub fn url(&self, path: &str) -> String {
@@ -175,7 +185,7 @@ impl Stack {
     /// starred, Archive, "starred gem"). Thread 3: message 13 (old,
     /// INBOX, "ancient scroll"). Every message has text and raw on the
     /// server.
-    async fn seed(&self) {
+    pub async fn seed(&self) {
         let account = self.account;
         let (recent, old) = (now() - DAY, now() - 400 * DAY);
         let keys: Vec<String> = ["g:10", "g:11", "g:12", "g:13"]
