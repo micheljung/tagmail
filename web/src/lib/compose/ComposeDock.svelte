@@ -189,6 +189,18 @@
 		display: none;
 	}
 
+	@media (pointer: coarse), (max-width: 720px) {
+		header,
+		.title {
+			height: 48px;
+		}
+
+		.ctl {
+			width: 44px;
+			height: 44px;
+		}
+	}
+
 	@media (max-width: 720px) {
 		.dock {
 			inset: 0;
@@ -202,8 +214,14 @@
 			inset: 0;
 			width: auto;
 			height: 100dvh;
+			padding-bottom: env(safe-area-inset-bottom);
 			border: 0;
 			border-radius: 0;
+		}
+
+		.window:not(.min) header {
+			height: calc(48px + env(safe-area-inset-top));
+			padding-top: env(safe-area-inset-top);
 		}
 
 		.window.min {

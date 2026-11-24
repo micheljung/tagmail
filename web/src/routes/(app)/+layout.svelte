@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
+	import { afterNavigate, goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { shortcuts } from '#lib/shortcuts/index.ts';
 	import ComposeDock from '#lib/compose/ComposeDock.svelte';
@@ -27,7 +27,7 @@
 	import OfflineBanner from '#lib/pwa/OfflineBanner.svelte';
 	import { withAccount } from '#lib/views.ts';
 	import SearchBar from '#lib/ui/SearchBar.svelte';
-	import { onMount } from 'svelte';
+	import { onMount, tick } from 'svelte';
 	import type { LayoutProps } from './$types';
 
 	let { children }: LayoutProps = $props();
@@ -36,6 +36,14 @@
 	let helpOpen = $state(false);
 	let labelJumpOpen = $state(false);
 	let drawerOpen = $state(false);
+	let compact = $state(false);
+	let menuButton: HTMLButtonElement | undefined = $state();
+	let navEl: HTMLDivElement | undefined = $state();
+	/** Set once the app navigated in place, so history.back() stays inside it. */
+	let hasHistory = false;
+
+	const PHONE_QUERY = '(max-width: 720px)';
+	const onThread = $derived(page.url.pathname.startsWith('/thread/'));
 	let unsyncedOpen = $state(false);
 
 	/** A change still on its way after this long gets surfaced; quick ones never flash. */
@@ -58,7 +66,48 @@
 		page.url.pathname === '/search' ? (page.url.searchParams.get('q') ?? '') : ''
 	);
 
+	afterNavigate(({ from }) => {
+		if (from) hasHistory = true;
+	});
+
+	function back() {
+		if (hasHistory) history.back();
+		else void goto('/inbox');
+	}
+
+	function openDrawer() {
+		drawerOpen = true;
+		requestAnimationFrame(() => navEl?.querySelector<HTMLElement>('a, button')?.focus());
+	}
+
+	async function closeDrawer() {
+		drawerOpen = false;
+		await tick();
+		menuButton?.focus();
+	}
+
+	/** Keeps Tab inside the open drawer; the rest of the page is inert behind it. */
+	function trapTab(e: KeyboardEvent) {
+		if (!navEl) return;
+		const focusable = [...navEl.querySelectorAll<HTMLElement>('a[href], button:not(:disabled)')];
+		if (focusable.length === 0) return;
+		const first = focusable[0];
+		const last = focusable[focusable.length - 1];
+		const inside = navEl.contains(document.activeElement);
+		if (e.shiftKey && (!inside || document.activeElement === first)) last.focus();
+		else if (!e.shiftKey && (!inside || document.activeElement === last)) first.focus();
+		else return;
+		e.preventDefault();
+	}
+
 	onMount(() => {
+		const mq = matchMedia(PHONE_QUERY);
+		compact = mq.matches;
+		const onChange = () => {
+			compact = mq.matches;
+			drawerOpen = false;
+		};
+		mq.addEventListener('change', onChange);
 		api.onUnauthorized = (error) => {
 			resetAppState();
 			const next = encodeURIComponent(location.pathname + location.search);
@@ -72,7 +121,7 @@
 		void ops.load().catch(() => undefined);
 		void outbox.load().catch(() => undefined);
 		void composer.loadIdentities().catch(() => undefined);
-		return shortcuts.push((action) => {
+		const pop = shortcuts.push((action) => {
 			switch (action) {
 				case 'compose':
 					composer.open();
@@ -96,10 +145,6 @@
 					}
 					return false;
 				case 'escape':
-					if (drawerOpen) {
-						drawerOpen = false;
-						return true;
-					}
 					if (
 						document.activeElement instanceof HTMLElement &&
 						document.activeElement !== document.body
@@ -112,6 +157,10 @@
 					return false;
 			}
 		});
+		return () => {
+			mq.removeEventListener('change', onChange);
+			pop();
+		};
 	});
 
 	async function logout() {
@@ -124,18 +173,35 @@
 	}
 </script>
 
+<svelte:window
+	onkeydowncapture={(e) => {
+		if (!drawerOpen) return;
+		if (e.key === 'Tab') trapTab(e);
+		if (e.key !== 'Escape') return;
+		e.preventDefault();
+		void closeDrawer();
+	}}
+/>
+
 <a class="skip" href="#main">Skip to conversations</a>
 <div class="shell" class:drawer={drawerOpen}>
-	<header class="top">
-		<button
-			class="menu"
-			aria-label="Menu"
-			aria-expanded={drawerOpen}
-			aria-controls="nav"
-			onclick={() => (drawerOpen = !drawerOpen)}
-		>
-			<Icon name="menu" />
-		</button>
+	<header class="top" inert={compact && drawerOpen}>
+		{#if compact && onThread}
+			<button class="menu" aria-label="Back" onclick={back}>
+				<Icon name="back" />
+			</button>
+		{:else}
+			<button
+				class="menu"
+				aria-label="Menu"
+				aria-expanded={drawerOpen}
+				aria-controls="nav"
+				bind:this={menuButton}
+				onclick={() => (drawerOpen ? void closeDrawer() : openDrawer())}
+			>
+				<Icon name="menu" />
+			</button>
+		{/if}
 		<div class="brand"><Logo /></div>
 		<SearchBar bind:this={search} {query} />
 		{#if unsynced > 0}
@@ -158,7 +224,15 @@
 			<span class="sr-only">{hub.connected ? 'Live updates on' : 'Live updates paused'}</span>
 		</span>
 	</header>
-	<div class="side" id="nav">
+	<div
+		class="side"
+		id="nav"
+		bind:this={navEl}
+		inert={compact && !drawerOpen}
+		role={compact ? 'dialog' : undefined}
+		aria-modal={compact && drawerOpen ? 'true' : undefined}
+		aria-label={compact ? 'Menu' : undefined}
+	>
 		<NavRail
 			open={drawerOpen}
 			onnavigate={() => (drawerOpen = false)}
@@ -170,9 +244,9 @@
 			onlogout={logout}
 		/>
 	</div>
-	<button class="scrim" tabindex="-1" aria-label="Close menu" onclick={() => (drawerOpen = false)}
+	<button class="scrim" tabindex="-1" aria-label="Close menu" onclick={() => void closeDrawer()}
 	></button>
-	<main id="main">
+	<main id="main" inert={compact && drawerOpen}>
 		<DesktopBanners />
 		<OfflineBanner />
 		{#if accounts.notices.length > 0}
@@ -353,15 +427,22 @@
 		font-weight: 600;
 	}
 
+	@media (pointer: coarse), (max-width: 720px) {
+		.unsynced {
+			height: 44px;
+		}
+	}
+
 	@media (max-width: 720px) {
 		.shell {
 			grid-template-columns: minmax(0, 1fr);
-			grid-template-rows: 64px minmax(0, 1fr);
+			grid-template-rows: calc(64px + env(safe-area-inset-top)) minmax(0, 1fr);
+			padding: 0 env(safe-area-inset-right) 0 env(safe-area-inset-left);
 		}
 
 		.top {
 			gap: 6px;
-			padding: 0 10px 0 4px;
+			padding: env(safe-area-inset-top) 10px 0 4px;
 		}
 
 		.brand {
@@ -382,7 +463,8 @@
 			inset: 0 auto 0 0;
 			z-index: 50;
 			width: min(300px, 84vw);
-			padding-top: 12px;
+			padding: calc(12px + env(safe-area-inset-top)) 0 env(safe-area-inset-bottom)
+				env(safe-area-inset-left);
 			background: var(--bg);
 			box-shadow: var(--shadow-lg);
 			transform: translateX(-102%);
@@ -404,6 +486,7 @@
 
 		main {
 			margin: 0;
+			padding-bottom: env(safe-area-inset-bottom);
 			border: 0;
 			border-radius: 0;
 		}

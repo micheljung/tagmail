@@ -208,6 +208,12 @@ kbd {
 	cursor: default;
 }
 
+@media (pointer: coarse), (max-width: 720px) {
+	.btn {
+		height: 44px;
+	}
+}
+
 @media (prefers-reduced-motion: reduce) {
 	*,
 	*::before,

@@ -436,4 +436,16 @@
 		background: var(--hover);
 		color: var(--ink);
 	}
+
+	@media (pointer: coarse), (max-width: 720px) {
+		a,
+		.more {
+			height: 44px;
+		}
+
+		.tools button {
+			width: 44px;
+			height: 44px;
+		}
+	}
 </style>

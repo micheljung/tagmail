@@ -1,6 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
 
 const PORT = Number(process.env.E2E_PORT ?? 4180);
+const MOBILE_ONLY = '**/mobile.spec.ts';
+/** CDP-only checks (installability, push delivery). */
+const CHROMIUM_ONLY = '**/pwa.spec.ts';
 const noSandbox = process.env.PW_NO_SANDBOX === '1' ? ['--no-sandbox'] : [];
 
 export default defineConfig({
@@ -19,9 +22,20 @@ export default defineConfig({
 	projects: [
 		{
 			name: 'chromium',
+			testIgnore: MOBILE_ONLY,
 			use: { ...devices['Desktop Chrome'], launchOptions: { args: noSandbox } }
 		},
-		{ name: 'webkit', use: { ...devices['Desktop Safari'] } }
+		{
+			name: 'webkit',
+			testIgnore: [MOBILE_ONLY, CHROMIUM_ONLY],
+			use: { ...devices['Desktop Safari'] }
+		},
+		{
+			name: 'mobile-chromium',
+			testMatch: MOBILE_ONLY,
+			use: { ...devices['Pixel 7'], launchOptions: { args: noSandbox } }
+		},
+		{ name: 'mobile-webkit', testMatch: MOBILE_ONLY, use: { ...devices['iPhone 13'] } }
 	],
 	webServer: {
 		command: 'node e2e/mock/server.ts',

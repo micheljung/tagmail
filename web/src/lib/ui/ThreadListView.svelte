@@ -26,10 +26,16 @@
 	} = $props();
 
 	const COMPACT_QUERY = '(max-width: 720px)';
+	const COARSE_QUERY = '(pointer: coarse)';
 	const ROW_HEIGHT = 40;
+	const ROW_HEIGHT_COARSE = 48;
 	const ROW_HEIGHT_COMPACT = 76;
 
 	let compact = $state(false);
+	let coarse = $state(false);
+	const rowHeight = $derived(
+		compact ? ROW_HEIGHT_COMPACT : coarse ? ROW_HEIGHT_COARSE : ROW_HEIGHT
+	);
 
 	const TOOLBAR: { action: ShortcutAction; icon: IconName; label: string; key: string }[] = [
 		{ action: 'archive', icon: 'archive', label: 'Archive', key: 'e' },
@@ -68,9 +74,14 @@
 
 	onMount(() => {
 		const mq = matchMedia(COMPACT_QUERY);
-		compact = mq.matches;
-		const onChange = () => (compact = mq.matches);
+		const coarseMq = matchMedia(COARSE_QUERY);
+		const onChange = () => {
+			compact = mq.matches;
+			coarse = coarseMq.matches;
+		};
+		onChange();
 		mq.addEventListener('change', onChange);
+		coarseMq.addEventListener('change', onChange);
 		list.attached = true;
 		const pop = shortcuts.push((action) => {
 			switch (action) {
@@ -95,6 +106,7 @@
 		});
 		return () => {
 			mq.removeEventListener('change', onChange);
+			coarseMq.removeEventListener('change', onChange);
 			list.attached = false;
 			pop();
 		};
@@ -167,10 +179,10 @@
 			{#if list.error}<span class="warn" role="status">{list.error}</span>{/if}
 		</div>
 		<div class="viewport">
-			{#key compact}
+			{#key rowHeight}
 				<VirtualList
 					count={list.count}
-					rowHeight={compact ? ROW_HEIGHT_COMPACT : ROW_HEIGHT}
+					{rowHeight}
 					version={list.indexVersion}
 					activeIndex={list.activeIndex}
 					{label}
@@ -290,6 +302,24 @@
 		from {
 			opacity: 0;
 			transform: translateX(-4px);
+		}
+	}
+
+	@media (pointer: coarse), (max-width: 720px) {
+		.bar {
+			height: 48px;
+			padding-left: 0;
+		}
+
+		.all,
+		.act {
+			width: 44px;
+			height: 44px;
+		}
+
+		.actions {
+			gap: 0;
+			padding-right: 0;
 		}
 	}
 

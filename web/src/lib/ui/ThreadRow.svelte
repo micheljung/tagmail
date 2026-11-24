@@ -280,13 +280,26 @@
 		}
 	}
 
+	@media (pointer: coarse), (max-width: 720px) {
+		.row {
+			grid-template-columns: 44px 44px minmax(120px, 200px) minmax(0, 1fr) auto;
+			gap: 0 4px;
+		}
+
+		.check,
+		.star {
+			width: 44px;
+			height: 44px;
+		}
+	}
+
 	@media (max-width: 720px) {
 		.row {
 			grid-template-columns: minmax(0, 1fr) auto;
 			grid-template-rows: auto auto auto;
 			align-content: center;
 			gap: 1px 10px;
-			padding: 0 14px 0 16px;
+			padding: 0 4px 0 16px;
 		}
 
 		.check {
@@ -296,8 +309,8 @@
 		.checked .check {
 			display: grid;
 			position: absolute;
-			left: 2px;
-			top: 4px;
+			left: 0;
+			top: 0;
 		}
 
 		.star {
@@ -314,6 +327,7 @@
 		.meta {
 			grid-column: 2;
 			grid-row: 1;
+			padding-right: 10px;
 		}
 
 		.body {

@@ -159,7 +159,12 @@
 
 <article class="thread" aria-busy={detail === null && error === null}>
 	<div class="toolbar">
-		<a class="icon-btn" href={lists.currentPath} aria-label="Back to the list" title="Back (u)">
+		<a
+			class="icon-btn back"
+			href={lists.currentPath}
+			aria-label="Back to the list"
+			title="Back (u)"
+		>
 			<Icon name="back" />
 		</a>
 		{#if thread}
@@ -439,7 +444,24 @@
 		}
 	}
 
+	@media (pointer: coarse), (max-width: 720px) {
+		.icon-btn {
+			width: 44px;
+			height: 44px;
+		}
+
+		.toolbar {
+			gap: 0;
+			padding: 0 4px;
+		}
+	}
+
 	@media (max-width: 720px) {
+		.back,
+		.pos {
+			display: none;
+		}
+
 		.head {
 			padding: 16px 16px 4px;
 		}
