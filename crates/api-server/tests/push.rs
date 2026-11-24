@@ -766,6 +766,63 @@ async fn subscriptions_keep_settings_and_send_tests() {
     server.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn a_renewed_endpoint_replaces_its_old_row_and_keeps_its_settings() {
+    let dirs = Dirs::new();
+    let server = Server::start(&dirs.config(loopback()), None).await.unwrap();
+    let c = owner(&server).await;
+    add_accounts(&server, &[1, 2]).await;
+    let mock = Mock::start().await;
+    let browser = Browser::new();
+    let renew = |endpoint: &str, old: &str, patch: Value| {
+        let mut body = browser.subscription(&mock.endpoint(endpoint));
+        json_merge(&mut body, json!({"oldEndpoint": mock.endpoint(old)}));
+        json_merge(&mut body, patch);
+        body
+    };
+    let mut first = browser.subscription(&mock.endpoint("a"));
+    json_merge(&mut first, json!({"preview": false, "accountIds": [2]}));
+    subscribed(&c, &server, &first).await;
+
+    let resp = subscribe(&c, &server, &renew("b", "a", json!({}))).await;
+    assert_eq!(resp.status(), 201);
+    let renewed: Value = resp.json().await.unwrap();
+    assert_eq!(
+        (&renewed["preview"], &renewed["accountIds"]),
+        (&json!(false), &json!([2])),
+        "the renewal inherits the settings"
+    );
+    let ids: Vec<Value> = subscriptions(&c, &server)
+        .await
+        .into_iter()
+        .map(|s| s["id"].clone())
+        .collect();
+    assert_eq!(ids, vec![renewed["id"].clone()], "the old row is gone");
+
+    let given: Value = subscribe(&c, &server, &renew("c", "b", json!({"preview": true})))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        (&given["preview"], &given["accountIds"]),
+        (&json!(true), &json!([2])),
+        "explicit fields win, the rest is inherited"
+    );
+    let unknown: Value = subscribe(&c, &server, &renew("d", "nowhere", json!({})))
+        .await
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(
+        (&unknown["preview"], &unknown["accountIds"]),
+        (&json!(true), &Value::Null),
+        "an unknown old endpoint gives the defaults"
+    );
+    assert_eq!(subscriptions(&c, &server).await.len(), 2);
+    server.shutdown().await.unwrap();
+}
+
 fn json_merge(target: &mut Value, patch: Value) {
     match (target, patch) {
         (Value::Object(t), Value::Object(p)) => {

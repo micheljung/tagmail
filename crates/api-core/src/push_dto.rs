@@ -22,7 +22,9 @@ pub struct PushKeysDto {
 }
 
 /// `POST /api/push/subscriptions` body. Posting a known endpoint moves it
-/// to the caller's session and replaces its keys.
+/// to the caller's session and replaces its keys. A new endpoint naming a
+/// known `oldEndpoint` replaces that subscription, keeping its settings
+/// unless given.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(optional_fields)]
@@ -37,6 +39,9 @@ pub struct PushSubscribeDto {
     /// Accounts to notify about; absent = all accounts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_ids: Option<Vec<i64>>,
+    /// The endpoint this one renews (`pushsubscriptionchange`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_endpoint: Option<String>,
 }
 
 /// `PATCH /api/push/subscriptions/{id}` body: the fields to change.
@@ -147,9 +152,11 @@ mod tests {
                 },
                 preview: Some(false),
                 account_ids: Some(vec![1, 2]),
+                old_endpoint: Some("https://push.example/w".into()),
             },
             json!({"endpoint": "https://push.example/x", "keys": {"p256dh": "BP", "auth": "au"},
-                   "preview": false, "accountIds": [1, 2]}),
+                   "preview": false, "accountIds": [1, 2],
+                   "oldEndpoint": "https://push.example/w"}),
         );
         round_trip(
             &PushSubscriptionDto {
@@ -181,6 +188,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!((dto.preview, dto.account_ids), (None, None));
+        assert_eq!(dto.old_endpoint, None);
     }
 
     #[test]

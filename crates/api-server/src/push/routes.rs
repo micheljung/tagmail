@@ -123,6 +123,7 @@ async fn validate(
         preview: dto.preview,
         account_ids,
         user_agent,
+        old_endpoint: dto.old_endpoint,
     })
 }
 

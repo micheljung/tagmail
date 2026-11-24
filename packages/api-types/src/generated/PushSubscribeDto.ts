@@ -3,7 +3,9 @@ import type { PushKeysDto } from "./PushKeysDto";
 
 /**
  * `POST /api/push/subscriptions` body. Posting a known endpoint moves it
- * to the caller's session and replaces its keys.
+ * to the caller's session and replaces its keys. A new endpoint naming a
+ * known `oldEndpoint` replaces that subscription, keeping its settings
+ * unless given.
  */
 export type PushSubscribeDto = { endpoint: string, keys: PushKeysDto, 
 /**
@@ -13,4 +15,8 @@ preview?: boolean,
 /**
  * Accounts to notify about; absent = all accounts.
  */
-accountIds?: Array<number>, };
+accountIds?: Array<number>, 
+/**
+ * The endpoint this one renews (`pushsubscriptionchange`).
+ */
+oldEndpoint?: string, };

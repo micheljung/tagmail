@@ -51,6 +51,7 @@ pub struct NewSubscription {
     pub preview: Option<bool>,
     pub account_ids: Option<Vec<i64>>,
     pub user_agent: Option<String>,
+    pub old_endpoint: Option<String>,
 }
 
 #[derive(Debug)]
@@ -126,7 +127,8 @@ pub async fn list(
 }
 
 /// Registers `sub` for `session`, or moves a known endpoint to it with the
-/// new keys, keeping its settings unless given.
+/// new keys, keeping its settings unless given. A new endpoint replaces the
+/// row of a known `old_endpoint` and inherits its settings the same way.
 pub async fn upsert(
     db: &ConfigDb,
     session: TokenHash,
@@ -164,6 +166,24 @@ pub async fn upsert(
                 id
             }
             None => {
+                let renewed: Option<(bool, Option<String>)> = match &sub.old_endpoint {
+                    Some(old) => tx
+                        .query_row(
+                            "DELETE FROM push_subscription WHERE endpoint = ?1 \
+                             RETURNING preview, account_ids",
+                            [old],
+                            |r| Ok((r.get(0)?, r.get(1)?)),
+                        )
+                        .optional()?,
+                    None => None,
+                };
+                let (old_preview, old_ids) = renewed.unzip();
+                let preview = sub.preview.or(old_preview).unwrap_or(true);
+                let ids = if sub.account_ids.is_some() {
+                    ids
+                } else {
+                    old_ids.flatten()
+                };
                 let count: i64 =
                     tx.query_row("SELECT count(*) FROM push_subscription", [], |r| r.get(0))?;
                 if count >= MAX_SUBSCRIPTIONS {
@@ -178,7 +198,7 @@ pub async fn upsert(
                         sub.endpoint,
                         sub.p256dh,
                         sub.auth.as_slice(),
-                        sub.preview.unwrap_or(true),
+                        preview,
                         ids,
                         sub.user_agent,
                         now
