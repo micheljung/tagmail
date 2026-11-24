@@ -93,6 +93,18 @@ async function settingsOf(api: RegisterApi, prefs: PushPrefs | undefined): Promi
 		: { preview: prefs.preview };
 }
 
+let queue: Promise<unknown> = Promise.resolve();
+
+/**
+ * Runs settings changes one at a time in the order asked for, so a slow
+ * re-registration can't overwrite a toggle the user made meanwhile.
+ */
+function serialized<T>(op: () => Promise<T>): Promise<T> {
+	const run = queue.then(op);
+	queue = run.catch(() => {});
+	return run;
+}
+
 /**
  * Posts `subscription` with this device's saved settings and remembers what
  * the server applied. A changed endpoint names its predecessor, so the
@@ -133,17 +145,19 @@ export async function syncPush(
 	api: PushApi,
 	prefs: PushPrefStore
 ): Promise<PushSubscriptionDto | null> {
-	const existing = await manager.getSubscription();
-	if (!existing) return null;
-	const saved = await prefs.get();
-	const { publicKey } = await api.pushKey();
-	if (sameKey(existing, publicKey)) return register(api, prefs, existing, saved);
-	await existing.unsubscribe();
-	const renewed = await manager.subscribe({
-		userVisibleOnly: true,
-		applicationServerKey: publicKey
+	return serialized(async () => {
+		const existing = await manager.getSubscription();
+		if (!existing) return null;
+		const saved = await prefs.get();
+		const { publicKey } = await api.pushKey();
+		if (sameKey(existing, publicKey)) return register(api, prefs, existing, saved);
+		await existing.unsubscribe();
+		const renewed = await manager.subscribe({
+			userVisibleOnly: true,
+			applicationServerKey: publicKey
+		});
+		return register(api, prefs, renewed, saved, existing.endpoint);
 	});
-	return register(api, prefs, renewed, saved, existing.endpoint);
 }
 
 /**
@@ -184,16 +198,18 @@ export async function enablePush(
 	requestPermission: () => Promise<NotificationPermission>
 ): Promise<PushSubscriptionDto | null> {
 	if ((await requestPermission()) !== 'granted') return null;
-	const saved = await prefs.get();
-	const { publicKey } = await api.pushKey();
-	const existing = await manager.getSubscription();
-	if (existing && sameKey(existing, publicKey)) return register(api, prefs, existing, saved);
-	await existing?.unsubscribe();
-	const created = await manager.subscribe({
-		userVisibleOnly: true,
-		applicationServerKey: publicKey
+	return serialized(async () => {
+		const saved = await prefs.get();
+		const { publicKey } = await api.pushKey();
+		const existing = await manager.getSubscription();
+		if (existing && sameKey(existing, publicKey)) return register(api, prefs, existing, saved);
+		await existing?.unsubscribe();
+		const created = await manager.subscribe({
+			userVisibleOnly: true,
+			applicationServerKey: publicKey
+		});
+		return register(api, prefs, created, saved, existing?.endpoint ?? saved?.endpoint);
 	});
-	return register(api, prefs, created, saved, existing?.endpoint ?? saved?.endpoint);
 }
 
 /** Changes this device's settings and remembers them for re-registration. */
@@ -203,10 +219,12 @@ export async function updatePush(
 	id: number,
 	patch: PushSubscriptionPatchDto
 ): Promise<PushSubscriptionDto> {
-	const row = await api.updatePushSubscription(id, patch);
-	const saved = await prefs.get();
-	if (saved) await prefs.set({ ...saved, preview: row.preview, accountIds: row.accountIds });
-	return row;
+	return serialized(async () => {
+		const row = await api.updatePushSubscription(id, patch);
+		const saved = await prefs.get();
+		if (saved) await prefs.set({ ...saved, preview: row.preview, accountIds: row.accountIds });
+		return row;
+	});
 }
 
 /**
@@ -220,11 +238,13 @@ export async function renewPush(
 	prefs: PushPrefStore,
 	old: PushSubscription | null
 ): Promise<PushSubscriptionDto> {
-	const saved = await prefs.get();
-	const key = old?.options.applicationServerKey;
-	const applicationServerKey = key ? base64url(key) : (await api.pushKey()).publicKey;
-	const renewed = await manager.subscribe({ userVisibleOnly: true, applicationServerKey });
-	return register(api, prefs, renewed, saved, old?.endpoint ?? saved?.endpoint);
+	return serialized(async () => {
+		const saved = await prefs.get();
+		const key = old?.options.applicationServerKey;
+		const applicationServerKey = key ? base64url(key) : (await api.pushKey()).publicKey;
+		const renewed = await manager.subscribe({ userVisibleOnly: true, applicationServerKey });
+		return register(api, prefs, renewed, saved, old?.endpoint ?? saved?.endpoint);
+	});
 }
 
 /** The push API over plain `fetch`, for the service worker. */
@@ -260,9 +280,11 @@ export async function disablePush(
 	prefs: PushPrefStore,
 	row: PushSubscriptionDto | null
 ): Promise<void> {
-	await (await manager.getSubscription())?.unsubscribe();
-	await prefs.clear();
-	if (row) await api.removePushSubscription(row.id);
+	return serialized(async () => {
+		await (await manager.getSubscription())?.unsubscribe();
+		await prefs.clear();
+		if (row) await api.removePushSubscription(row.id);
+	});
 }
 
 export const LOGOUT_UNSUBSCRIBE_MS = 2000;

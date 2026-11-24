@@ -340,6 +340,42 @@ describe('updatePush', () => {
 	});
 });
 
+describe('settings changes', () => {
+	it('apply in order, so a slow re-registration never undoes a newer toggle', async () => {
+		const sub = new FakeSubscription('https://push.example/a', OLD_KEY);
+		const api = fakeApi(OLD_KEY);
+		const prefs = memoryPrefs({ ...SAVED, preview: true });
+		let answer = () => {};
+		const calls: string[] = [];
+		api.subscribePush = (dto) => {
+			calls.push('POST');
+			return new Promise((resolve) => (answer = () => resolve(row({ preview: dto.preview }))));
+		};
+		const patching = fakeApi(OLD_KEY);
+		api.updatePushSubscription = (id, patch) => {
+			calls.push('PATCH');
+			return patching.updatePushSubscription(id, patch);
+		};
+
+		const sync = syncPush(asManager(new FakeManager(sub)), api, prefs);
+		const toggle = updatePush(api, prefs, 1, { preview: false });
+		await vi.waitFor(() => expect(calls).toEqual(['POST']));
+		answer();
+		await Promise.all([sync, toggle]);
+
+		expect(calls).toEqual(['POST', 'PATCH']);
+		expect(prefs.value?.preview).toBe(false);
+	});
+
+	it('keep going after one fails', async () => {
+		const api = fakeApi(OLD_KEY);
+		api.updatePushSubscription = () => Promise.reject(new Error('offline'));
+		await expect(updatePush(api, memoryPrefs(SAVED), 1, { preview: true })).rejects.toThrow();
+		const sub = new FakeSubscription('https://push.example/a', OLD_KEY);
+		expect(await syncPush(asManager(new FakeManager(sub)), api, memoryPrefs(SAVED))).toBeTruthy();
+	});
+});
+
 describe('disablePush', () => {
 	it('unsubscribes the browser, forgets the settings and removes the server row', async () => {
 		const sub = new FakeSubscription('https://push.example/a', OLD_KEY);
