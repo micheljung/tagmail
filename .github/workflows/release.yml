@@ -15,9 +15,17 @@ on:
       - packages/**
       - crates/**
       - deploy/docker/**
+      - xtask/**
+      - .cargo/**
       - Cargo.toml
       - Cargo.lock
+      - rust-toolchain.toml
+      - package.json
       - pnpm-lock.yaml
+      - pnpm-workspace.yaml
+      - LICENSE
+      - README.md
+      - .dockerignore
       - .github/workflows/release.yml
   workflow_dispatch:
 

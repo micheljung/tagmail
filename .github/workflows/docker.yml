@@ -10,11 +10,15 @@ on:
       - crates/**
       - web/**
       - packages/**
+      - desktop/src-tauri/**
+      - xtask/**
+      - .cargo/**
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
       - package.json
       - pnpm-lock.yaml
+      - pnpm-workspace.yaml
       - .github/workflows/docker.yml
 
 concurrency:
