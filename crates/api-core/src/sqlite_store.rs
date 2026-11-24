@@ -921,7 +921,8 @@ impl Store for SqliteStore {
             let Some(reader) = blobs.open_raw(&key)? else {
                 return Ok(None);
             };
-            let reduced = crate::mime::reduce::reduce(BufReader::new(reader))?;
+            let reduced =
+                crate::mime::reduce::reduce(BufReader::new(reader.take(DEFAULT_RAW_CAP)))?;
             Ok::<_, tagmail_store::Error>(Some(reduced))
         })
         .await??)

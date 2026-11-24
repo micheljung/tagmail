@@ -24,6 +24,10 @@ fn text_raw_cap(encoding: Encoding) -> usize {
 /// Raw bytes kept of any other part, enough to sniff an image type.
 const HEAD_RAW_CAP: usize = 128;
 const HEADER_BLOCK_CAP: usize = 1 << 20;
+const HEADERS_CAP: usize = 4 << 20;
+/// Open multiparts and messages past which the parser rendering reads the
+/// copy with keeps parts as leaves; so does the copy.
+const MAX_DEPTH: usize = 64;
 
 enum State {
     Headers(Vec<u8>),
@@ -46,13 +50,15 @@ struct Leaf {
 }
 
 /// An open `message/rfc822` part: where its size header goes, the depth
-/// of the multipart it sits in, and its raw body length so far.
+/// of the multipart it sits in, and where its raw body starts.
 struct Nested {
     insert_at: usize,
     depth: usize,
-    len: usize,
-    last_eol: usize,
+    start: usize,
 }
+
+/// Size headers to insert into the output, by output position.
+type Inserts = Vec<(usize, Vec<u8>)>;
 
 fn eol_len(line: &[u8]) -> usize {
     if line.ends_with(b"\r\n") {
@@ -88,14 +94,17 @@ impl Leaf {
     }
 
     /// `delimited`: a delimiter ends the part, taking the last line break.
-    fn finish(self, out: &mut Vec<u8>, delimited: bool) {
+    fn finish(self, out: &mut Vec<u8>, inserts: &mut Inserts, delimited: bool) {
         if self.cut {
+            if delimited && !out.ends_with(b"\n") {
+                out.extend_from_slice(b"\r\n");
+            }
             let decoded = match self.encoding {
                 Encoding::Base64 => self.base64_symbols * 3 / 4,
                 _ if delimited => self.decoded.saturating_sub(self.last_eol),
                 _ => self.decoded,
             };
-            out.splice(self.insert_at..self.insert_at, size_header(decoded));
+            inserts.push((self.insert_at, size_header(decoded)));
         }
     }
 }
@@ -177,10 +186,14 @@ fn delimiter(line: &[u8], boundaries: &[String]) -> Option<(usize, bool)> {
 /// Reads `raw` and returns its reduced copy.
 pub fn reduce(mut raw: impl BufRead) -> io::Result<Vec<u8>> {
     let mut out = Vec::new();
+    let mut inserts = Inserts::new();
     let mut boundaries: Vec<String> = Vec::new();
     let mut state = State::Headers(Vec::new());
     let mut nested: Vec<Nested> = Vec::new();
     let mut line = Vec::new();
+    let mut read = 0;
+    let mut last_eol = 0;
+    let mut header_bytes = 0;
     loop {
         line.clear();
         if raw.read_until(b'\n', &mut line)? == 0 {
@@ -189,17 +202,16 @@ pub fn reduce(mut raw: impl BufRead) -> io::Result<Vec<u8>> {
         let delimits = delimiter(&line, &boundaries);
         if let Some((i, _)) = delimits {
             while let Some(n) = nested.pop_if(|n| n.depth > i) {
-                let header = size_header(n.len - n.last_eol);
-                out.splice(n.insert_at..n.insert_at, header);
+                let len = read - n.start;
+                let len = if len == 0 { 0 } else { len - last_eol };
+                inserts.push((n.insert_at, size_header(len)));
             }
         }
-        for n in &mut nested {
-            n.len += line.len();
-            n.last_eol = eol_len(&line);
-        }
+        read += line.len();
+        last_eol = eol_len(&line);
         if let Some((i, closing)) = delimits {
             match std::mem::replace(&mut state, State::Between) {
-                State::Body(leaf) => leaf.finish(&mut out, true),
+                State::Body(leaf) => leaf.finish(&mut out, &mut inserts, true),
                 State::Headers(headers) => out.extend_from_slice(&headers),
                 State::Between => {}
             }
@@ -217,14 +229,30 @@ pub fn reduce(mut raw: impl BufRead) -> io::Result<Vec<u8>> {
                 if is_size_header(&line) {
                     continue;
                 }
-                if headers.len() + line.len() <= HEADER_BLOCK_CAP || is_blank(&line) {
+                if is_blank(&line)
+                    || (headers.len() + line.len() <= HEADER_BLOCK_CAP
+                        && header_bytes + line.len() <= HEADERS_CAP)
+                {
+                    header_bytes += line.len();
                     headers.extend_from_slice(&line);
                 }
                 if !is_blank(&line) {
                     continue;
                 }
                 let headers = std::mem::take(headers);
-                state = match classify(&headers) {
+                let deep = boundaries.len() + nested.len() > MAX_DEPTH;
+                let next = match classify(&headers) {
+                    Next::Multipart(_) if deep => Next::Leaf {
+                        encoding: Encoding::None,
+                        text: true,
+                    },
+                    Next::Message if deep => Next::Leaf {
+                        encoding: Encoding::None,
+                        text: false,
+                    },
+                    next => next,
+                };
+                state = match next {
                     Next::Multipart(boundary) => {
                         out.extend_from_slice(&headers);
                         boundaries.push(boundary);
@@ -234,8 +262,7 @@ pub fn reduce(mut raw: impl BufRead) -> io::Result<Vec<u8>> {
                         nested.push(Nested {
                             insert_at: out.len() + blank_line_start(&headers),
                             depth: boundaries.len(),
-                            len: 0,
-                            last_eol: 0,
+                            start: read,
                         });
                         out.extend_from_slice(&headers);
                         State::Headers(Vec::new())
@@ -265,14 +292,28 @@ pub fn reduce(mut raw: impl BufRead) -> io::Result<Vec<u8>> {
         }
     }
     match state {
-        State::Body(leaf) => leaf.finish(&mut out, false),
+        State::Body(leaf) => leaf.finish(&mut out, &mut inserts, false),
         State::Headers(headers) => out.extend_from_slice(&headers),
         State::Between => {}
     }
     while let Some(n) = nested.pop() {
-        out.splice(n.insert_at..n.insert_at, size_header(n.len));
+        inserts.push((n.insert_at, size_header(read - n.start)));
     }
-    Ok(out)
+    Ok(splice(out, inserts))
+}
+
+fn splice(out: Vec<u8>, mut inserts: Inserts) -> Vec<u8> {
+    inserts.sort_by_key(|(at, _)| *at);
+    let mut spliced =
+        Vec::with_capacity(out.len() + inserts.iter().map(|(_, h)| h.len()).sum::<usize>());
+    let mut from = 0;
+    for (at, header) in inserts {
+        spliced.extend_from_slice(&out[from..at]);
+        spliced.extend_from_slice(&header);
+        from = at;
+    }
+    spliced.extend_from_slice(&out[from..]);
+    spliced
 }
 
 #[cfg(test)]
@@ -354,6 +395,94 @@ mod tests {
                 .collect()
         };
         assert_eq!(ids(&message), ids(&parse(raw.as_bytes()).unwrap()));
+    }
+
+    fn render(raw: &[u8]) -> std::time::Duration {
+        let started = std::time::Instant::now();
+        let reduced = reduce(raw).unwrap();
+        listed(&reduced);
+        started.elapsed()
+    }
+
+    #[test]
+    fn deeply_nested_messages_render_in_linear_time() {
+        let raw = format!(
+            "Content-Type: multipart/mixed; boundary=b\r\n\r\n--b\r\n{}--b--\r\n",
+            "Content-Type: message/rfc822\r\n\r\n".repeat(64 * 1024)
+        );
+        assert!(raw.len() > 2 << 20);
+        let elapsed = render(raw.as_bytes());
+        assert!(elapsed.as_millis() < 1000, "{elapsed:?}");
+    }
+
+    #[test]
+    fn deeply_nested_multiparts_render_in_linear_time() {
+        let mut raw: String = (0..40_000)
+            .map(|i| format!("Content-Type: multipart/mixed; boundary=b{i}\r\n\r\n--b{i}\r\n"))
+            .collect();
+        raw.push_str(&"--x\r\n".repeat(40_000));
+        assert!(raw.len() > 2 << 20);
+        let elapsed = render(raw.as_bytes());
+        assert!(elapsed.as_millis() < 1000, "{elapsed:?}");
+    }
+
+    #[test]
+    fn nesting_up_to_the_parser_limit_keeps_part_ids() {
+        for (depth, every) in (60..70)
+            .chain([100])
+            .flat_map(|d| [(d, 1), (d, 2), (d, 3), (d, d)])
+        {
+            let mut raw = String::new();
+            for i in 0..depth {
+                if i % every == 0 {
+                    raw.push_str(&format!(
+                        "Content-Type: multipart/mixed; boundary=b{i}\r\n\r\n--b{i}\r\n"
+                    ));
+                } else {
+                    raw.push_str("Content-Type: message/rfc822\r\n\r\nSubject: s\r\n");
+                }
+            }
+            raw.push_str(&format!(
+                "Content-Type: text/plain\r\n\r\n{}\r\n",
+                "t".repeat(300)
+            ));
+            for i in (0..depth).rev().filter(|i| i % every == 0) {
+                raw.push_str(&format!(
+                    "--b{i}\r\nContent-Type: image/gif\r\n\r\nGIF89a\r\n--b{i}--\r\n"
+                ));
+            }
+            let reduced = reduce(raw.as_bytes()).unwrap();
+            assert_eq!(
+                listed(&reduced),
+                listed(raw.as_bytes()),
+                "depth {depth}/{every}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_part_cut_mid_line_keeps_the_next_part() {
+        let raw = format!(
+            concat!(
+                "Content-Type: multipart/mixed; boundary=b\r\n\r\n",
+                "--b\r\nContent-Type: application/octet-stream\r\n\r\n{}\r\n",
+                "--b\r\nContent-Type: image/gif\r\n\r\nGIF89a\r\n--b--\r\n"
+            ),
+            "x".repeat(300)
+        );
+        let reduced = reduce(raw.as_bytes()).unwrap();
+        assert_eq!(listed(&reduced), listed(raw.as_bytes()));
+    }
+
+    #[test]
+    fn header_bytes_are_bounded_in_total() {
+        let block = format!("X-Pad: {}\r\n\r\nbody\r\n", "h".repeat(1000));
+        let raw = format!(
+            "Content-Type: multipart/mixed; boundary=b\r\n\r\n{}--b--\r\n",
+            format!("--b\r\n{block}").repeat(20_000)
+        );
+        let reduced = reduce(raw.as_bytes()).unwrap();
+        assert!(reduced.len() < HEADERS_CAP * 2, "{}", reduced.len());
     }
 
     #[test]
