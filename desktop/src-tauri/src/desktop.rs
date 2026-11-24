@@ -36,6 +36,8 @@ const DEVICE_NAME_KEY: &str = "device_name";
 const TOKEN_FILE: &str = "device-token";
 const EVENT_BUFFER: usize = 64;
 const MAX_DEVICE_NAME: usize = 100;
+#[cfg(unix)]
+const PRIVATE_DIR_MODE: u32 = 0o700;
 const INSECURE_SERVER: &str =
     "an https address, e.g. https://mail.example.com (plain http only for localhost)";
 pub const INSECURE_WARNING: &str = "The stored server address uses plain http, so this device \
@@ -91,6 +93,17 @@ fn invalid(field: &str, message: &str) -> api::Response {
 fn internal(e: impl std::fmt::Display) -> api::Response {
     tracing::error!(error = %e, "desktop failure");
     api::Response::error(500, "internal", "internal error")
+}
+
+/// Creates `dir` readable by the user only.
+fn private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    std::fs::set_permissions(
+        dir,
+        std::os::unix::fs::PermissionsExt::from_mode(PRIVATE_DIR_MODE),
+    )?;
+    Ok(())
 }
 
 /// The name the server lists this device under.
@@ -150,7 +163,7 @@ impl Desktop {
         let layout = Layout::new(&dir);
         let durable_path = layout.durable();
         let (durable, settings) = tokio::task::spawn_blocking(move || {
-            std::fs::create_dir_all(&dir)?;
+            private_dir(&dir)?;
             let durable = Durable::open(&durable_path)?;
             let settings = settings::load(&durable)?;
             Ok::<_, tagmail_replica::Error>((durable, settings))

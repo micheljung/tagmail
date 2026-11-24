@@ -308,3 +308,20 @@ async fn another_server_keeps_unsent_work_local_and_says_so() {
         "{again}"
     );
 }
+
+#[tokio::test]
+async fn the_data_dir_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = tempfile::tempdir().unwrap();
+    let fresh = root.path().join("fresh");
+    let existing = root.path().join("existing");
+    std::fs::create_dir(&existing).unwrap();
+    std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for dir in [fresh, existing] {
+        Desktop::open(&dir, false, Arc::new(Recorder::default()))
+            .await
+            .unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700, "{}", dir.display());
+    }
+}
