@@ -1,5 +1,6 @@
-//! Where the main webview may go: only the app itself. Web and mail links
-//! open in the system's handler; everything else is dropped.
+//! Where the main webview may go: only the app itself and its own blob
+//! downloads. Web and mail links open in the system's handler; everything
+//! else is dropped.
 
 use url::Url;
 
@@ -23,6 +24,11 @@ fn in_app(url: &Url) -> bool {
     same || url.as_str() == "about:blank"
 }
 
+fn app_blob(url: &Url) -> bool {
+    url.scheme() == "blob"
+        && Url::parse(url.path()).is_ok_and(|inner| inner.scheme() != "blob" && in_app(&inner))
+}
+
 fn external(url: Url) -> Navigation {
     if EXTERNAL_SCHEMES.contains(&url.scheme()) {
         Navigation::External(url)
@@ -33,7 +39,7 @@ fn external(url: Url) -> Navigation {
 
 /// A navigation of the main webview or one of its frames.
 pub fn navigate(url: &Url) -> Navigation {
-    if in_app(url) {
+    if in_app(url) || app_blob(url) {
         Navigation::Allow
     } else {
         external(url.clone())
@@ -60,6 +66,9 @@ mod tests {
             app.clone(),
             app.join("thread/4?x=1").unwrap(),
             url("about:blank"),
+            url(&format!(
+                "blob:{ORIGIN}0b6c1d36-8a51-4d1e-9c52-2f6a4b0f3c11"
+            )),
         ] {
             assert_eq!(navigate(&inside), Navigation::Allow, "{inside}");
         }
@@ -79,6 +88,9 @@ mod tests {
             ("javascript:alert(1)", false),
             ("data:text/html,hi", false),
             ("tagmail://pair?server=x", false),
+            ("blob:https://example.com/0b6c1d36", false),
+            ("blob:null/0b6c1d36", false),
+            ("blob:blob:app://localhost/0b6c1d36", false),
         ] {
             let decided = navigate(&url(link));
             assert_eq!(

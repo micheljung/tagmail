@@ -1,6 +1,6 @@
 // Test hook for tests/links.rs: each real click (popups need a user
-// gesture) opens the next link the ways the SPA and email content do,
-// then the app tries to navigate away.
+// gesture) opens the next link or download the ways the SPA and email
+// content do, then the app tries to navigate away.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const report = (body) => fetch('/__probe/report', { method: 'POST', body: JSON.stringify(body) });
 
@@ -10,6 +10,14 @@ mail.target = '_blank';
 mail.rel = 'noreferrer';
 
 const clicks = [
+  () => {
+    const url = URL.createObjectURL(new Blob(['{"labels":[]}'], { type: 'application/json' }));
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'labels.json';
+    link.click();
+    URL.revokeObjectURL(url);
+  },
   () => window.open('https://example.com/new-window', '_blank', 'noreferrer'),
   () => mail.click(),
   () => window.open('file:///etc/passwd', '_blank'),

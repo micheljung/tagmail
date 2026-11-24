@@ -1,6 +1,6 @@
 //! The main webview stays on the app: web and mail links open in the
 //! system's handlers (here a script that records them), other links and
-//! navigations away are dropped.
+//! navigations away are dropped. The app's own blob downloads are saved.
 #![cfg(target_os = "linux")]
 
 #[path = "common/app.rs"]
@@ -35,6 +35,14 @@ async fn links_leave_the_app_only_for_the_system_handlers() {
         std::os::unix::fs::PermissionsExt::from_mode(0o755),
     )
     .unwrap();
+    let downloads = root.join("downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    std::fs::create_dir_all(root.join("xdg-config")).unwrap();
+    std::fs::write(
+        root.join("xdg-config/user-dirs.dirs"),
+        format!("XDG_DOWNLOAD_DIR=\"{}\"\n", downloads.display()),
+    )
+    .unwrap();
     let applications = root.join("xdg-data/applications");
     std::fs::create_dir_all(&applications).unwrap();
     std::fs::write(
@@ -64,7 +72,7 @@ async fn links_leave_the_app_only_for_the_system_handlers() {
     let mut app = Lines::spawn(command);
     app.wait("the links probe", START, probe(r#""stage":"ready""#.into()))
         .await;
-    for left in (0..3).rev() {
+    for left in (0..4).rev() {
         let clicked = Command::new("xdotool")
             .args([
                 "search",
@@ -106,7 +114,9 @@ async fn links_leave_the_app_only_for_the_system_handlers() {
     let mut seen = String::new();
     while Instant::now() < deadline {
         seen = std::fs::read_to_string(&opened).unwrap_or_default();
-        if want.iter().all(|w| seen.lines().any(|l| l == *w)) {
+        if want.iter().all(|w| seen.lines().any(|l| l == *w))
+            && downloads.join("labels.json").exists()
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -116,4 +126,8 @@ async fn links_leave_the_app_only_for_the_system_handlers() {
     let mut want = want.to_vec();
     want.sort_unstable();
     assert_eq!(lines, want, "only web and mail links reach the system");
+    assert_eq!(
+        std::fs::read_to_string(downloads.join("labels.json")).unwrap(),
+        r#"{"labels":[]}"#
+    );
 }
