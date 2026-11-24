@@ -964,7 +964,7 @@ async fn shutdown_does_not_wait_for_a_stalled_push_service() {
 }
 
 #[tokio::test]
-async fn a_lagging_dispatcher_still_counts_every_arrival() {
+async fn a_lagging_dispatcher_sends_generic_new_mail() {
     let dirs = Dirs::new();
     let server = Server::start(&dirs.config(loopback()), None).await.unwrap();
     let c = owner(&server).await;
@@ -978,9 +978,11 @@ async fn a_lagging_dispatcher_still_counts_every_arrival() {
             .feed()
             .publish_arrivals(vec![arrival(1, i, "Bulk", "Hi")]);
     }
-    let push = browser.decrypt(&mock.next().await.body);
-    assert_eq!(push["count"], BATCHES);
-    assert_eq!(push["url"], "/inbox");
+    assert_eq!(
+        browser.decrypt(&mock.next().await.body),
+        json!({"v": 1, "kind": "newMail", "url": "/inbox"}),
+        "missed arrivals leave count, account and sender unknown"
+    );
     mock.quiet().await;
     server.shutdown().await.unwrap();
 }

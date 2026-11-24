@@ -69,6 +69,8 @@ impl std::fmt::Debug for Sent {
 struct Pending {
     count: u32,
     newest: Option<Arrival>,
+    /// Arrivals were missed, so neither count nor newest are known.
+    lagged: bool,
     origin: String,
     since: Instant,
 }
@@ -86,8 +88,8 @@ impl std::fmt::Debug for Pending {
 impl Pending {
     fn payload(&self, preview: bool) -> PushPayloadDto {
         match &self.newest {
-            Some(newest) => payload::new_mail(newest, self.count, preview),
-            None => payload::count_only(None, self.count),
+            Some(newest) if !self.lagged => payload::new_mail(newest, self.count, preview),
+            _ => payload::unknown_new_mail(),
         }
     }
 }
@@ -207,6 +209,7 @@ impl Dispatcher {
             .or_insert_with(|| Pending {
                 count: 0,
                 newest: None,
+                lagged: false,
                 origin: origin_of(&target.endpoint),
                 since: Instant::now(),
             })
@@ -231,17 +234,15 @@ impl Dispatcher {
         }
     }
 
-    /// Arrivals were missed: every subscription gets a count-only push.
+    /// Batches of arrivals were missed: every subscription gets a generic
+    /// push, since whose mail and how much is unknown.
     async fn lagged(&mut self, missed: u64) {
         tracing::warn!(missed, "push dispatcher lagged behind arrivals");
         let Some((targets, _)) = self.targets().await else {
             return;
         };
-        let missed = u32::try_from(missed).unwrap_or(u32::MAX);
         for target in &targets {
-            let pending = self.pending_for(target);
-            pending.count = pending.count.saturating_add(missed);
-            pending.newest = None;
+            self.pending_for(target).lagged = true;
         }
     }
 
@@ -492,6 +493,7 @@ mod tests {
         };
         let pending = Pending {
             count: 1,
+            lagged: false,
             newest: Some(Arrival {
                 account_id: 1,
                 message_id: 1,

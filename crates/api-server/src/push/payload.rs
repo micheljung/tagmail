@@ -55,13 +55,14 @@ pub fn new_mail(newest: &Arrival, count: u32, preview: bool) -> PushPayloadDto {
     }
 }
 
-/// A push without arrivals behind it, e.g. after the dispatcher lagged.
-pub fn count_only(account_id: Option<i64>, count: u32) -> PushPayloadDto {
+/// "New mail" without account or count, after the dispatcher missed
+/// arrivals and so knows neither.
+pub fn unknown_new_mail() -> PushPayloadDto {
     PushPayloadDto {
         v: PUSH_PAYLOAD_VERSION,
         kind: PushKindDto::NewMail,
-        account_id,
-        count: Some(count),
+        account_id: None,
+        count: None,
         thread_id: None,
         from: None,
         subject: None,
@@ -171,14 +172,14 @@ mod tests {
     }
 
     #[test]
-    fn test_and_count_only_payloads() {
+    fn test_and_unknown_new_mail_payloads() {
         assert_eq!(
             value(&test()),
             json!({"v": 1, "kind": "test", "url": "/settings/notifications"})
         );
         assert_eq!(
-            value(&count_only(None, 70)),
-            json!({"v": 1, "kind": "newMail", "count": 70, "url": "/inbox"})
+            value(&unknown_new_mail()),
+            json!({"v": 1, "kind": "newMail", "url": "/inbox"})
         );
     }
 }
