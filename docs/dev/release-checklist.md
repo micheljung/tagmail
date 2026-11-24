@@ -5,12 +5,14 @@ notifications (AC 17) and `mailto:` (AC 18) there automatically. macOS
 (WKWebView) and Windows (WebView2) have no such harness, so before a release
 the owner runs this list on real hardware and signs it off below.
 
-Bundles come from the **Release dry-run** workflow (`release.yml`): download
-the `bundles-universal-apple-darwin` (`.dmg`) and
+Bundles come from the **Release** workflow (`release.yml`), which builds
+them without publishing on pull requests and manual runs: download the
+`bundles-universal-apple-darwin` (`.dmg`) and
 `bundles-x86_64-pc-windows-msvc` (`.msi`, `-setup.exe`) artifacts of the
-commit under test and compare them against its `SHA256SUMS` artifact. The
-bundles are unsigned until M7: on macOS open the app with right-click → Open,
-on Windows choose "More info → Run anyway" in SmartScreen.
+commit under test and compare them against the `SHA256SUMS` in its
+`release-assets` artifact. The bundles are unsigned (owner decision): on
+macOS open the app with right-click → Open, on Windows choose "More info →
+Run anyway" in SmartScreen.
 
 You need a Tagmail server reachable from the machine, with an IMAP account
 whose inbox you can send to from another client.
