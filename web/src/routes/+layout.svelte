@@ -62,7 +62,7 @@
 		isDesktop = transport instanceof TauriTransport;
 		if (!(transport instanceof TauriTransport)) {
 			startPwa();
-			return connectivity.watch();
+			return connectivity.watch(window, () => api.transport.request('/api/version'));
 		}
 		const stop = desktop.start(api, (event, handler) => transport.listen(event, handler), {
 			mailto: (draft) => composer.open(draft),

@@ -281,9 +281,15 @@ test('the service worker controls the app and never caches the API', async ({ pa
 	expect(paths.filter((p) => p.startsWith('/api'))).toEqual([]);
 });
 
-test('offline, the app shell still loads and says so', async ({ page, context }) => {
+test('offline, the app shell still loads and says so, and recovers online', async ({
+	page,
+	context
+}) => {
+	await stubPush(page, { existing: VAPID_PUBLIC_KEY });
 	await openInbox(page);
 	await controlled(page);
+	await expect.poll(async () => (await mockPush(page)).posted.length).toBeGreaterThan(0);
+	const synced = (await mockPush(page)).posted.length;
 	await context.setOffline(true);
 	await page.reload();
 	await expect(page.locator('[data-offline]')).toHaveText(
@@ -291,9 +297,9 @@ test('offline, the app shell still loads and says so', async ({ page, context })
 	);
 	await expect(page.getByRole('link', { name: 'Inbox', exact: true })).toBeVisible();
 	await context.setOffline(false);
-	await page.reload();
 	await expect(row(page, 0).locator('[data-loaded]')).toBeVisible();
 	await expect(page.locator('[data-offline]')).toHaveCount(0);
+	await expect.poll(async () => (await mockPush(page)).posted.length).toBe(synced + 1);
 });
 
 test('a push shows its notification, without preview and when malformed too', async ({

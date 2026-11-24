@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { afterNavigate, goto } from '$app/navigation';
+	import { afterNavigate, goto, invalidateAll } from '$app/navigation';
 	import { page } from '$app/state';
 	import { shortcuts } from '#lib/shortcuts/index.ts';
 	import ComposeDock from '#lib/compose/ComposeDock.svelte';
@@ -25,6 +25,7 @@
 	import Logo from '#lib/ui/Logo.svelte';
 	import NavRail from '#lib/ui/NavRail.svelte';
 	import OfflineBanner from '#lib/pwa/OfflineBanner.svelte';
+	import { connectivity } from '#lib/pwa/connectivity.svelte.ts';
 	import { withAccount } from '#lib/views.ts';
 	import SearchBar from '#lib/ui/SearchBar.svelte';
 	import { onMount, tick } from 'svelte';
@@ -157,9 +158,16 @@
 					return false;
 			}
 		});
+		const stopRecovery = connectivity.onRecovered(() => {
+			void invalidateAll();
+			void nav.load();
+			void accounts.load();
+			for (const list of lists.all()) void list.load();
+		});
 		return () => {
 			mq.removeEventListener('change', onChange);
 			pop();
+			stopRecovery();
 		};
 	});
 
