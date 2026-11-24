@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { afterNavigate, goto, invalidateAll } from '$app/navigation';
+	import { afterNavigate, goto, invalidateAll, replaceState } from '$app/navigation';
 	import { page } from '$app/state';
 	import { shortcuts } from '#lib/shortcuts/index.ts';
 	import ComposeDock from '#lib/compose/ComposeDock.svelte';
@@ -41,11 +41,11 @@
 	let menuButton: HTMLButtonElement | undefined = $state();
 	let navEl: HTMLDivElement | undefined = $state();
 	/**
-	 * History entries the app pushed since it was entered, so history.back()
-	 * stays inside it. The navigation that mounts the app (a page load, or the
-	 * replacing redirect after login) adds none.
+	 * `page.state.appIndex` of the current entry, so history.back() stays
+	 * inside the app. Each entry keeps its own index: popstate and replacing
+	 * navigations (which carry `page.state` over) restore it rather than count.
 	 */
-	let depth = 0;
+	let appIndex = 0;
 	let entered = false;
 
 	const PHONE_QUERY = '(max-width: 720px)';
@@ -73,12 +73,19 @@
 	);
 
 	afterNavigate((navigation) => {
-		if (!entered) entered = true;
-		else depth = Math.max(0, depth + (navigation.type === 'popstate' ? navigation.delta : 1));
+		const pushed = entered && navigation.type !== 'popstate';
+		entered = true;
+		const kept = page.state.appIndex;
+		if (kept !== undefined) {
+			appIndex = kept;
+			return;
+		}
+		appIndex = pushed ? appIndex + 1 : 0;
+		void replaceState('', { ...page.state, appIndex });
 	});
 
 	function back() {
-		if (depth > 0) history.back();
+		if (appIndex > 0) history.back();
 		else void goto('/inbox');
 	}
 

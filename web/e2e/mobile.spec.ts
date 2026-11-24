@@ -104,6 +104,15 @@ test('Back from a deep link opened before signing in goes to the inbox', async (
 	await expect(row(page, 0).locator('[data-loaded]')).toBeVisible();
 });
 
+test('Back from a deep link that redirected to its thread goes to the inbox', async ({ page }) => {
+	await signIn(page);
+	await page.goto('/thread/999999');
+	await expect(page).toHaveURL(new RegExp(`/thread/${idAt(0)}$`));
+	await page.getByRole('button', { name: 'Back' }).tap();
+	await expect(page).toHaveURL(/\/inbox$/);
+	await expect(row(page, 0).locator('[data-loaded]')).toBeVisible();
+});
+
 test('compose opens as a full-screen sheet', async ({ page }) => {
 	await openInbox(page);
 	await page.getByRole('button', { name: 'Menu', exact: true }).tap();
