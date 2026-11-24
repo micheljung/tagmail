@@ -150,6 +150,23 @@ test('a pair link while paired asks first and never navigates on its own', async
 	await expect(page.getByLabel('Pairing code')).toHaveValue('K7QD2XPM');
 });
 
+test('a pair link warns when only the scheme, port or path differs', async ({ page }) => {
+	await asDesktop(page);
+	await signIn(page);
+	await page.goto('/inbox');
+	const confirm = page.getByRole('dialog', { name: 'Connect to a different server?' });
+	await emit(page, 'desktop:pair', { server: 'https://mail.example.com/other', code: 'K7QD2XPM' });
+	await expect(confirm.locator('[data-host="current"]')).toHaveText('https://mail.example.com');
+	await expect(confirm.locator('[data-host="new"]')).toHaveText('https://mail.example.com/other');
+	await expect(confirm).toContainText('stay on this device and are never sent');
+	await page.keyboard.press('Escape');
+	await expect(confirm).toBeHidden();
+
+	await emit(page, 'desktop:pair', { server: 'https://mail.example.com/', code: 'K7QD2XPM' });
+	await expect(confirm).toBeVisible();
+	await expect(confirm).not.toContainText('never sent');
+});
+
 test('a mailto link opens a prefilled compose window', async ({ page }) => {
 	await asDesktop(page);
 	await signIn(page);

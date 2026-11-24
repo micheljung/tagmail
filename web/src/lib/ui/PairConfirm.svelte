@@ -1,13 +1,22 @@
 <script lang="ts">
 	import { desktop } from '../desktop/desktop.svelte';
-	import { serverHost } from '../desktop/host';
+	import { serverHost, serverIdentity } from '../desktop/host';
 
 	let { onconfirm }: { onconfirm: () => void } = $props();
 
 	let dialog: HTMLDialogElement;
 
-	const current = $derived(desktop.status?.server ? serverHost(desktop.status.server) : null);
-	const next = $derived(desktop.repair ? serverHost(desktop.repair.server) : '');
+	const currentServer = $derived(desktop.status?.server ?? null);
+	const nextServer = $derived(desktop.repair?.server ?? '');
+	const other = $derived(
+		!currentServer || serverIdentity(currentServer) !== serverIdentity(nextServer)
+	);
+	const sameHost = $derived(
+		!!currentServer && serverHost(currentServer) === serverHost(nextServer)
+	);
+	const label = (server: string) => (sameHost ? serverIdentity(server) : serverHost(server));
+	const current = $derived(currentServer ? label(currentServer) : null);
+	const next = $derived(label(nextServer));
 
 	$effect(() => {
 		if (desktop.repair && !dialog.open) dialog.showModal();
@@ -27,7 +36,7 @@
 		instead of
 		<strong data-host="current">{current ?? 'your current server'}</strong>.
 	</p>
-	{#if current !== next}
+	{#if other}
 		<p>
 			Changes not yet sent to {current ?? 'your current server'} stay on this device and are never sent
 			to {next}.

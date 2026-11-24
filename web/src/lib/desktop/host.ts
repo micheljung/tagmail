@@ -6,3 +6,13 @@ export function serverHost(server: string): string {
 		return server;
 	}
 }
+
+/** What the app binds unsent changes to: scheme, host, port and path, like the replica's server identity. */
+export function serverIdentity(server: string): string {
+	try {
+		const url = new URL(server);
+		return url.origin + url.pathname.replace(/\/+$/, '');
+	} catch {
+		return server;
+	}
+}

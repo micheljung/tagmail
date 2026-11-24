@@ -5,7 +5,7 @@ import { Api, ApiError } from '../transport/api';
 import { HttpTransport } from '../transport/http';
 import type { Listen } from '../transport/tauri';
 import { DesktopStore, OFFLINE_TEXT, mailtoDraft } from './desktop.svelte';
-import { serverHost } from './host';
+import { serverHost, serverIdentity } from './host';
 
 const live: DesktopStatusDto = {
 	paired: true,
@@ -135,6 +135,16 @@ describe('pair links', () => {
 	it('name hosts in punycode', () => {
 		expect(serverHost('https://bücher.example:8443/x')).toBe('xn--bcher-kva.example:8443');
 		expect(serverHost('not a url')).toBe('not a url');
+	});
+
+	it('tell servers apart by scheme, host, port and path', () => {
+		const id = serverIdentity;
+		expect(id('https://Mail.example.com/')).toBe(id('https://mail.example.com'));
+		expect(id('https://mail.example.com:443/tagmail/')).toBe('https://mail.example.com/tagmail');
+		expect(id('https://bücher.example/x?y#z')).toBe('https://xn--bcher-kva.example/x');
+		expect(id('https://mail.example.com/a')).not.toBe(id('https://mail.example.com/b'));
+		expect(id('https://mail.example.com:8443')).not.toBe(id('https://mail.example.com'));
+		expect(id('http://localhost:8080')).not.toBe(id('https://localhost:8080'));
 	});
 });
 
