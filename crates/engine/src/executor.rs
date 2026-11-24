@@ -880,28 +880,38 @@ pub(crate) struct Batch {
     pub dropped_label: Option<String>,
 }
 
+/// Marks `due` running and returns the ops that were still pending: one
+/// settled, discarded or retried since `due` was read is left alone, so its
+/// state is never overwritten by this run.
+pub(crate) async fn claim(config: &ConfigDb, due: Vec<Stored>) -> Result<Vec<Stored>> {
+    Ok(config
+        .write(move |tx| {
+            let mut claimed = Vec::with_capacity(due.len());
+            for s in due {
+                let changed = tx.execute(
+                    "UPDATE pending_op SET state = 'running' WHERE op_id = ?1 AND state = 'pending'",
+                    [&s.op.id],
+                )?;
+                if changed == 1 {
+                    claimed.push(s);
+                }
+            }
+            Ok(claimed)
+        })
+        .await?)
+}
+
 async fn run_ops<F: ConnectorFactory>(
     engine: &Engine<F>,
     ctx: &Ctx,
     account: AccountId,
     due: Vec<Stored>,
 ) -> Result<()> {
+    let due = claim(&engine.inner.stores.config, due).await?;
+    if due.is_empty() {
+        return Ok(());
+    }
     let ids: Vec<String> = due.iter().map(|s| s.op.id.clone()).collect();
-    let running = ids.clone();
-    engine
-        .inner
-        .stores
-        .config
-        .write(move |tx| {
-            for id in running {
-                tx.execute(
-                    "UPDATE pending_op SET state = 'running' WHERE op_id = ?1 AND state = 'pending'",
-                    [id],
-                )?;
-            }
-            Ok(())
-        })
-        .await?;
     let ops: Vec<Op> = due.iter().map(|s| s.op.clone()).collect();
     let mode = engine.inner.overlays.get(account).archive_mode;
     let result = engine
@@ -925,7 +935,7 @@ async fn run_ops<F: ConnectorFactory>(
                     for id in ids {
                         tx.execute(
                             "UPDATE pending_op SET state = 'pending', next_at = ?2, error = ?3 \
-                             WHERE op_id = ?1",
+                             WHERE op_id = ?1 AND state = 'running'",
                             params![id, now + wait, why],
                         )?;
                     }

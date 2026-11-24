@@ -920,3 +920,44 @@ async fn label_rename_job_resumes_from_persisted_progress() {
     .await;
     f.engine.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_run_never_claims_an_op_that_left_pending() {
+    let dir = TempDir::new().unwrap();
+    let (config, _) = config_db(dir.path()).await;
+    let stale = config
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO pending_op (op_id, account_id, kind) VALUES \
+                 ('settled', 1, 'markRead'), ('open', 1, 'markRead');",
+            )?;
+            let stale = crate::executor::load_pending(tx)?;
+            tx.execute(
+                "UPDATE pending_op SET state = 'done' WHERE op_id = 'settled'",
+                [],
+            )?;
+            Ok(stale)
+        })
+        .await
+        .unwrap();
+    assert_eq!(stale.len(), 2);
+
+    let claimed = crate::executor::claim(&config, stale).await.unwrap();
+    let claimed: Vec<&str> = claimed.iter().map(|s| s.op.id.as_str()).collect();
+    assert_eq!(claimed, ["open"]);
+    let states: Vec<(String, String)> = config
+        .read(|c| {
+            let mut stmt = c.prepare("SELECT op_id, state FROM pending_op ORDER BY op_id")?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<tagmail_store::rusqlite::Result<_>>()?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        states,
+        [
+            ("open".to_owned(), "running".to_owned()),
+            ("settled".to_owned(), "done".to_owned()),
+        ]
+    );
+}
