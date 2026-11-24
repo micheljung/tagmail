@@ -24,6 +24,7 @@
 	import UnsyncedPanel from '#lib/ui/UnsyncedPanel.svelte';
 	import Logo from '#lib/ui/Logo.svelte';
 	import NavRail from '#lib/ui/NavRail.svelte';
+	import OfflineBanner from '#lib/pwa/OfflineBanner.svelte';
 	import { withAccount } from '#lib/views.ts';
 	import SearchBar from '#lib/ui/SearchBar.svelte';
 	import { onMount } from 'svelte';
@@ -173,6 +174,7 @@
 	></button>
 	<main id="main">
 		<DesktopBanners />
+		<OfflineBanner />
 		{#if accounts.notices.length > 0}
 			<ul class="banners">
 				{#each accounts.notices as notice (`${notice.accountId}:${notice.code}`)}

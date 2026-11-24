@@ -30,21 +30,38 @@ export class HttpTransport implements ApiTransport {
 	readonly #fetch: typeof fetch;
 	readonly #eventSource: EventSourceFactory;
 	readonly #base: string;
+	readonly #onReachable: (reachable: boolean) => void;
 
 	constructor(
-		options: { fetch?: typeof fetch; eventSource?: EventSourceFactory; base?: string } = {}
+		options: {
+			fetch?: typeof fetch;
+			eventSource?: EventSourceFactory;
+			base?: string;
+			/** Told after each request whether the server answered at all. */
+			onReachable?: (reachable: boolean) => void;
+		} = {}
 	) {
 		this.#fetch = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
 		this.#eventSource =
 			options.eventSource ?? ((url) => new EventSource(url, { withCredentials: true }));
 		this.#base = options.base ?? '';
+		this.#onReachable = options.onReachable ?? (() => {});
 	}
 
 	request(path: string, init: RequestInit = {}): Promise<Response> {
 		const headers = new Headers(init.headers);
 		const method = (init.method ?? 'GET').toUpperCase();
 		if (!SAFE_METHODS.has(method)) headers.set(CSRF_HEADER, CSRF_VALUE);
-		return this.#fetch(this.#base + path, { ...init, headers, credentials: 'same-origin' });
+		return this.#fetch(this.#base + path, { ...init, headers, credentials: 'same-origin' }).then(
+			(response) => {
+				this.#onReachable(true);
+				return response;
+			},
+			(error: unknown) => {
+				if (error instanceof TypeError) this.#onReachable(false);
+				throw error;
+			}
+		);
 	}
 
 	events(since: string | undefined, onEvent: (event: ApiEvent) => void): () => void {

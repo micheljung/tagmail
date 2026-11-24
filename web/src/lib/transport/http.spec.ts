@@ -45,6 +45,26 @@ describe('HttpTransport.request', () => {
 		expect(post.get(CSRF_HEADER)).toBe('tagmail');
 		expect(fetch.mock.calls[1][1]?.credentials).toBe('same-origin');
 	});
+
+	it('reports whether the server answered', async () => {
+		const reports: boolean[] = [];
+		const failing = vi.fn<typeof globalThis.fetch>(() =>
+			Promise.reject(new TypeError('Failed to fetch'))
+		);
+		const down = new HttpTransport({ fetch: failing, onReachable: (r) => reports.push(r) });
+		await expect(down.request('/api/labels')).rejects.toThrow(TypeError);
+		const aborting = vi.fn<typeof globalThis.fetch>(() =>
+			Promise.reject(new DOMException('aborted', 'AbortError'))
+		);
+		const aborted = new HttpTransport({ fetch: aborting, onReachable: (r) => reports.push(r) });
+		await expect(aborted.request('/api/labels')).rejects.toThrow('aborted');
+		const answering = vi.fn<typeof globalThis.fetch>(() =>
+			Promise.resolve(new Response('', { status: 502 }))
+		);
+		const up = new HttpTransport({ fetch: answering, onReachable: (r) => reports.push(r) });
+		await up.request('/api/labels');
+		expect(reports).toEqual([false, true]);
+	});
 });
 
 describe('HttpTransport.events', () => {

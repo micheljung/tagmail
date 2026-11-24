@@ -12,6 +12,8 @@ export const load: LayoutLoad = async ({ url }) => {
 			const next = url.pathname + url.search;
 			redirect(307, `/login?next=${encodeURIComponent(next)}`);
 		}
+		// Offline, the cached shell still renders and shows the offline banner.
+		if (e instanceof TypeError) return { session: null };
 		throw e;
 	}
 };

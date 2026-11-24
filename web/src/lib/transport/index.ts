@@ -1,4 +1,5 @@
 import type { ApiTransport } from '@tagmail/api-types';
+import { connectivity } from '../pwa/connectivity.svelte';
 import { Api } from './api';
 import { HttpTransport } from './http';
 import { TauriTransport, isDesktop } from './tauri';
@@ -37,7 +38,9 @@ export { TauriTransport, isDesktop } from './tauri';
 
 /** One SPA build serves the web and the desktop app; the transport is picked at runtime. */
 export function createTransport(): ApiTransport {
-	return isDesktop() ? new TauriTransport() : new HttpTransport();
+	return isDesktop()
+		? new TauriTransport()
+		: new HttpTransport({ onReachable: (reachable) => connectivity.report(reachable) });
 }
 
 /** The app's single API client. */

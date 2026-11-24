@@ -56,6 +56,8 @@ const TYPES: Record<string, string> = {
 	'.svg': 'image/svg+xml',
 	'.woff2': 'font/woff2',
 	'.json': 'application/json',
+	'.webmanifest': 'application/manifest+json',
+	'.png': 'image/png',
 	'.txt': 'text/plain'
 };
 
