@@ -46,9 +46,9 @@ When a server drops a label, Tagmail shows a banner for that account:
   settings, Privacy & Security).
 - Servers: `imap.fastmail.com` port 993 with TLS, `smtp.fastmail.com`
   port 465 with TLS.
-- Fastmail advertises `OBJECTID`, so messages keep their identity across
-  moves. Keyword persistence is not yet probed; see [Fastmail](#fastmail)
-  under the probe.
+- Fastmail is expected to advertise `OBJECTID`, so messages would keep
+  their identity across moves; neither that nor keyword persistence is
+  probed yet. See [Fastmail](#fastmail) under the probe.
 
 ### Outlook.com and Microsoft 365
 
