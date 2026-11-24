@@ -116,6 +116,7 @@ pub struct MailboxRow {
     pub cursor: Option<u32>,
     pub snapshot: Option<u64>,
     pub last_poll_at: Option<i64>,
+    pub delimiter: Option<char>,
 }
 
 impl MailboxRow {
@@ -123,6 +124,9 @@ impl MailboxRow {
         self.name.eq_ignore_ascii_case("INBOX")
     }
 }
+
+/// id, name, special-use and delimiter of a cached mailbox.
+type CachedMailbox = (i64, String, Option<SpecialUse>, Option<char>);
 
 /// A mailbox as LISTed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,7 +153,8 @@ fn modseq_sql(v: Option<u64>) -> Option<i64> {
 }
 
 const MAILBOX_COLUMNS: &str = "id, name, special_use, uidvalidity, uidnext, highestmodseq, \
-     nomodseq, keyword_capable, sync_state, sync_cursor_uid, snapshot_modseq, last_poll_at";
+     nomodseq, keyword_capable, sync_state, sync_cursor_uid, snapshot_modseq, last_poll_at, \
+     delimiter";
 
 fn mailbox_row(
     r: &tagmail_store::rusqlite::Row<'_>,
@@ -167,6 +172,7 @@ fn mailbox_row(
         cursor: r.get(9)?,
         snapshot: r.get(10)?,
         last_poll_at: r.get(11)?,
+        delimiter: r.get(12)?,
     })
 }
 
@@ -183,6 +189,7 @@ struct RawMailbox {
     cursor: Option<i64>,
     snapshot: Option<i64>,
     last_poll_at: Option<i64>,
+    delimiter: Option<String>,
 }
 
 impl RawMailbox {
@@ -200,6 +207,7 @@ impl RawMailbox {
             cursor: to_u32(self.cursor),
             snapshot: to_u64(self.snapshot),
             last_poll_at: self.last_poll_at,
+            delimiter: self.delimiter.and_then(|d| d.chars().next()),
         })
     }
 }
@@ -314,7 +322,7 @@ pub struct W<'a> {
     overlay: Arc<AccountOverlay>,
     /// The account's mailboxes `(id, name, special_use)`, read once per
     /// transaction while the overlay is not empty.
-    views: Option<Vec<(i64, String, Option<SpecialUse>)>>,
+    views: Option<Vec<CachedMailbox>>,
     /// The account's INBOX if it is live, read once per transaction.
     live_inbox: Option<Option<i64>>,
     arrivals: Vec<Arrival>,
@@ -381,10 +389,10 @@ impl<'a> W<'a> {
         self
     }
 
-    fn views(&mut self) -> Result<&[(i64, String, Option<SpecialUse>)]> {
+    fn views(&mut self) -> Result<&[CachedMailbox]> {
         if self.views.is_none() {
             let mut stmt = self.conn.prepare_cached(
-                "SELECT id, name, special_use FROM mailbox WHERE account_id = ?1",
+                "SELECT id, name, special_use, delimiter FROM mailbox WHERE account_id = ?1",
             )?;
             let rows = stmt
                 .query_map([self.account], |r| {
@@ -392,12 +400,20 @@ impl<'a> W<'a> {
                         r.get::<_, i64>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, Option<String>>(2)?,
+                        r.get::<_, Option<String>>(3)?,
                     ))
                 })?
                 .collect::<tagmail_store::rusqlite::Result<Vec<_>>>()?;
             self.views = Some(
                 rows.into_iter()
-                    .map(|(id, name, u)| (id, name, u.and_then(|u| u.parse().ok())))
+                    .map(|(id, name, u, d)| {
+                        (
+                            id,
+                            name,
+                            u.and_then(|u| u.parse().ok()),
+                            d.and_then(|d| d.chars().next()),
+                        )
+                    })
                     .collect(),
             );
         }
@@ -432,7 +448,7 @@ impl<'a> W<'a> {
         let has_all = self
             .views()?
             .iter()
-            .any(|(_, _, u)| *u == Some(SpecialUse::All));
+            .any(|(_, _, u, _)| *u == Some(SpecialUse::All));
         Ok(ArchiveMode::detect(configured, has_all))
     }
 
@@ -440,11 +456,12 @@ impl<'a> W<'a> {
     fn mailbox_views(&mut self) -> Result<Vec<(i64, String, Role, bool)>> {
         let mode = self.archive_mode()?;
         let views = self.views()?;
-        let archive = ops::archive_mailbox(mode, views.iter().map(|(_, n, u)| (n.as_str(), *u)))
-            .map(str::to_owned);
+        let archive =
+            ops::archive_mailbox(mode, views.iter().map(|(_, n, u, d)| (n.as_str(), *u, *d)))
+                .map(str::to_owned);
         Ok(views
             .iter()
-            .map(|(id, name, u)| {
+            .map(|(id, name, u, _)| {
                 (
                     *id,
                     name.clone(),

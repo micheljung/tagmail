@@ -56,6 +56,16 @@ const IDLE_WAIT: Duration = Duration::from_secs(3600);
 const TRASH_NAMES: &[&str] = &["Trash", "Deleted Items", "Deleted Messages"];
 const JUNK_NAMES: &[&str] = &["Junk", "Spam", "Junk E-mail"];
 
+/// Names `u` is found by without a special-use attribute; the first is
+/// the one created when none exists.
+fn fallback_names(u: SpecialUse) -> &'static [&'static str] {
+    match u {
+        SpecialUse::Trash => TRASH_NAMES,
+        SpecialUse::Junk => JUNK_NAMES,
+        _ => &[],
+    }
+}
+
 pub(crate) fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1108,6 +1118,7 @@ impl Mailboxes {
                 name: r.name.clone(),
                 special_use: r.special_use,
                 uidvalidity,
+                delimiter: r.delimiter,
             });
         }
         let has_all = rows.iter().any(|r| r.special_use == Some(SpecialUse::All));
@@ -1123,7 +1134,7 @@ impl Mailboxes {
             self.mode,
             self.candidates
                 .iter()
-                .map(|c| (c.name.as_str(), c.special_use)),
+                .map(|c| (c.name.as_str(), c.special_use, c.delimiter)),
         )
         .map(str::to_owned)
     }
@@ -1142,22 +1153,44 @@ impl Mailboxes {
     }
 
     fn by_special_use(&self, u: SpecialUse) -> Option<String> {
-        let fallback: &[&str] = match u {
-            SpecialUse::Trash => TRASH_NAMES,
-            SpecialUse::Junk => JUNK_NAMES,
-            _ => &[],
-        };
         self.candidates
             .iter()
             .find(|c| c.special_use == Some(u))
+            .map(|c| c.name.as_str())
             .or_else(|| {
-                fallback.iter().find_map(|n| {
+                ops::folder_named(
+                    fallback_names(u),
                     self.candidates
                         .iter()
-                        .find(|c| c.special_use.is_none() && c.name.eq_ignore_ascii_case(n))
-                })
+                        .filter(|c| c.special_use.is_none())
+                        .map(|c| (c.name.as_str(), c.delimiter)),
+                )
             })
-            .map(|c| c.name.clone())
+            .map(str::to_owned)
+    }
+
+    /// Creates the folder `leaf` where the account keeps its folders and
+    /// reloads the mailboxes.
+    async fn create<S: ImapSession>(
+        &mut self,
+        s: &mut S,
+        ctx: &Ctx,
+        leaf: &str,
+    ) -> std::result::Result<(), OpError> {
+        let name = ops::new_folder_name(
+            leaf,
+            self.candidates
+                .iter()
+                .map(|c| (c.name.as_str(), c.delimiter)),
+        );
+        s.create_mailbox(&name)
+            .await
+            .map_err(|e| match OpError::from(e) {
+                OpError::Failed(why) => OpError::Failed(format!("creating {name} failed: {why}")),
+                fatal => fatal,
+            })?;
+        *self = Mailboxes::load(s, ctx, Some(self.mode)).await?;
+        Ok(())
     }
 
     fn inbox(&self) -> Option<String> {
@@ -1473,7 +1506,7 @@ fn max_modseq(locs: &[Loc]) -> Option<ModSeq> {
 }
 
 /// The server mailbox a moving op puts messages into, created when the
-/// account archives into a missing `Archive` folder.
+/// account lacks its `Archive`, Trash or Junk folder.
 async fn destination<S: ImapSession>(
     s: &mut S,
     ctx: &Ctx,
@@ -1488,8 +1521,7 @@ async fn destination<S: ImapSession>(
         Destination::Archive => match mbs.archive_name() {
             Some(name) => Some(name),
             None if mbs.mode == ArchiveMode::MoveArchive => {
-                s.create_mailbox(ARCHIVE_NAME).await?;
-                *mbs = Mailboxes::load(s, ctx, Some(mbs.mode)).await?;
+                mbs.create(s, ctx, ARCHIVE_NAME).await?;
                 mbs.archive_name()
             }
             None => {
@@ -1498,7 +1530,14 @@ async fn destination<S: ImapSession>(
                 ));
             }
         },
-        Destination::Special(u) => mbs.by_special_use(*u),
+        Destination::Special(u) => match (mbs.by_special_use(*u), fallback_names(*u).first()) {
+            (Some(name), _) => Some(name),
+            (None, Some(leaf)) => {
+                mbs.create(s, ctx, leaf).await?;
+                mbs.by_special_use(*u)
+            }
+            (None, None) => None,
+        },
         Destination::Mailbox(r) => ops::resolve_mailbox(r, &mbs.candidates).map(|c| c.name.clone()),
     };
     match found {

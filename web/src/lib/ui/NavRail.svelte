@@ -302,6 +302,10 @@
 		overflow-y: auto;
 	}
 
+	.rail > * {
+		flex-shrink: 0;
+	}
+
 	.compose {
 		display: inline-flex;
 		align-items: center;
