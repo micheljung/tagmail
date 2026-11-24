@@ -10,6 +10,10 @@ export interface PushPrefs {
 	accountIds: number[] | null;
 }
 
+/**
+ * Never rejects: storage can be unavailable (private mode, quota, a blocked
+ * upgrade) and registering must not depend on it.
+ */
 export interface PushPrefStore {
 	get(): Promise<PushPrefs | undefined>;
 	set(prefs: PushPrefs): Promise<void>;
@@ -53,10 +57,14 @@ export function idbPushPrefs(factory: () => IDBFactory = () => indexedDB): PushP
 			db.close();
 		}
 	};
+	const warn = (error: unknown) => console.warn('push settings storage failed', error);
 	return {
-		get: () => run('readonly', (s) => s.get(KEY) as IDBRequest<PushPrefs | undefined>),
-		set: async (prefs) => void (await run('readwrite', (s) => s.put(prefs, KEY))),
-		clear: async () => void (await run('readwrite', (s) => s.delete(KEY)))
+		get: () =>
+			run('readonly', (s) => s.get(KEY) as IDBRequest<PushPrefs | undefined>).catch(
+				(error: unknown) => (warn(error), undefined)
+			),
+		set: (prefs) => run('readwrite', (s) => s.put(prefs, KEY)).then(() => {}, warn),
+		clear: () => run('readwrite', (s) => s.delete(KEY)).then(() => {}, warn)
 	};
 }
 

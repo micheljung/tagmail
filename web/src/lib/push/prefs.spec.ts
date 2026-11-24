@@ -1,5 +1,5 @@
 import { IDBFactory } from 'fake-indexeddb';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { idbPushPrefs, type PushPrefs } from './prefs';
 
 const PREFS: PushPrefs = { endpoint: 'https://push.example/a', preview: false, accountIds: [2] };
@@ -24,5 +24,17 @@ describe('idbPushPrefs', () => {
 		expect(await prefs.get()).toEqual({ ...PREFS, accountIds: null });
 		await prefs.clear();
 		expect(await prefs.get()).toBeUndefined();
+	});
+
+	it('reads nothing and drops writes when storage fails, instead of failing', async () => {
+		const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+		const prefs = idbPushPrefs(() => {
+			throw new DOMException('denied', 'SecurityError');
+		});
+		await expect(prefs.get()).resolves.toBeUndefined();
+		await expect(prefs.set(PREFS)).resolves.toBeUndefined();
+		await expect(prefs.clear()).resolves.toBeUndefined();
+		expect(warn).toHaveBeenCalledTimes(3);
+		warn.mockRestore();
 	});
 });
