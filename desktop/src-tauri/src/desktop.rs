@@ -99,13 +99,17 @@ fn internal(e: impl std::fmt::Display) -> api::Response {
 
 /// Creates `dir` readable by the user only.
 fn private_dir(dir: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
-    std::fs::set_permissions(
-        dir,
-        std::os::unix::fs::PermissionsExt::from_mode(PRIVATE_DIR_MODE),
-    )?;
-    Ok(())
+    {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(PRIVATE_DIR_MODE)
+            .create(dir)?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(PRIVATE_DIR_MODE))
+    }
+    #[cfg(not(unix))]
+    std::fs::create_dir_all(dir)
 }
 
 /// The name the server lists this device under.
