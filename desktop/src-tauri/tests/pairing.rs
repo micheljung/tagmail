@@ -1,5 +1,6 @@
 //! Pairing, syncing and unpairing through the desktop's local routes against
 //! an in-process server, without the webview.
+#![cfg(unix)]
 
 mod common;
 
@@ -102,8 +103,13 @@ async fn pairs_syncs_resumes_and_unpairs() {
             .is_some_and(|ids| ids.len() == SEEDED_THREADS as usize)
     })
     .await;
+    eventually("the live phase", SYNC, || async {
+        json_of(&call(&shell, Method::GET, "/api/desktop/status", Value::Null).await)["phase"]
+            ["kind"]
+            == "live"
+    })
+    .await;
     let status = json_of(&call(&shell, Method::GET, "/api/desktop/status", Value::Null).await);
-    assert_eq!(status["phase"]["kind"], "live");
     assert_eq!(status["online"], true);
     assert_eq!(
         status["warnings"][0],

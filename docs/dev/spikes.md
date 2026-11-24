@@ -121,7 +121,9 @@ workspace, because the main CI job has no WebKitGTK libraries. The replica
 logic and the protocol handler are a plain library (`cargo test`, no webview).
 The `app` feature adds the Tauri shell. On start, the SPA runs eight checks
 inside the webview, posts them to `/api/report`, and the process exits 0 only
-if all pass (`SPIKE_SELFTEST=1`). CI: `.github/workflows/desktop-spike.yml`.
+if all pass (`SPIKE_SELFTEST=1`). Retired in M5: `desktop/src-tauri` runs the
+same checks against the shipped SPA (`TAGMAIL_DESKTOP_SELFTEST=1`, CI in
+`desktop.yml`); the code is in git history before that removal.
 
 **Setup:** a synthetic mock server provides 1,000 messages in 334 threads as
 an NDJSON snapshot. They load into an in-memory SQLite replica (`message`,

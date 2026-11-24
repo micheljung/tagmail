@@ -47,6 +47,9 @@ zeroize.workspace = true
 tauri-build = { version = "2.7", optional = true }
 
 [dev-dependencies]
+tempfile.workspace = true
+
+# The in-process server links jemalloc, which does not build with MSVC.
+[target.'cfg(unix)'.dev-dependencies]
 reqwest = { workspace = true, features = ["rustls-no-provider", "json"] }
 tagmail-api-server = { path = "../../crates/api-server" }
-tempfile.workspace = true
