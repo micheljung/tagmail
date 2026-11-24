@@ -80,6 +80,33 @@ docker compose up -d
 Database migrations run on start. Back up the volume and the master key
 before upgrading; a newer version's databases may not open with an older one.
 
+## Backup
+
+The image has no shell, so a throwaway `busybox` container copies the data
+([what to back up](../../docs/backup.md#what-to-back-up)). Replace
+`tagmail_tagmail-data` with your volume's name:
+
+```sh
+docker compose stop
+docker run --rm -v tagmail_tagmail-data:/data:ro -v "$PWD:/backup" busybox \
+  sh -c 'cd /data && tar -cf /backup/tagmail-backup.tar config.db uploads outbox $(ls config.db-wal 2>/dev/null)'
+docker compose start
+```
+
+To restore into a new, empty volume:
+
+```sh
+docker compose down
+docker volume rm tagmail_tagmail-data
+docker compose create
+docker run --rm -v tagmail_tagmail-data:/data -v "$PWD:/backup:ro" busybox \
+  sh -c 'tar -xf /backup/tagmail-backup.tar -C /data && chown -R 65532:65532 /data'
+docker compose start
+```
+
+The master key is not in the volume; restore it to `master.key` from where
+you keep it.
+
 ## Build
 
 From the repository root:

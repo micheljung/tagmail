@@ -42,7 +42,7 @@ taken while the server runs can miss recent changes, which live in
   ```
 
 The Docker image has no shell or `sqlite3`; stop the container and copy
-the volume, as in [deploy/docker/README.md](../deploy/docker/README.md).
+the volume, as in [deploy/docker/README.md](../deploy/docker/README.md#backup).
 
 ## Restore
 
