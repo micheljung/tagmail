@@ -14,16 +14,6 @@ on:
       - rust-toolchain.toml
       - .github/workflows/desktop.yml
   pull_request:
-    paths:
-      - desktop/**
-      - web/**
-      - packages/**
-      - crates/**
-      - Cargo.toml
-      - Cargo.lock
-      - pnpm-lock.yaml
-      - rust-toolchain.toml
-      - .github/workflows/desktop.yml
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -37,7 +27,33 @@ env:
   TAGMAIL_DESKTOP_SELFTEST: "1"
 
 jobs:
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+    steps:
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            run:
+              - 'desktop/**'
+              - 'web/**'
+              - 'packages/**'
+              - 'crates/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'pnpm-lock.yaml'
+              - 'rust-toolchain.toml'
+              - '.github/workflows/desktop.yml'
+
   linux:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.run == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -78,6 +94,8 @@ jobs:
   # Build everywhere; the in-webview self-test is informational until
   # WKWebView and WebView2 have been checked by hand (release checklist).
   other:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.run == 'true') }}
     strategy:
       fail-fast: false
       matrix:
@@ -102,3 +120,12 @@ jobs:
         shell: bash
         timeout-minutes: 3
         continue-on-error: true
+
+  result:
+    name: desktop-result
+    needs: [changes, linux, other]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1

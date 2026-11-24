@@ -4,23 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    paths:
-      - flake.nix
-      - flake.lock
-      - deploy/nix/**
-      - Cargo.toml
-      - Cargo.lock
-      - rust-toolchain.toml
-      - .cargo/**
-      - crates/**
-      - xtask/**
-      - desktop/src-tauri/Cargo.toml
-      - package.json
-      - pnpm-lock.yaml
-      - pnpm-workspace.yaml
-      - packages/**
-      - web/**
-      - .github/workflows/nix.yml
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -30,7 +13,40 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+    steps:
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            run:
+              - 'flake.nix'
+              - 'flake.lock'
+              - 'deploy/nix/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/**'
+              - 'crates/**'
+              - 'xtask/**'
+              - 'desktop/src-tauri/Cargo.toml'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'packages/**'
+              - 'web/**'
+              - '.github/workflows/nix.yml'
+
   nix:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.run == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
@@ -58,3 +74,12 @@ jobs:
       - run: nix build .#tagmail-server -L
       - run: ./result/bin/tagmail-server --version
       - run: nix flake check -L
+
+  result:
+    name: nix-result
+    needs: [changes, nix]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1

@@ -53,6 +53,20 @@ After a visible UI change, regenerate them with
 
 All contributions are licensed under the AGPL-3.0, the project's license.
 
+## Required checks
+
+Branch protection on `main` requires these checks, which report on every
+pull request:
+
+- CI: `rust`, `web`, `required-files`, `docs`
+- E2E: `seed-readable`, `engine-dovecot`, `web-playwright`, `desktop-linux`
+- `desktop-result`, `docker-result`, `nix-result`, `release-result`,
+  `servers-result`
+
+Desktop, Docker, Nix, Release and Servers skip their builds when a pull
+request does not touch their paths; their `*-result` job passes when every
+job passed or was skipped. `docs-external` is informational.
+
 ## Releases
 
 Set the same version in `Cargo.toml` (workspace), `desktop/src-tauri/tauri.conf.json`,

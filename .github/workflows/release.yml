@@ -9,24 +9,6 @@ on:
   push:
     tags: ["v*"]
   pull_request:
-    paths:
-      - desktop/**
-      - web/**
-      - packages/**
-      - crates/**
-      - deploy/docker/**
-      - xtask/**
-      - .cargo/**
-      - Cargo.toml
-      - Cargo.lock
-      - rust-toolchain.toml
-      - package.json
-      - pnpm-lock.yaml
-      - pnpm-workspace.yaml
-      - LICENSE
-      - README.md
-      - .dockerignore
-      - .github/workflows/release.yml
   workflow_dispatch:
 
 concurrency:
@@ -44,7 +26,41 @@ env:
   SERVER_ASSETS: 2
 
 jobs:
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+    steps:
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            run:
+              - 'desktop/**'
+              - 'web/**'
+              - 'packages/**'
+              - 'crates/**'
+              - 'deploy/docker/**'
+              - 'xtask/**'
+              - '.cargo/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'package.json'
+              - 'pnpm-lock.yaml'
+              - 'pnpm-workspace.yaml'
+              - 'LICENSE'
+              - 'README.md'
+              - '.dockerignore'
+              - '.github/workflows/release.yml'
+
   version:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.run == 'true') }}
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.check.outputs.version }}
@@ -236,7 +252,8 @@ jobs:
           if-no-files-found: error
 
   image-check:
-    if: github.event_name != 'push' || github.ref_type != 'tag'
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'push' || github.ref_type != 'tag') && (github.event_name != 'pull_request' || needs.changes.outputs.run == 'true') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -363,3 +380,12 @@ jobs:
         run: >-
           gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
           --draft=false --latest="$LATEST"
+
+  result:
+    name: release-result
+    needs: [changes, version, bundle, server, image-check, checksums, draft, image, release]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1

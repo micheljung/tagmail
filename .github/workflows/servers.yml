@@ -4,21 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-    paths:
-      - crates/imap/**
-      - crates/engine/**
-      - crates/store/**
-      - crates/core/**
-      - crates/api-core/**
-      - test/dovecot/**
-      - test/stalwart/**
-      - test/compose.yml
-      - xtask/**
-      - .cargo/**
-      - Cargo.toml
-      - Cargo.lock
-      - rust-toolchain.toml
-      - .github/workflows/servers.yml
   schedule:
     - cron: "41 4 * * 1"
   workflow_dispatch:
@@ -34,7 +19,38 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changes:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      run: ${{ steps.filter.outputs.run }}
+    steps:
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            run:
+              - 'crates/imap/**'
+              - 'crates/engine/**'
+              - 'crates/store/**'
+              - 'crates/core/**'
+              - 'crates/api-core/**'
+              - 'test/dovecot/**'
+              - 'test/stalwart/**'
+              - 'test/compose.yml'
+              - 'xtask/**'
+              - '.cargo/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.github/workflows/servers.yml'
+
   server:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.run == 'true') }}
     name: ${{ matrix.server }}
     runs-on: ubuntu-latest
     strategy:
@@ -83,3 +99,12 @@ jobs:
       - name: Server logs
         if: failure()
         run: docker compose -f test/compose.yml logs ${{ matrix.services }}
+
+  result:
+    name: servers-result
+    needs: [changes, server]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')
+        run: exit 1
