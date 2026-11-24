@@ -3,6 +3,8 @@ import { PASSWORD, idAt } from './mock/fixture.ts';
 import { expect, openInbox, row, signIn, test } from './helpers.ts';
 
 const TOUCH_TARGET = 44;
+/** WebKit reports layout boxes in fractional units, e.g. 43.999996 for 44. */
+const SUBPIXEL_DIGITS = 3;
 /** Past the 35 % commit threshold of a row. */
 const COMMIT_SHARE = 0.6;
 /** Under both the flick distance and the commit share. */
@@ -12,8 +14,8 @@ const VERTICAL_DRAG_PX = 160;
 async function expectTouchSize(target: Locator): Promise<void> {
 	const box = await target.boundingBox();
 	expect(box, 'rendered').not.toBeNull();
-	expect(box!.width).toBeGreaterThanOrEqual(TOUCH_TARGET);
-	expect(box!.height).toBeGreaterThanOrEqual(TOUCH_TARGET);
+	expect(box!.width).toBeCloseTo(Math.max(box!.width, TOUCH_TARGET), SUBPIXEL_DIGITS);
+	expect(box!.height).toBeCloseTo(Math.max(box!.height, TOUCH_TARGET), SUBPIXEL_DIGITS);
 }
 
 test.describe('drawer', () => {
