@@ -274,3 +274,31 @@ async fn url_keys_are_created_kept_and_rotated() {
     assert_eq!(*rotated.previous.unwrap(), *first.current);
     server.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn image_proxy_is_rate_limited_per_client_ip() {
+    let (data, keys) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let mut cfg = config(data.path(), keys.path());
+    cfg.auth.trusted_proxies = vec!["127.0.0.0/8".parse().unwrap()];
+    let server = Server::start(&cfg, None).await.unwrap();
+    let c = owner(&server).await;
+    let proxied = |ip: &'static str| {
+        c.get(url(&server, "/api/proxy/img/not-a-token"))
+            .header("x-forwarded-for", ip)
+            .send()
+    };
+    const BURST: usize = 60;
+    for _ in 0..BURST {
+        let resp = proxied("198.51.100.7").await.unwrap();
+        assert_ne!(resp.status(), 429);
+    }
+    let limited = proxied("198.51.100.7").await.unwrap();
+    assert_eq!(limited.status(), 429);
+    assert!(limited.headers().contains_key("retry-after"));
+    let body: Value = limited.json().await.unwrap();
+    assert_eq!(body["error"], "rate_limited");
+    assert_ne!(proxied("198.51.100.8").await.unwrap().status(), 429);
+    let other_route = get(&c, &server, "/api/image-senders").await;
+    assert_eq!(other_route.status(), 200);
+    server.shutdown().await.unwrap();
+}

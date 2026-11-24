@@ -291,13 +291,18 @@ impl Auth {
         }
     }
 
+    /// The client's address, through trusted reverse proxies.
+    pub(crate) fn client_ip(&self, peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
+        ratelimit::client_ip(peer.ip(), headers, &self.trusted_proxies)
+    }
+
     /// Takes one login attempt for the client, or answers `429`.
     pub(crate) fn limit(
         &self,
         peer: SocketAddr,
         headers: &HeaderMap,
     ) -> Result<(), Box<HttpResponse>> {
-        let ip: IpAddr = ratelimit::client_ip(peer.ip(), headers, &self.trusted_proxies);
+        let ip = self.client_ip(peer, headers);
         self.limiter.check(ip).map_err(|wait| {
             tracing::warn!(%ip, "login rate limit hit");
             let mut resp = error(429, "rate_limited", "too many attempts; try again later");

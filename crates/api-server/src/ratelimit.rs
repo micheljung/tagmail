@@ -40,8 +40,9 @@ pub const ACCOUNT_TESTS: Rate = Rate {
     burst: 10,
     refill: Duration::from_secs(6),
 };
-/// Remote images fetched for one desktop: 120 a minute, burst 60, with a
-/// backstop of 600 a minute over all devices.
+/// Remote images fetched for one desktop, or through `/api/proxy/img` for
+/// one client IP: 120 a minute, burst 60, with a backstop of 600 a minute
+/// over all of them.
 pub const REPLICA_IMAGES: Rate = Rate {
     burst: 60,
     refill: Duration::from_millis(500),

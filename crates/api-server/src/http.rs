@@ -3,7 +3,7 @@
 //! the rest to the SPA.
 
 use std::convert::Infallible;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,7 +11,7 @@ use std::time::Duration;
 use axum::Extension;
 use axum::Router;
 use axum::body::{Body, Bytes};
-use axum::extract::{DefaultBodyLimit, RawQuery, State};
+use axum::extract::{ConnectInfo, DefaultBodyLimit, RawQuery, State};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method as HttpMethod, StatusCode, Uri};
 use axum::middleware;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -36,6 +36,7 @@ use tagmail_api_core::sqlite_store::SqliteStore;
 pub const MAX_BODY: usize = 64 * 1024;
 pub use tagmail_api_core::compose::MAX_DRAFT_BODY;
 pub use tagmail_api_core::writes::MAX_LABEL_IMPORT;
+const IMAGE_PROXY_PREFIX: &str = "/api/proxy/img/";
 /// SSE comment interval; keeps proxies from closing idle streams.
 pub const HEARTBEAT: Duration = Duration::from_secs(25);
 
@@ -49,6 +50,8 @@ pub struct AppState {
     pub web: Option<Arc<WebDir>>,
     /// Shared by every caller of the account test routes.
     pub account_tests: Arc<RateLimiter>,
+    /// Per client IP: each request makes the server fetch a remote image.
+    pub image_proxy: Arc<RateLimiter>,
     pub replica: Arc<Replica>,
 }
 
@@ -189,8 +192,17 @@ fn is_account_test(method: &HttpMethod, path: &str, body: &[u8]) -> bool {
     }
 }
 
+fn rate_limited(wait: Duration, message: &str) -> HttpResponse {
+    let mut resp = Response::error(429, "rate_limited", message);
+    resp.headers
+        .push(("retry-after", wait.as_secs().max(1).to_string()));
+    to_http(resp)
+}
+
 async fn dispatch(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     method: HttpMethod,
     uri: Uri,
     body: Body,
@@ -212,14 +224,13 @@ async fn dispatch(
         if is_account_test(&method, &path, &body) {
             let shared = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
             if let Err(wait) = state.account_tests.check(shared) {
-                let mut resp = Response::error(
-                    429,
-                    "rate_limited",
-                    "too many account tests; try again later",
-                );
-                resp.headers
-                    .push(("retry-after", wait.as_secs().max(1).to_string()));
-                return to_http(resp);
+                return rate_limited(wait, "too many account tests; try again later");
+            }
+        }
+        if method == HttpMethod::GET && path.starts_with(IMAGE_PROXY_PREFIX) {
+            let ip = state.auth.client_ip(peer, &headers);
+            if let Err(wait) = state.image_proxy.check(ip) {
+                return rate_limited(wait, "too many remote images; try again later");
             }
         }
         return api(state, method, uri.path(), uri.query().unwrap_or(""), &body).await;

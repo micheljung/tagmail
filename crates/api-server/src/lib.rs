@@ -178,6 +178,10 @@ impl Server {
                 ratelimit::ACCOUNT_TESTS,
                 ratelimit::ACCOUNT_TESTS,
             )),
+            image_proxy: Arc::new(ratelimit::RateLimiter::new(
+                ratelimit::REPLICA_IMAGES,
+                ratelimit::REPLICA_IMAGES_GLOBAL,
+            )),
             replica: Arc::new(replica::Replica::new(config.data_dir.join(CACHE_DB))),
         };
         let mut stopped = shutdown;
