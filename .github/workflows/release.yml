@@ -1,8 +1,9 @@
 name: Release
 
 # Pull requests and manual runs (also on a tag) build every asset and
-# publish nothing. A pushed v* tag publishes the GitHub Release and the image; tags containing '-'
-# are prereleases and leave :latest alone. No Flatpak until after 1.0
+# publish nothing. A pushed v* tag publishes the GitHub Release and the
+# image; tags containing '-' are prereleases. :latest and the Latest
+# release follow the highest non-prerelease tag. No Flatpak until after 1.0
 # (owner decision).
 on:
   push:
@@ -40,6 +41,7 @@ jobs:
     outputs:
       version: ${{ steps.check.outputs.version }}
       prerelease: ${{ steps.check.outputs.prerelease }}
+      latest: ${{ steps.check.outputs.latest }}
     steps:
       - uses: actions/checkout@v7
       - name: Versions agree
@@ -56,6 +58,12 @@ jobs:
           else
             version=$cargo
           fi
+          case "$version" in
+            *+*)
+              echo "::error::version $version has build metadata, which image tags cannot carry"
+              exit 1
+              ;;
+          esac
           for v in "$cargo" "$tauri" "$web"; do
             if [ "$v" != "$version" ]; then
               echo "::error::version $v does not match $version"
@@ -66,8 +74,20 @@ jobs:
             *-*) prerelease=true ;;
             *) prerelease=false ;;
           esac
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+          latest=false
+          if [ "$PUBLISH" = true ] && [ "$prerelease" = false ]; then
+            git fetch --quiet --tags origin
+            highest=$(git tag -l 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)
+            if [ "$highest" = "v$version" ]; then
+              latest=true
+            fi
+          fi
+          echo "Version $version, prerelease $prerelease, latest $latest"
+          {
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+            echo "latest=$latest"
+          } >> "$GITHUB_OUTPUT"
 
   bundle:
     needs: version
@@ -247,9 +267,34 @@ jobs:
           path: dist/
           if-no-files-found: error
 
-  image:
+  draft:
     if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [version, checksums]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: release-assets
+          path: dist
+      - name: Verify checksums
+        working-directory: dist
+        run: sha256sum -c SHA256SUMS
+      - name: Create the GitHub Release as a draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          flags=()
+          [ "$PRERELEASE" = true ] && flags+=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" dist/* --draft \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
+            --title "Tagmail ${GITHUB_REF_NAME#v}" "${flags[@]}"
+
+  image:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: [version, draft]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -268,12 +313,12 @@ jobs:
         id: tags
         env:
           VERSION: ${{ needs.version.outputs.version }}
-          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+          LATEST: ${{ needs.version.outputs.latest }}
         run: |
           {
             echo "tags<<EOF"
             echo "$IMAGE:$VERSION"
-            [ "$PRERELEASE" = true ] || echo "$IMAGE:latest"
+            [ "$LATEST" = true ] && echo "$IMAGE:latest"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
       - name: Build and push
@@ -295,25 +340,15 @@ jobs:
 
   release:
     if: github.event_name == 'push' && github.ref_type == 'tag'
-    needs: [version, checksums, image]
+    needs: [version, image]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v7
-        with:
-          name: release-assets
-          path: dist
-      - name: Verify checksums
-        working-directory: dist
-        run: sha256sum -c SHA256SUMS
-      - name: Create the GitHub Release
+      - name: Publish the draft
         env:
           GH_TOKEN: ${{ github.token }}
-          PRERELEASE: ${{ needs.version.outputs.prerelease }}
-        run: |
-          flags=()
-          [ "$PRERELEASE" = true ] && flags+=(--prerelease)
-          gh release create "$GITHUB_REF_NAME" dist/* \
-            --repo "$GITHUB_REPOSITORY" --verify-tag --generate-notes \
-            --title "Tagmail ${GITHUB_REF_NAME#v}" "${flags[@]}"
+          LATEST: ${{ needs.version.outputs.latest }}
+        run: >-
+          gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+          --draft=false --latest="$LATEST"
