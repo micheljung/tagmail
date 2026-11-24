@@ -64,8 +64,10 @@ export async function registerServiceWorker(
 
 	// WebKit can deliver "installed" after the first worker has already
 	// claimed the page, so whether this is an update is decided up front.
+	const watched = new WeakSet<ServiceWorker>();
 	const watch = (worker: ServiceWorker | null) => {
-		if (!worker || container.controller === null) return;
+		if (!worker || container.controller === null || watched.has(worker)) return;
+		watched.add(worker);
 		worker.addEventListener('statechange', () => {
 			if (worker.state === 'installed') offer(worker);
 		});

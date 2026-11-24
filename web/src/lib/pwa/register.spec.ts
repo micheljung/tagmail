@@ -130,6 +130,14 @@ describe('registerServiceWorker', () => {
 		expect(installing.postMessage).toHaveBeenCalledWith({ type: 'skipWaiting' });
 	});
 
+	it('offers an update once when "updatefound" also reports the installing worker', async () => {
+		const installing = new FakeWorker();
+		const { container, updates } = await setup(true, undefined, installing);
+		container.registration.install(installing);
+		installing.moveTo('installed');
+		expect(updates).toHaveLength(1);
+	});
+
 	it('offers no update for a first install already in progress at register()', async () => {
 		const installing = new FakeWorker();
 		const { container, updates } = await setup(false, undefined, installing);
