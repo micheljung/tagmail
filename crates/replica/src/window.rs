@@ -165,7 +165,7 @@ pub async fn fetch_raw(
     id: i64,
     key: BlobKey,
 ) -> Result<BlobKey> {
-    let builder = client.request(Method::GET, &format!("api/replica/messages/{id}/raw"))?;
+    let builder = client.raw_request(Method::GET, &format!("api/replica/messages/{id}/raw"))?;
     let resp = client.send(builder).await?;
     let mut body = resp.bytes_stream();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Option<Vec<u8>>>(4);
@@ -206,4 +206,44 @@ pub async fn fetch_raw(
         return Err(e.into());
     }
     written.ok_or_else(|| crate::Error::Incomplete(format!("raw message {id} cut short")))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tagmail_core::{AccountId, EmailId};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use url::Url;
+
+    use super::*;
+
+    const RAW: &str = "From: ann@x.example\r\nSubject: Hi\r\n\r\nHello\r\n";
+
+    #[tokio::test]
+    async fn a_raw_message_may_take_longer_than_the_stream_idle_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = Url::parse(&format!("http://{}/", listener.local_addr().unwrap())).unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0; 8192];
+            let _ = sock.read(&mut buf).await.unwrap();
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\n\
+                 content-length: {}\r\nconnection: close\r\n\r\n{RAW}",
+                RAW.len()
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+        });
+        let client = ServerClient::with_idle(&url, None, Duration::from_millis(200)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let blobs = Arc::new(BlobStore::open(dir.path()).unwrap());
+        let key = BlobKey::for_message(AccountId(1), &EmailId::parse("g:1").unwrap());
+
+        fetch_raw(&client, &blobs, 1, key.clone()).await.unwrap();
+
+        assert!(blobs.open_raw(&key).unwrap().is_some());
+    }
 }

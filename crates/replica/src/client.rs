@@ -15,6 +15,9 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 /// Longest silence on any read, streams included: three server SSE
 /// heartbeats.
 pub const STREAM_IDLE: Duration = Duration::from_secs(75);
+/// The server reads a whole uncached message from IMAP before answering.
+pub const RAW_IDLE: Duration = Duration::from_secs(5 * 60);
+pub const RAW_DEADLINE: Duration = Duration::from_secs(15 * 60);
 const TCP_KEEPALIVE: Duration = Duration::from_secs(30);
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 /// A success this recent counts as online.
@@ -84,6 +87,7 @@ pub struct ServerClient {
     base: Url,
     token: Option<String>,
     http: reqwest::Client,
+    raw: reqwest::Client,
     link: Arc<Link>,
 }
 
@@ -115,18 +119,21 @@ impl ServerClient {
         .map_err(|e| ClientError::Decode(format!("tls: {e}")))?
         .with_root_certificates(roots)
         .with_no_client_auth();
-        let http = reqwest::Client::builder()
-            .tls_backend_preconfigured(tls)
-            .connect_timeout(REQUEST_TIMEOUT)
-            .read_timeout(idle)
-            .tcp_keepalive(TCP_KEEPALIVE)
-            .user_agent(concat!("tagmail-desktop/", env!("CARGO_PKG_VERSION")))
-            .build()
-            .map_err(|e| ClientError::Decode(format!("client: {e}")))?;
+        let http = |idle: Duration| {
+            reqwest::Client::builder()
+                .tls_backend_preconfigured(tls.clone())
+                .connect_timeout(REQUEST_TIMEOUT)
+                .read_timeout(idle)
+                .tcp_keepalive(TCP_KEEPALIVE)
+                .user_agent(concat!("tagmail-desktop/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .map_err(|e| ClientError::Decode(format!("client: {e}")))
+        };
         Ok(ServerClient {
             base,
             token,
-            http,
+            http: http(idle)?,
+            raw: http(RAW_IDLE.max(idle))?,
             link: Arc::default(),
         })
     }
@@ -145,11 +152,28 @@ impl ServerClient {
 
     /// A request without the 5 s budget, for streamed bodies.
     pub fn request(&self, method: Method, path: &str) -> ClientResult<RequestBuilder> {
+        self.request_on(&self.http, method, path)
+    }
+
+    /// A raw message download, which may be silent for [`RAW_IDLE`] and
+    /// takes at most [`RAW_DEADLINE`].
+    pub fn raw_request(&self, method: Method, path: &str) -> ClientResult<RequestBuilder> {
+        Ok(self
+            .request_on(&self.raw, method, path)?
+            .timeout(RAW_DEADLINE))
+    }
+
+    fn request_on(
+        &self,
+        http: &reqwest::Client,
+        method: Method,
+        path: &str,
+    ) -> ClientResult<RequestBuilder> {
         let url = self
             .base
             .join(path.trim_start_matches('/'))
             .map_err(|e| ClientError::Decode(format!("path {path:?}: {e}")))?;
-        let builder = self.http.request(method, url);
+        let builder = http.request(method, url);
         Ok(match &self.token {
             Some(token) => builder.bearer_auth(token),
             None => builder,
