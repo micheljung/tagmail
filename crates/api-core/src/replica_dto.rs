@@ -189,7 +189,9 @@ pub struct EndRecord {
 /// `POST /api/replica/rows`: the current records of these entities, in the
 /// snapshot's order, then `end`. Ids that no longer exist are left out; a
 /// merged thread id yields the thread it was merged into. `mailbox` adds
-/// every thread and message of that mailbox (a `bulk` change).
+/// every thread and message of that mailbox (a `bulk` change); `uids`
+/// narrows that to its locations in this inclusive range (the payload of a
+/// `bulk` change that only added them).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReplicaRowsDto {
@@ -207,6 +209,8 @@ pub struct ReplicaRowsDto {
     pub messages: Vec<i64>,
     #[serde(default)]
     pub mailbox: Option<i64>,
+    #[serde(default)]
+    pub uids: Option<[u32; 2]>,
     /// Text is sent for messages in this window or starred; default 90.
     #[serde(default)]
     pub window_days: Option<u32>,

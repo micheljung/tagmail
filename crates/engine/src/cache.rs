@@ -254,8 +254,9 @@ pub struct W<'a> {
     messages: BTreeSet<i64>,
     threads: BTreeSet<i64>,
     /// Initial-sync windows emit one `bulk:<mailbox>` entry instead of
-    /// per-message and per-thread entries.
-    bulk: BTreeSet<i64>,
+    /// per-message and per-thread entries, with the UID range they added
+    /// unless the whole mailbox changed.
+    bulk: BTreeMap<i64, Option<(u32, u32)>>,
     overlay: Arc<AccountOverlay>,
     /// The account's mailboxes `(id, name, special_use)`, read once per
     /// transaction while the overlay is not empty.
@@ -271,7 +272,7 @@ impl<'a> W<'a> {
             changes: Vec::new(),
             messages: BTreeSet::new(),
             threads: BTreeSet::new(),
-            bulk: BTreeSet::new(),
+            bulk: BTreeMap::new(),
             overlay: Arc::default(),
             views: None,
         }
@@ -437,7 +438,21 @@ impl<'a> W<'a> {
     /// Reports the changes of this transaction as one bulk entry for
     /// `mailbox`.
     pub fn bulk(&mut self, mailbox: i64) {
-        self.bulk.insert(mailbox);
+        self.bulk.insert(mailbox, None);
+    }
+
+    /// [`W::bulk`] for a transaction that only added the locations of
+    /// `mailbox` in `uids`.
+    pub fn bulk_added(&mut self, mailbox: i64, uids: &UidSet) {
+        let (Some(lo), Some(hi)) = (uids.min(), uids.max()) else {
+            return self.bulk(mailbox);
+        };
+        self.bulk
+            .entry(mailbox)
+            .and_modify(|range| {
+                *range = range.map(|(a, b)| (a.min(lo.0), b.max(hi.0)));
+            })
+            .or_insert(Some((lo.0, hi.0)));
     }
 
     /// Derives labels, tombstones and thread rows for everything touched and
@@ -486,8 +501,14 @@ impl<'a> W<'a> {
         for thread in std::mem::take(&mut self.threads) {
             refresh_thread(&mut self, thread, bulk)?;
         }
-        for mailbox in std::mem::take(&mut self.bulk) {
-            self.emit(Entity::Mailbox, mailbox, ChangeOp::Bulk { mailbox }, None);
+        for (mailbox, uids) in std::mem::take(&mut self.bulk) {
+            let payload = uids.map(|(lo, hi)| json!({ "uids": [lo, hi] }));
+            self.emit(
+                Entity::Mailbox,
+                mailbox,
+                ChangeOp::Bulk { mailbox },
+                payload,
+            );
         }
         Ok(changes::append_all(self.conn, &self.changes)?.is_some())
     }

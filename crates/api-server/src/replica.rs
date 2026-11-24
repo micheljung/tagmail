@@ -242,14 +242,15 @@ pub async fn rows(
         labels(&tx, &Scope::Ids(&req.labels), sink)?;
         let thread_ids = merge_targets(&tx, &req.threads)?;
         threads(&tx, &Scope::Ids(&thread_ids), sink)?;
-        if let Some(mailbox) = req.mailbox {
-            threads(&tx, &Scope::Mailbox(mailbox), sink)?;
+        let in_mailbox = req.mailbox.map(|id| Scope::Mailbox(id, req.uids));
+        if let Some(scope) = &in_mailbox {
+            threads(&tx, scope, sink)?;
         }
         messages(&tx, &Scope::Ids(&req.messages), sink)?;
         texts(&tx, &blobs, &Scope::Ids(&req.messages), window_start, sink)?;
-        if let Some(mailbox) = req.mailbox {
-            messages(&tx, &Scope::Mailbox(mailbox), sink)?;
-            texts(&tx, &blobs, &Scope::Mailbox(mailbox), window_start, sink)?;
+        if let Some(scope) = &in_mailbox {
+            messages(&tx, scope, sink)?;
+            texts(&tx, &blobs, scope, window_start, sink)?;
         }
         tx.finish()?;
         Ok(())
@@ -414,8 +415,9 @@ fn json_ids(ids: &[i64]) -> String {
 enum Scope<'a> {
     All,
     Ids(&'a [i64]),
-    /// Rows tied to a mailbox through its messages' locations.
-    Mailbox(i64),
+    /// Rows tied to a mailbox through its messages' locations, those with
+    /// a UID in the range if given.
+    Mailbox(i64, Option<[u32; 2]>),
 }
 
 impl Scope<'_> {
@@ -428,7 +430,11 @@ impl Scope<'_> {
                 "id IN (SELECT value FROM json_each(?1))".to_owned(),
                 Box::new(json_ids(ids)),
             ),
-            Scope::Mailbox(id) => (format!("id IN ({in_mailbox})"), Box::new(*id)),
+            Scope::Mailbox(id, None) => (format!("id IN ({in_mailbox})"), Box::new(*id)),
+            Scope::Mailbox(id, Some([lo, hi])) => (
+                format!("id IN ({in_mailbox} AND uid BETWEEN {lo} AND {hi})"),
+                Box::new(*id),
+            ),
         }
     }
 

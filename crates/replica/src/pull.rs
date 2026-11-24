@@ -3,7 +3,7 @@
 //! entries copied into the local `change_log`, and the server cursor saved
 //! with the last batch of each page.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use reqwest::Method;
@@ -41,7 +41,9 @@ struct Plan {
     labels: BTreeSet<i64>,
     threads: BTreeSet<i64>,
     messages: BTreeSet<i64>,
-    bulk: BTreeSet<i64>,
+    /// Mailboxes of `bulk` changes with the UID range they added, `None`
+    /// for all of the mailbox.
+    bulk: BTreeMap<i64, Option<[u32; 2]>>,
     deletes: Vec<(EntityDto, i64)>,
     merges: Vec<(i64, i64)>,
     log: Vec<NewChange>,
@@ -67,7 +69,15 @@ impl Plan {
                     plan.threads.insert(target);
                 }
                 ChangeOpDto::Bulk { mailbox } => {
-                    plan.bulk.insert(mailbox);
+                    let added = bulk_uids(c.payload.as_ref());
+                    plan.bulk
+                        .entry(mailbox)
+                        .and_modify(|range| {
+                            *range = range
+                                .zip(added)
+                                .map(|([a, b], [lo, hi])| [a.min(lo), b.max(hi)]);
+                        })
+                        .or_insert(added);
                 }
             }
             plan.log.push(NewChange {
@@ -133,10 +143,15 @@ impl Plan {
                 threads: chunk(&self.threads, i),
                 messages: chunk(&self.messages, i),
                 mailbox: None,
+                uids: None,
                 window_days: Some(window_days),
             })
             .collect()
     }
+}
+
+fn bulk_uids(payload: Option<&serde_json::Value>) -> Option<[u32; 2]> {
+    serde_json::from_value(payload?.get("uids")?.clone()).ok()
 }
 
 /// `op`, `outbox` and label jobs are not replica rows.
@@ -182,9 +197,10 @@ pub async fn pull(
             imported.threads.extend(part.threads);
             imported.arrivals.extend(part.arrivals);
         }
-        for mailbox in &plan.bulk {
+        for (mailbox, uids) in &plan.bulk {
             let request = ReplicaRowsDto {
                 mailbox: Some(*mailbox),
+                uids: *uids,
                 window_days: Some(window_days),
                 ..ReplicaRowsDto::default()
             };
@@ -297,6 +313,8 @@ fn from_own(arrival: &Arrival, own: &BTreeSet<String>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::{Value, json};
+
     use super::*;
 
     fn change(entity: EntityDto, id: i64, op: ChangeOpDto) -> ChangeDto {
@@ -325,12 +343,34 @@ mod tests {
         assert_eq!(writes.len(), 1);
         assert_eq!(plan.log.len(), 5);
         assert_eq!(plan.merges, vec![(5, 6)]);
-        assert_eq!(plan.bulk, BTreeSet::from([9]));
+        assert_eq!(plan.bulk, BTreeMap::from([(9, None)]));
         let requests = plan.requests(90);
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].messages, vec![1]);
         assert_eq!(requests[0].threads, vec![6]);
         assert_eq!(requests[0].window_days, Some(90));
+    }
+
+    #[test]
+    fn bulk_changes_that_added_uids_request_only_their_range() {
+        let bulk = |mailbox: i64, payload: Option<Value>| ChangeDto {
+            payload,
+            ..change(EntityDto::Mailbox, mailbox, ChangeOpDto::Bulk { mailbox })
+        };
+        let changes = [
+            bulk(1, Some(json!({ "uids": [601, 1100] }))),
+            bulk(1, Some(json!({ "uids": [101, 600] }))),
+            bulk(2, Some(json!({ "uids": [5, 9] }))),
+            bulk(2, None),
+            bulk(3, None),
+            bulk(3, Some(json!({ "uids": [5, 9] }))),
+        ];
+        let plan = Plan::new(&changes, &mut Vec::new());
+
+        assert_eq!(
+            plan.bulk,
+            BTreeMap::from([(1, Some([101, 1100])), (2, None), (3, None)])
+        );
     }
 
     #[test]

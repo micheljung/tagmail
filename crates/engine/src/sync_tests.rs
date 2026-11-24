@@ -210,6 +210,58 @@ async fn restart_mid_sync_resumes_without_refetching_committed_windows() {
 }
 
 #[tokio::test]
+async fn bulk_windows_carry_the_uid_range_they_added() {
+    let t = open();
+    let srv = server(QRESYNC);
+    {
+        let mut s = lock(&srv);
+        for i in 0..1100 {
+            s.append(
+                "INBOX",
+                FakeMsg::new(&format!("m{i}@x"), "S", "a@x", "b@x", T0 + i),
+            );
+        }
+    }
+    let head = t.ctx.cache.head().await.unwrap();
+    let mut s = session(&srv);
+    let rows = sync::list(&mut s, &t.ctx).await.unwrap();
+    let inbox = rows.iter().find(|r| r.is_inbox()).unwrap().clone();
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let after_one = move || calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 1;
+    sync::sync_mailbox(&mut s, &t.ctx, &inbox, &after_one)
+        .await
+        .unwrap();
+    for i in 0..600 {
+        lock(&srv).append(
+            "INBOX",
+            FakeMsg::new(&format!("n{i}@x"), "N", "c@x", "b@x", T0 + 5000 + i),
+        );
+    }
+    assert_eq!(sync_box(&t, &mut s, "INBOX").await, Progress::Done);
+
+    let tagmail_store::Changes::Page { changes, .. } =
+        t.ctx.cache.changes_since(head, 10_000).await.unwrap()
+    else {
+        panic!("gone");
+    };
+    let ranges: Vec<String> = changes
+        .iter()
+        .filter(|c| matches!(c.op, tagmail_store::ChangeOp::Bulk { .. }))
+        .map(|c| c.payload.clone().unwrap_or_default())
+        .collect();
+    assert_eq!(
+        ranges,
+        [
+            r#"{"uids":[601,1100]}"#,
+            r#"{"uids":[101,600]}"#,
+            r#"{"uids":[1,100]}"#,
+            r#"{"uids":[1201,1700]}"#,
+            r#"{"uids":[1101,1200]}"#,
+        ]
+    );
+}
+
+#[tokio::test]
 async fn changes_during_initial_sync_are_caught_up() {
     for caps in [QRESYNC, CONDSTORE, PLAIN] {
         let t = open();

@@ -533,6 +533,29 @@ async fn rows_resend_changed_entities() {
     assert_eq!(texts(&records).into_keys().collect::<Vec<_>>(), [12]);
 
     let records = parse(
+        &rows(json!({ "mailbox": 2, "uids": [2, 2] }))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap(),
+    );
+    assert_complete(&records);
+    assert_eq!(ids(&records, "thread"), [2]);
+    assert_eq!(ids(&records, "message"), [12], "only the bulk's UID range");
+    assert_eq!(texts(&records).into_keys().collect::<Vec<_>>(), [12]);
+    let records = parse(
+        &rows(json!({ "mailbox": 2, "uids": [3, 9] }))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap(),
+    );
+    assert!(ids(&records, "thread").is_empty());
+    assert!(ids(&records, "message").is_empty());
+
+    let records = parse(
         &rows(json!({ "accounts": [1], "identities": [3], "mailboxes": [2, 404] }))
             .await
             .unwrap()

@@ -3,6 +3,7 @@
 //! detection.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -14,6 +15,7 @@ use tagmail_replica::{Durable, Layout, Replica, ServerClient, Settings};
 use tagmail_store::rusqlite::params;
 use tagmail_store::{BlobKey, CacheDb, ChangeOp, DEFAULT_RAW_CAP, Entity, NewChange, changes};
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{broadcast, watch};
 use url::Url;
 
@@ -542,5 +544,117 @@ async fn the_window_sweep_drops_text_but_keeps_rows() {
         vec![ThreadId(2)],
         "headers stay searchable"
     );
+    server.shutdown().await.unwrap();
+}
+
+/// A TCP proxy to `server` counting the bytes it sends back.
+async fn counting_proxy(server: &Server) -> (std::net::SocketAddr, Arc<AtomicU64>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let upstream = server.local_addr();
+    let received = Arc::new(AtomicU64::new(0));
+    let counter = Arc::clone(&received);
+    tokio::spawn(async move {
+        while let Ok((client, _)) = listener.accept().await {
+            let counter = Arc::clone(&counter);
+            tokio::spawn(async move {
+                let server = tokio::net::TcpStream::connect(upstream).await.unwrap();
+                let (mut client_read, mut client_write) = client.into_split();
+                let (mut server_read, mut server_write) = server.into_split();
+                tokio::spawn(async move {
+                    let _ = tokio::io::copy(&mut client_read, &mut server_write).await;
+                });
+                let mut buf = vec![0; 64 * 1024];
+                while let Ok(n) = server_read.read(&mut buf).await {
+                    if n == 0 || client_write.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                    counter.fetch_add(n as u64, Ordering::Relaxed);
+                }
+            });
+        }
+    });
+    (addr, received)
+}
+
+/// One initial-sync window as the engine writes it: `count` new messages
+/// in INBOX below `top`, one thread each, and a ranged bulk entry. They are
+/// older than the window, so no raw prefetch adds to the traffic.
+async fn bulk_window(server: &Server, top: i64, count: i64) {
+    let date = now() - 400 * DAY;
+    let lo = top - count + 1;
+    server
+        .store()
+        .cache()
+        .write(move |tx| {
+            for id in lo..=top {
+                tx.execute(
+                    "INSERT INTO thread (id, account_id, subject_norm, last_date, msg_count, unread_count) \
+                     VALUES (?1, 1, 'window', ?2, 1, 0)",
+                    params![id, date],
+                )?;
+                tx.execute(
+                    "INSERT INTO message (id, account_id, email_id, thread_id, date, subject, snippet) \
+                     VALUES (?1, 1, ?2, ?1, ?3, 'Window', ?4)",
+                    params![id, format!("g:{id}"), date, "s".repeat(500)],
+                )?;
+                tx.execute(
+                    "INSERT INTO location (mailbox_id, uid, message_id, flags) VALUES (1, ?1, ?1, 1)",
+                    [id],
+                )?;
+                tx.execute(
+                    "INSERT INTO thread_mailbox (thread_id, mailbox_id, last_date) VALUES (?1, 1, ?2)",
+                    params![id, date],
+                )?;
+            }
+            changes::append_all(
+                tx,
+                &[NewChange {
+                    entity: Entity::Mailbox,
+                    entity_id: 1,
+                    op: ChangeOp::Bulk { mailbox: 1 },
+                    payload: Some(json!({ "uids": [lo, top] }).to_string()),
+                }],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    server
+        .feed()
+        .publish(server.store().cache().head().await.unwrap());
+}
+
+#[tokio::test]
+async fn bulk_windows_transfer_only_what_they_added() {
+    const WINDOWS: i64 = 8;
+    const SIZE: i64 = 50;
+    let env = Env::new();
+    let server = env.start().await;
+    seed(&server).await;
+    let token = pair(&server).await;
+    let (proxy, received) = counting_proxy(&server).await;
+    let client = ServerClient::new(
+        &Url::parse(&format!("http://{proxy}/")).unwrap(),
+        Some(token),
+    )
+    .unwrap();
+    let replica = Replica::open(env.layout(), client, Settings::default())
+        .await
+        .unwrap();
+    replica.rebootstrap().await.unwrap();
+
+    let mut per_window = Vec::new();
+    for w in 0..WINDOWS {
+        bulk_window(&server, 10_000 - w * SIZE, SIZE).await;
+        received.store(0, Ordering::Relaxed);
+        replica.sync_once().await.unwrap();
+        per_window.push(received.load(Ordering::Relaxed));
+    }
+    assert!(
+        per_window[WINDOWS as usize - 1] < 2 * per_window[0],
+        "bytes per window grow with the mailbox: {per_window:?}"
+    );
+    same_views(&server, &replica).await;
     server.shutdown().await.unwrap();
 }

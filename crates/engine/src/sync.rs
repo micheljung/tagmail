@@ -144,7 +144,7 @@ async fn fetch_new<S: ImapSession>(
         ctx.write(move |w| {
             cache::add_messages(w, mailbox, &fetched)?;
             if bulk {
-                w.bulk(mailbox);
+                w.bulk_added(mailbox, &window);
             }
             Ok(())
         })
@@ -199,7 +199,7 @@ async fn initial<S: ImapSession>(
             ctx.write(move |w| {
                 cache::add_messages(w, id, &fetched)?;
                 cache::set_cursor(w, id, cursor)?;
-                w.bulk(id);
+                w.bulk_added(id, &window);
                 Ok(())
             })
             .await?;
