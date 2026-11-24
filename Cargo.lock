@@ -5875,6 +5875,7 @@ dependencies = [
 name = "tagmail-api-server"
 version = "0.0.0"
 dependencies = [
+ "aes-gcm",
  "anyhow",
  "argon2",
  "async-trait",
@@ -5885,8 +5886,10 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.3",
  "hex",
+ "hkdf",
  "ipnet",
  "multer",
+ "p256",
  "passkey",
  "percent-encoding",
  "reqwest",

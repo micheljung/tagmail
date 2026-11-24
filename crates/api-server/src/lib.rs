@@ -4,8 +4,10 @@
 pub mod auth;
 pub mod credentials;
 pub mod http;
+pub mod outbound;
 mod pairing;
 pub mod proxy;
+pub mod push;
 pub mod ratelimit;
 pub mod replica;
 pub mod session;

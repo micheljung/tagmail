@@ -15,6 +15,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+aes-gcm.workspace = true
 anyhow.workspace = true
 argon2.workspace = true
 axum.workspace = true
@@ -24,8 +25,10 @@ form_urlencoded.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 hex.workspace = true
+hkdf.workspace = true
 ipnet.workspace = true
 multer.workspace = true
+p256.workspace = true
 percent-encoding.workspace = true
 reqwest = { workspace = true, features = ["rustls-no-provider"] }
 rustls.workspace = true
@@ -37,7 +40,7 @@ tagmail-core.workspace = true
 tagmail-engine.workspace = true
 tagmail-store.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread", "signal", "time"] }
+tokio = { workspace = true, features = ["fs", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true

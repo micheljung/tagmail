@@ -11,6 +11,7 @@ repository = "https://github.com/micheljung/tagmail"
 publish = false
 
 [workspace.dependencies]
+aes-gcm = { version = "0.11", default-features = false, features = ["aes", "alloc"] }
 ammonia = "4"
 anyhow = "1"
 argon2 = "0.5"
@@ -24,12 +25,14 @@ form_urlencoded = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 getrandom = "0.4"
 hex = "0.4"
+hkdf = "0.13"
 hmac = "0.13"
 ipnet = "2"
 lettre = { version = "0.11", default-features = false, features = ["hostname", "smtp-transport", "tokio1", "tokio1-rustls", "ring", "webpki-roots"] }
 mail-builder = "2"
 mail-parser = "1"
 multer = "3"
+p256 = { version = "0.14", default-features = false, features = ["ecdh", "ecdsa", "getrandom", "std"] }
 passkey = "0.6"
 peak_alloc = "0.3"
 percent-encoding = "2"
