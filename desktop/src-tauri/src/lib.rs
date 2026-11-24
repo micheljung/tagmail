@@ -10,3 +10,4 @@ pub mod selftest;
 pub mod settings;
 pub mod state;
 pub mod token;
+pub mod upload;

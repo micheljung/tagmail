@@ -13,6 +13,9 @@ use tagmail_core::ChangeCursor;
 
 use crate::backend::Backend;
 use crate::events::EventControl;
+use crate::upload;
+
+const UPLOAD_PATH: &str = "/api/attachments";
 
 pub const INDEX: &str = "index.html";
 
@@ -95,6 +98,22 @@ impl<B: Backend> Shell<B> {
             Route::Session => self.session(),
             Route::ServerOnly => api::Response::error(404, "not_found", "manage this on the web"),
             Route::Api => match self.backend.api() {
+                Ok(api) if req.method() == Method::POST && path == UPLOAD_PATH => {
+                    match api.compose() {
+                        Some(compose) => {
+                            let content_type = req
+                                .headers()
+                                .get(header::CONTENT_TYPE)
+                                .and_then(|v| v.to_str().ok());
+                            upload::upload(compose, content_type, req.body().clone()).await
+                        }
+                        None => api::Response::error(
+                            503,
+                            "compose_unavailable",
+                            "sending is not available here",
+                        ),
+                    }
+                }
                 Ok(api) => {
                     api.handle(api::Request {
                         method: method(req.method()),

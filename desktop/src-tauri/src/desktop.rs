@@ -16,6 +16,7 @@ use tagmail_api_core::dto::ApiErrorDto;
 use tagmail_api_core::events::EventSource;
 use tagmail_api_core::sqlite_store::SqliteStore;
 use tagmail_replica::client::REQUEST_TIMEOUT;
+use tagmail_replica::compose::DesktopCompose;
 use tagmail_replica::writes::DesktopWrites;
 use tagmail_replica::{ClientError, Durable, Layout, Phase, Replica, ReplicaEvent, ServerClient};
 use tokio::sync::{broadcast, watch};
@@ -304,7 +305,9 @@ impl Backend for Desktop {
             return Err(unpaired());
         }
         match replica.store() {
-            Some(store) => Ok(Api::new(store, None).with_writes(Arc::new(DesktopWrites(replica)))),
+            Some(store) => Ok(Api::new(store, None)
+                .with_writes(Arc::new(DesktopWrites(Arc::clone(&replica))))
+                .with_compose(Arc::new(DesktopCompose(replica)))),
             None => Err(offline_error(DOWNLOADING)),
         }
     }

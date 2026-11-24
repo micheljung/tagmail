@@ -47,6 +47,20 @@ async fn call(shell: &Shell<Desktop>, method: Method, path: &str, body: Value) -
     shell.handle(&req).await
 }
 
+async fn upload(shell: &Shell<Desktop>, name: &str, content: &str) -> HttpResponse {
+    let body = format!(
+        "--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\n\
+         Content-Type: text/plain\r\n\r\n{content}\r\n--b--\r\n"
+    );
+    let req = http::Request::builder()
+        .method(Method::POST)
+        .uri("app://localhost/api/attachments")
+        .header("content-type", "multipart/form-data; boundary=b")
+        .body(body.into_bytes())
+        .unwrap();
+    shell.handle(&req).await
+}
+
 fn json_of(resp: &HttpResponse) -> Value {
     serde_json::from_slice(resp.body()).unwrap()
 }
@@ -135,6 +149,25 @@ async fn pairs_syncs_resumes_and_unpairs() {
     assert!(op.status().is_success(), "{:?}", json_of(&op));
     let rows = json_of(&call(&shell, Method::GET, "/api/threads?ids=1", Value::Null).await);
     assert_eq!(rows["threads"][0]["starred"], true);
+
+    let attachment = upload(&shell, "notes.txt", "hello").await;
+    assert_eq!(attachment.status(), 201, "{:?}", json_of(&attachment));
+    assert_eq!(json_of(&attachment)["name"], "notes.txt");
+    assert_eq!(json_of(&attachment)["size"], 5);
+    let draft = call(
+        &shell,
+        Method::POST,
+        "/api/drafts",
+        json!({
+            "identityId": 3,
+            "subject": "Offline first",
+            "attachmentIds": [json_of(&attachment)["id"]],
+            "clientId": "0b6c1d36-8a51-4d1e-9c52-2f6a4b0f3c11"
+        }),
+    )
+    .await;
+    assert!(draft.status().is_success(), "{:?}", json_of(&draft));
+    assert_eq!(json_of(&draft)["attachments"][0]["name"], "notes.txt");
 
     drop(shell);
     let resumed = open(&env, &emitted).await;
