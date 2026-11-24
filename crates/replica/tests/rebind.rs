@@ -295,3 +295,44 @@ async fn a_send_in_flight_while_pairing_elsewhere_stays_behind() {
     compose.cancel(outbox[0].id).await.unwrap();
     assert!(compose.outbox().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn stopping_does_not_wait_for_a_stalled_send() {
+    let a = Fixture::start().await;
+    let (proxy, open_gate) = gated(a.server.local_addr()).await;
+    let via_proxy = Url::parse(&format!("http://{proxy}/")).unwrap();
+    let on_a = Replica::open(
+        Layout::new(a.desktop.path()),
+        ServerClient::new(&via_proxy, Some(a.token.clone())).unwrap(),
+        Settings::default(),
+    )
+    .await
+    .unwrap();
+    on_a.rebootstrap().await.unwrap();
+    let compose = DesktopCompose(Arc::clone(&on_a));
+    let me = compose.identities().await.unwrap()[0].id;
+    let queued = compose
+        .create_draft(input(me, "Stalled"))
+        .await
+        .unwrap()
+        .draft;
+    open_gate.send_replace(false);
+    compose.send("send-a".into(), queued.id).await.unwrap();
+    let (stop, stopped) = watch::channel(false);
+    let run = tokio::spawn(Arc::clone(&on_a).run(stopped));
+    let uploading = || -> bool {
+        on_a.durable()
+            .conn()
+            .query_row("SELECT state FROM outbox", [], |r| r.get::<_, String>(0))
+            .unwrap()
+            == OutboxState::Uploading.as_str()
+    };
+    while !uploading() {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    stop.send_replace(true);
+    tokio::time::timeout(Duration::from_secs(1), run)
+        .await
+        .expect("run stops promptly")
+        .unwrap();
+}

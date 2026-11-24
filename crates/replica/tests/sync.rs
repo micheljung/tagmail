@@ -3,7 +3,7 @@
 //! detection.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -656,5 +656,84 @@ async fn bulk_windows_transfer_only_what_they_added() {
         "bytes per window grow with the mailbox: {per_window:?}"
     );
     same_views(&server, &replica).await;
+    server.shutdown().await.unwrap();
+}
+
+/// A proxy to `upstream` that never forwards a snapshot request once
+/// `hold` is set, and reports that one arrived.
+async fn snapshot_trap(
+    upstream: std::net::SocketAddr,
+) -> (std::net::SocketAddr, Arc<AtomicBool>, Arc<AtomicBool>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hold = Arc::new(AtomicBool::new(false));
+    let trapped = Arc::new(AtomicBool::new(false));
+    let (h, t) = (Arc::clone(&hold), Arc::clone(&trapped));
+    tokio::spawn(async move {
+        while let Ok((client, _)) = listener.accept().await {
+            let (hold, trapped) = (Arc::clone(&h), Arc::clone(&t));
+            tokio::spawn(async move {
+                let Ok(server) = tokio::net::TcpStream::connect(upstream).await else {
+                    return;
+                };
+                let (mut client_read, mut client_write) = client.into_split();
+                let (mut server_read, mut server_write) = server.into_split();
+                tokio::spawn(async move {
+                    let _ = tokio::io::copy(&mut server_read, &mut client_write).await;
+                });
+                let mut buf = vec![0; 64 * 1024];
+                while let Ok(n) = client_read.read(&mut buf).await {
+                    let snapshot = buf[..n]
+                        .windows(b"/api/replica/snapshot".len())
+                        .any(|w| w == b"/api/replica/snapshot");
+                    if snapshot && hold.load(Ordering::Acquire) {
+                        trapped.store(true, Ordering::Release);
+                        std::future::pending::<()>().await;
+                    }
+                    if n == 0 || server_write.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    (addr, hold, trapped)
+}
+
+#[tokio::test]
+async fn stopping_does_not_wait_for_a_rebootstrap() {
+    let env = Env::new();
+    let server = env.start().await;
+    seed(&server).await;
+    let token = pair(&server).await;
+    let (proxy, hold, trapped) = snapshot_trap(env.listen).await;
+    let client = ServerClient::new(
+        &Url::parse(&format!("http://{proxy}/")).unwrap(),
+        Some(token),
+    )
+    .unwrap();
+    let replica = Replica::open(env.layout(), client, Settings::default())
+        .await
+        .unwrap();
+    replica.rebootstrap().await.unwrap();
+
+    server.shutdown().await.unwrap();
+    CacheDb::wipe(&env.data.path().join(CACHE_DB)).unwrap();
+    let server = env.start().await;
+    seed_cache(&server).await;
+    hold.store(true, Ordering::Release);
+
+    let (stop, stopped) = watch::channel(false);
+    let run = tokio::spawn(Arc::clone(&replica).run(stopped));
+    eventually("the re-bootstrap starts", || {
+        let trapped = Arc::clone(&trapped);
+        async move { trapped.load(Ordering::Acquire) }
+    })
+    .await;
+    stop.send_replace(true);
+    tokio::time::timeout(Duration::from_secs(1), run)
+        .await
+        .expect("run stops promptly")
+        .unwrap();
     server.shutdown().await.unwrap();
 }

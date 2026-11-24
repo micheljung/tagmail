@@ -224,7 +224,11 @@ impl Replica {
                 _ = self.flush_wanted.notified() => {}
                 _ = stop.wait_for(|s| *s) => return,
             }
-            if let Err(e) = self.flush().await {
+            let flushed = tokio::select! {
+                r = self.flush() => r,
+                _ = stop.wait_for(|s| *s) => return,
+            };
+            if let Err(e) = flushed {
                 tracing::debug!(error = %e, "flush stopped");
             }
         }
@@ -242,7 +246,10 @@ impl Replica {
                     self.set_phase(Phase::Unpaired);
                     return;
                 }
-                Err(Error::Client(ClientError::Gone)) => match self.rebootstrap().await {
+                Err(Error::Client(ClientError::Gone)) => match tokio::select! {
+                    r = self.rebootstrap() => r,
+                    _ = stop.wait_for(|s| *s) => return,
+                } {
                     Ok(()) => Duration::ZERO,
                     Err(Error::Client(ClientError::Api { status: 429, .. })) => BUSY_RETRY,
                     Err(e) => {
