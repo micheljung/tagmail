@@ -113,6 +113,22 @@ test('Back from a deep link that redirected to its thread goes to the inbox', as
 	await expect(row(page, 0).locator('[data-loaded]')).toBeVisible();
 });
 
+test('Back after a link to the open thread still goes to the inbox', async ({ page }) => {
+	await signIn(page);
+	await page.goto(`/thread/${idAt(0)}`);
+	await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+	const reloaded = page.waitForResponse('**/api/auth/session');
+	await page.evaluate(() => {
+		const link = document.createElement('a');
+		link.href = location.href;
+		document.body.append(link);
+		link.click();
+	});
+	await reloaded;
+	await page.getByRole('button', { name: 'Back' }).tap();
+	await expect(page).toHaveURL(/\/inbox$/);
+});
+
 test('compose opens as a full-screen sheet', async ({ page }) => {
 	await openInbox(page);
 	await page.getByRole('button', { name: 'Menu', exact: true }).tap();

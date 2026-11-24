@@ -43,7 +43,8 @@
 	/**
 	 * `page.state.appIndex` of the current entry, so history.back() stays
 	 * inside the app. Each entry keeps its own index: popstate and replacing
-	 * navigations (which carry `page.state` over) restore it rather than count.
+	 * navigations (which carry `page.state` over) restore it, and one to the
+	 * same URL keeps it, rather than count.
 	 */
 	let appIndex = 0;
 	let entered = false;
@@ -80,7 +81,8 @@
 			appIndex = kept;
 			return;
 		}
-		appIndex = pushed ? appIndex + 1 : 0;
+		const reloaded = navigation.from?.url.href === navigation.to?.url.href;
+		if (!reloaded) appIndex = pushed ? appIndex + 1 : 0;
 		void replaceState('', { ...page.state, appIndex });
 	});
 
