@@ -350,11 +350,15 @@ pub async fn unknown_accounts(db: &ConfigDb, ids: Vec<i64>) -> Result<Vec<i64>, 
     .await
 }
 
-pub async fn record_success(db: &ConfigDb, id: i64) -> Result<(), StoreError> {
+// The result writes below match the endpoint too: SQLite reuses the id of
+// a row deleted while its send was in flight.
+
+pub async fn record_success(db: &ConfigDb, id: i64, endpoint: String) -> Result<(), StoreError> {
     db.write(move |tx| {
         tx.execute(
-            "UPDATE push_subscription SET failures = 0, last_success_at = ?2 WHERE id = ?1",
-            params![id, session::now()],
+            "UPDATE push_subscription SET failures = 0, last_success_at = ?3 \
+             WHERE id = ?1 AND endpoint = ?2",
+            params![id, endpoint, session::now()],
         )?;
         Ok(())
     })
@@ -362,16 +366,81 @@ pub async fn record_success(db: &ConfigDb, id: i64) -> Result<(), StoreError> {
 }
 
 /// Counts a failed send; `true` when that dropped the subscription.
-pub async fn record_failure(db: &ConfigDb, id: i64) -> Result<bool, StoreError> {
+pub async fn record_failure(db: &ConfigDb, id: i64, endpoint: String) -> Result<bool, StoreError> {
     db.write(move |tx| {
         tx.execute(
-            "UPDATE push_subscription SET failures = failures + 1 WHERE id = ?1",
-            [id],
+            "UPDATE push_subscription SET failures = failures + 1 WHERE id = ?1 AND endpoint = ?2",
+            params![id, endpoint],
         )?;
         Ok(tx.execute(
-            "DELETE FROM push_subscription WHERE id = ?1 AND failures >= ?2",
-            params![id, MAX_FAILURES],
+            "DELETE FROM push_subscription WHERE id = ?1 AND endpoint = ?2 AND failures >= ?3",
+            params![id, endpoint, MAX_FAILURES],
         )? > 0)
     })
     .await
+}
+
+/// Drops a subscription its push service reported gone.
+pub async fn delete_gone(db: &ConfigDb, id: i64, endpoint: String) -> Result<(), StoreError> {
+    db.write(move |tx| {
+        tx.execute(
+            "DELETE FROM push_subscription WHERE id = ?1 AND endpoint = ?2",
+            params![id, endpoint],
+        )?;
+        Ok(())
+    })
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    const OLD: &str = "https://push.example/old";
+    const NEW: &str = "https://push.example/new";
+
+    async fn reused_row() -> (TempDir, ConfigDb, i64) {
+        let dir = TempDir::new().unwrap();
+        let db = ConfigDb::open(&dir.path().join("config.db")).unwrap();
+        let id = db
+            .write(|tx| {
+                tx.execute(
+                    "INSERT INTO session (id_hash, expires_at) VALUES (x'01', ?1)",
+                    [i64::MAX],
+                )?;
+                tx.execute(
+                    "INSERT INTO push_subscription (session_hash, endpoint, p256dh, auth, \
+                     failures) VALUES (x'01', ?1, zeroblob(65), zeroblob(16), ?2)",
+                    params![NEW, MAX_FAILURES - 1],
+                )?;
+                Ok(tx.last_insert_rowid())
+            })
+            .await
+            .unwrap();
+        (dir, db, id)
+    }
+
+    async fn failures(db: &ConfigDb) -> Vec<i64> {
+        db.read(|c| {
+            let mut stmt = c.prepare("SELECT failures FROM push_subscription")?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn results_of_a_deleted_row_spare_the_row_that_reused_its_id() {
+        let (_dir, db, id) = reused_row().await;
+        assert!(!record_failure(&db, id, OLD.into()).await.unwrap());
+        record_success(&db, id, OLD.into()).await.unwrap();
+        delete_gone(&db, id, OLD.into()).await.unwrap();
+        assert_eq!(failures(&db).await, [MAX_FAILURES - 1]);
+
+        assert!(record_failure(&db, id, NEW.into()).await.unwrap());
+        assert_eq!(failures(&db).await, Vec::<i64>::new());
+    }
 }

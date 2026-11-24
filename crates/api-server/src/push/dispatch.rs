@@ -295,25 +295,27 @@ impl Dispatcher {
     async fn record(&mut self, sent: Sent) {
         let db = &self.push.db;
         let result = match sent.outcome {
-            Outcome::Delivered => store::record_success(db, sent.id).await,
+            Outcome::Delivered => store::record_success(db, sent.id, sent.endpoint).await,
             Outcome::Gone => {
                 self.pending.remove(&sent.endpoint);
-                store::delete(db, sent.id).await.map(|_| ())
+                store::delete_gone(db, sent.id, sent.endpoint).await
             }
             Outcome::RetryAfter(wait) => {
                 self.backoff
                     .insert(sent.origin, Instant::now() + wait.min(MAX_BACKOFF));
                 Ok(())
             }
-            Outcome::Failed => store::record_failure(db, sent.id).await.map(|dropped| {
-                if dropped {
-                    self.pending.remove(&sent.endpoint);
-                    tracing::warn!(
-                        subscription = sent.id,
-                        "dropping push subscription after repeated failures"
-                    );
-                }
-            }),
+            Outcome::Failed => store::record_failure(db, sent.id, sent.endpoint.clone())
+                .await
+                .map(|dropped| {
+                    if dropped {
+                        self.pending.remove(&sent.endpoint);
+                        tracing::warn!(
+                            subscription = sent.id,
+                            "dropping push subscription after repeated failures"
+                        );
+                    }
+                }),
             Outcome::LocalFault => Ok(()),
         };
         if let Err(e) = result {
