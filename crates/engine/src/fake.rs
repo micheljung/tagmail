@@ -171,6 +171,10 @@ pub struct FakeServer {
     /// fails like a dropped connection.
     pub fail_after_full_fetches: Option<usize>,
     pub reject_login: bool,
+    /// The hierarchy delimiter LIST reports.
+    pub delimiter: char,
+    /// CREATEs fail with NO.
+    pub fail_creates: bool,
     /// APPENDs fail with NO.
     pub fail_appends: bool,
     /// STOREs fail with NO.
@@ -266,6 +270,8 @@ pub fn server(caps: &[&str]) -> Shared {
         header_fetches: Vec::new(),
         fail_after_full_fetches: None,
         reject_login: false,
+        delimiter: '/',
+        fail_creates: false,
         fail_appends: false,
         fail_stores: false,
         drop_keywords: false,
@@ -539,13 +545,13 @@ impl ImapSession for FakeSession {
     }
 
     async fn list(&mut self) -> Result<Vec<MailboxInfo>> {
-        Ok(self
-            .server()
+        let server = self.server();
+        Ok(server
             .mailboxes
             .iter()
             .map(|m| MailboxInfo {
                 name: m.name.clone(),
-                delimiter: Some('/'),
+                delimiter: Some(server.delimiter),
                 attributes: Vec::new(),
                 special_use: m.special_use,
                 selectable: true,
@@ -555,6 +561,12 @@ impl ImapSession for FakeSession {
 
     async fn create_mailbox(&mut self, name: &str) -> Result<()> {
         let mut server = self.server();
+        if server.fail_creates {
+            return Err(Error::No {
+                code: None,
+                text: "create refused".into(),
+            });
+        }
         if server.mailboxes.iter().any(|m| m.name == name) {
             return Err(Error::No {
                 code: Some("ALREADYEXISTS".into()),

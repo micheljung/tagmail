@@ -15,24 +15,33 @@ use tagmail_store::changes::{ChangeOp, Entity, NewChange};
 type Views = Vec<(i64, String, Role, bool)>;
 
 fn views(conn: &Connection, account: i64) -> Result<(Views, ArchiveMode)> {
-    let rows: Vec<(i64, String, Option<String>)> = {
-        let mut stmt =
-            conn.prepare_cached("SELECT id, name, special_use FROM mailbox WHERE account_id = ?1")?;
-        stmt.query_map([account], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-            .collect::<rusqlite::Result<_>>()?
+    let rows: Vec<(i64, String, Option<String>, Option<String>)> = {
+        let mut stmt = conn.prepare_cached(
+            "SELECT id, name, special_use, delimiter FROM mailbox WHERE account_id = ?1",
+        )?;
+        stmt.query_map([account], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?
     };
-    let uses: Vec<(String, Option<SpecialUse>)> = rows
+    let uses: Vec<(String, Option<SpecialUse>, Option<char>)> = rows
         .iter()
-        .map(|(_, n, s)| (n.clone(), s.as_deref().and_then(|s| s.parse().ok())))
+        .map(|(_, n, s, d)| {
+            (
+                n.clone(),
+                s.as_deref().and_then(|s| s.parse().ok()),
+                d.as_deref().and_then(|d| d.chars().next()),
+            )
+        })
         .collect();
-    let has_all = uses.iter().any(|(_, u)| *u == Some(SpecialUse::All));
+    let has_all = uses.iter().any(|(_, u, _)| *u == Some(SpecialUse::All));
     let mode = ArchiveMode::detect(None, has_all);
-    let archive =
-        ops::archive_mailbox(mode, uses.iter().map(|(n, u)| (n.as_str(), *u))).map(str::to_owned);
+    let archive = ops::archive_mailbox(mode, uses.iter().map(|(n, u, d)| (n.as_str(), *u, *d)))
+        .map(str::to_owned);
     let views = rows
         .into_iter()
         .zip(uses)
-        .map(|((id, name, _), (_, special))| {
+        .map(|((id, name, _, _), (_, special, _))| {
             let is_archive = archive.as_deref() == Some(name.as_str());
             let role = Role::of(&name, special);
             (id, name, role, is_archive)

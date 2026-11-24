@@ -12,6 +12,7 @@
 
 use rusqlite::types::Value;
 use rusqlite::{Connection, params_from_iter};
+use tagmail_core::ops::folder_named;
 use tagmail_core::query::{Location, Query, Status, Term, Text, day_start};
 use tagmail_core::{AccountId, LabelKey, SpecialUse, ThreadId, decode_mailbox_name};
 
@@ -254,9 +255,7 @@ impl Mailbox {
     fn trash_or_junk(&self) -> bool {
         match self.special_use {
             Some(u) => matches!(u, SpecialUse::Trash | SpecialUse::Junk),
-            None => TRASH_OR_JUNK_NAMES
-                .iter()
-                .any(|n| n.eq_ignore_ascii_case(&self.path)),
+            None => folder_named(&TRASH_OR_JUNK_NAMES, [(self.path.as_str(), Some('/'))]).is_some(),
         }
     }
 
@@ -550,5 +549,28 @@ fn sql(node: &Node, out: &mut Sql) {
             out.text.push(')');
         }
         Node::Fts(_) => unreachable!("FTS atoms are handled by fts_expr"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn folder(path: &str) -> Mailbox {
+        Mailbox {
+            id: 1,
+            path: path.to_owned(),
+            special_use: None,
+        }
+    }
+
+    #[test]
+    fn trash_and_junk_by_name_include_the_inbox_namespace() {
+        for path in ["Trash", "spam", "INBOX/Trash", "inbox/Junk"] {
+            assert!(folder(path).trash_or_junk(), "{path}");
+        }
+        for path in ["Projects/Trash", "INBOX/Projects/Junk", "Inbox"] {
+            assert!(!folder(path).trash_or_junk(), "{path}");
+        }
     }
 }

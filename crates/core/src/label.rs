@@ -53,6 +53,7 @@ const HIDDEN_KEYWORDS: &[&str] = &[
     "$MailFlagBit0",
     "$MailFlagBit1",
     "$MailFlagBit2",
+    "$has_cal",
 ];
 
 /// Casefolded label identity (`label.label_key`, `label_registry.label_key`).
@@ -278,6 +279,7 @@ mod tests {
         assert_eq!(classify_keyword(&kw("$junk")), KeywordClass::Hidden);
         assert_eq!(classify_keyword(&kw("$MDNSent")), KeywordClass::Hidden);
         assert_eq!(classify_keyword(&kw("NonJunk")), KeywordClass::Hidden);
+        assert_eq!(classify_keyword(&kw("$has_cal")), KeywordClass::Hidden);
         assert_eq!(
             classify_keyword(&kw("$label1")),
             KeywordClass::Label {

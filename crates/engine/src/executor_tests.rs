@@ -590,10 +590,90 @@ async fn gmail_mode_archives_by_leaving_inbox_for_all() {
     f.engine.shutdown().await;
 }
 
+/// Dovecot with an `INBOX.` personal namespace and no SPECIAL-USE, like
+/// Hetzner: every folder lives under INBOX, delimited by `.`.
+fn inbox_namespace_server() -> Shared {
+    let srv = server(CAPS);
+    {
+        let mut s = lock(&srv);
+        s.delimiter = '.';
+        s.mailboxes.retain(|m| m.name == "INBOX");
+        s.add_mailbox("INBOX.Sent", None, 200);
+        s.add_mailbox("INBOX.Drafts", None, 300);
+    }
+    srv
+}
+
+#[tokio::test]
+async fn trash_finds_the_trash_under_the_inbox_namespace() {
+    let srv = inbox_namespace_server();
+    lock(&srv).add_mailbox("INBOX.Trash", None, 400);
+    lock(&srv).append("INBOX", msg("ns@x", "Bin me", 1_790_000_000));
+    let f = fixture(&srv).await;
+    f.engine.start_all().await.unwrap();
+    eventually("initial sync", || f.all_live()).await;
+    let thread = f.thread_of("ns@x").await;
+
+    created(
+        f.engine
+            .queue_op(op("trash-ns", OpKind::Trash, thread))
+            .await
+            .unwrap(),
+    );
+    eventually("done", || async {
+        f.status("trash-ns").await == OpStatusDto::Done
+    })
+    .await;
+    {
+        let mut s = lock(&srv);
+        assert!(s.uid_of("INBOX.Trash", "ns@x").is_some());
+        assert!(s.uid_of("INBOX", "ns@x").is_none());
+    }
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn trash_and_junk_are_created_under_the_inbox_namespace() {
+    let srv = inbox_namespace_server();
+    lock(&srv).append("INBOX", msg("bin@x", "Bin me", 1_790_000_000));
+    lock(&srv).append("INBOX", msg("spam@x", "Spam me", 1_790_000_100));
+    let f = fixture(&srv).await;
+    f.engine.start_all().await.unwrap();
+    eventually("initial sync", || f.all_live()).await;
+    let (bin, spam) = (f.thread_of("bin@x").await, f.thread_of("spam@x").await);
+
+    created(
+        f.engine
+            .queue_op(op("trash-new", OpKind::Trash, bin))
+            .await
+            .unwrap(),
+    );
+    created(
+        f.engine
+            .queue_op(op("spam-new", OpKind::Spam, spam))
+            .await
+            .unwrap(),
+    );
+    eventually("done", || async {
+        f.status("trash-new").await == OpStatusDto::Done
+            && f.status("spam-new").await == OpStatusDto::Done
+    })
+    .await;
+    {
+        let mut s = lock(&srv);
+        assert!(s.uid_of("INBOX.Trash", "bin@x").is_some());
+        assert!(s.uid_of("INBOX.Junk", "spam@x").is_some());
+        assert!(s.uid_of("INBOX", "bin@x").is_none());
+        assert!(s.uid_of("INBOX", "spam@x").is_none());
+    }
+    f.engine.shutdown().await;
+}
+
 #[tokio::test]
 async fn move_and_trash_fail_visibly_without_a_destination() {
     let srv = server(CAPS);
     lock(&srv).add_mailbox("Projects", None, 500);
+    lock(&srv).fail_creates = true;
     lock(&srv).append("INBOX", msg("mv@x", "Move me", 1_790_000_000));
     let f = fixture(&srv).await;
     f.engine.start_all().await.unwrap();
@@ -606,7 +686,7 @@ async fn move_and_trash_fail_visibly_without_a_destination() {
             .await
             .unwrap(),
     );
-    eventually("no Trash", || async {
+    eventually("Trash not created", || async {
         f.status("trash-1").await == OpStatusDto::Failed
     })
     .await;
@@ -617,7 +697,7 @@ async fn move_and_trash_fail_visibly_without_a_destination() {
         .unwrap()
         .error
         .unwrap();
-    assert!(err.contains("\\Trash"), "{err}");
+    assert!(err.contains("creating Trash failed"), "{err}");
     eventually("back in INBOX, not misapplied", || async {
         f.lists(thread).await == ["INBOX"]
     })

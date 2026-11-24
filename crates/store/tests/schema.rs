@@ -487,7 +487,52 @@ async fn config_v5_gives_identityless_accounts_a_default() {
 
 #[test]
 fn schema_constants_count_the_migrations() {
-    assert_eq!((CONFIG_SCHEMA, CACHE_SCHEMA), (8, 3));
+    assert_eq!((CONFIG_SCHEMA, CACHE_SCHEMA), (8, 4));
+}
+
+#[tokio::test]
+async fn cache_v4_drops_has_cal_labels() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("cache.db");
+    {
+        let conn = open_raw(&path);
+        for sql in [
+            include_str!("../migrations/cache/V1__init.sql"),
+            include_str!("../migrations/cache/V2__pending_text_index.sql"),
+            include_str!("../migrations/cache/V3__op_overlay.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        conn.execute_batch(
+            "INSERT INTO message (id, account_id, email_id, date) VALUES (1, 1, 'e1', 0); \
+             INSERT INTO label (id, account_id, keyword, label_key, kind) VALUES \
+             (1, 1, '$has_cal', '$has_cal', 'keyword'), \
+             (2, 2, '$HAS_CAL', '$has_cal', 'keyword'), \
+             (3, 1, 'Work', 'work', 'keyword'), \
+             (4, 1, '$label_=24has_cal', '$has_cal_label', 'keyword'); \
+             INSERT INTO message_label (message_id, label_id) VALUES (1, 1), (1, 3), (1, 4);",
+        )
+        .unwrap();
+    }
+    let db = CacheDb::open(&path).unwrap();
+    assert_eq!(user_version(&db).await, CACHE_SCHEMA);
+    let (labels, message_labels) = db
+        .read(|c| {
+            let ids = |sql: &str| -> rusqlite::Result<Vec<i64>> {
+                c.prepare(sql)?.query_map([], |r| r.get(0))?.collect()
+            };
+            Ok((
+                ids("SELECT id FROM label ORDER BY id")?,
+                ids("SELECT label_id FROM message_label ORDER BY label_id")?,
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!(labels, [3, 4]);
+    assert_eq!(message_labels, [3, 4]);
+    integrity(&db).await;
+    db.close().await.unwrap();
 }
 
 #[tokio::test]

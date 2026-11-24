@@ -16,6 +16,7 @@ pub(crate) const CACHE: &[&str] = &[
     include_str!("../migrations/cache/V1__init.sql"),
     include_str!("../migrations/cache/V2__pending_text_index.sql"),
     include_str!("../migrations/cache/V3__op_overlay.sql"),
+    include_str!("../migrations/cache/V4__hide_has_cal.sql"),
 ];
 
 /// `user_version` of an up-to-date `config.db`.

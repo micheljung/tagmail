@@ -19,6 +19,7 @@ use crate::label::{KeywordClass, LabelKey, classify_keyword};
 /// Name of the archive folder created when a server has neither `\Archive`
 /// nor `\All`.
 pub const ARCHIVE_NAME: &str = "Archive";
+const INBOX: &str = "INBOX";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OpKind {
@@ -241,28 +242,84 @@ pub struct MailboxView<'a> {
     pub is_archive: bool,
 }
 
-/// Picks the archive mailbox among `(name, special_use)` pairs: `\All` in
-/// [`ArchiveMode::MoveAll`], else `\Archive`, else a folder named
-/// [`ARCHIVE_NAME`].
+/// Picks the archive mailbox among `(name, special_use, delimiter)`
+/// triples: `\All` in [`ArchiveMode::MoveAll`], else `\Archive`, else a
+/// folder named [`ARCHIVE_NAME`] (see [`folder_named`]).
 pub fn archive_mailbox<'a, I>(mode: ArchiveMode, mailboxes: I) -> Option<&'a str>
 where
-    I: IntoIterator<Item = (&'a str, Option<SpecialUse>)> + Clone,
+    I: IntoIterator<Item = (&'a str, Option<SpecialUse>, Option<char>)> + Clone,
 {
     let by_use = |u: SpecialUse| {
         mailboxes
             .clone()
             .into_iter()
-            .find(|(_, s)| *s == Some(u))
-            .map(|(n, _)| n)
+            .find(|(_, s, _)| *s == Some(u))
+            .map(|(n, _, _)| n)
     };
     match mode {
         ArchiveMode::MoveAll => by_use(SpecialUse::All),
         ArchiveMode::MoveArchive => by_use(SpecialUse::Archive).or_else(|| {
-            mailboxes
-                .into_iter()
-                .find(|(n, s)| s.is_none() && *n == ARCHIVE_NAME)
-                .map(|(n, _)| n)
+            folder_named(
+                &[ARCHIVE_NAME],
+                mailboxes
+                    .into_iter()
+                    .filter(|(_, s, _)| s.is_none())
+                    .map(|(n, _, d)| (n, d)),
+            )
         }),
+    }
+}
+
+/// The part of `name` below `INBOX`, for servers whose personal namespace
+/// is `INBOX<delimiter>` (Dovecot's `INBOX.Trash`).
+fn under_inbox(name: &str, delimiter: Option<char>) -> Option<&str> {
+    let (parent, rest) = name.split_once(delimiter?)?;
+    parent.eq_ignore_ascii_case(INBOX).then_some(rest)
+}
+
+/// Finds a folder named one of `leaves` (case-insensitive, in order of
+/// preference) among `(name, delimiter)` pairs: at the top level, else
+/// directly under `INBOX`. Deeper folders of that name are the user's own.
+pub fn folder_named<'a, I>(leaves: &[&str], mailboxes: I) -> Option<&'a str>
+where
+    I: IntoIterator<Item = (&'a str, Option<char>)>,
+{
+    let mailboxes: Vec<_> = mailboxes.into_iter().collect();
+    let pick = |hit: &dyn Fn(&str, Option<char>, &str) -> bool| {
+        leaves.iter().find_map(|leaf| {
+            mailboxes
+                .iter()
+                .find(|(n, d)| hit(n, *d, leaf))
+                .map(|(n, _)| *n)
+        })
+    };
+    pick(&|n, _, leaf| n.eq_ignore_ascii_case(leaf)).or_else(|| {
+        pick(&|n, d, leaf| under_inbox(n, d).is_some_and(|l| l.eq_ignore_ascii_case(leaf)))
+    })
+}
+
+/// The name to create the missing folder `leaf` under: below `INBOX` when
+/// most of the account's other folders live there, else top-level.
+pub fn new_folder_name<'a, I>(leaf: &str, mailboxes: I) -> String
+where
+    I: IntoIterator<Item = (&'a str, Option<char>)>,
+{
+    let (mut nested, mut top) = (0usize, 0usize);
+    let mut delimiter = None;
+    for (name, d) in mailboxes {
+        if name.eq_ignore_ascii_case(INBOX) {
+            continue;
+        }
+        if under_inbox(name, d).is_some() {
+            nested += 1;
+            delimiter = d;
+        } else {
+            top += 1;
+        }
+    }
+    match delimiter {
+        Some(d) if nested > top => format!("{INBOX}{d}{leaf}"),
+        _ => leaf.to_owned(),
     }
 }
 
@@ -474,6 +531,7 @@ pub struct Candidate {
     pub special_use: Option<SpecialUse>,
     /// Known from the cache or STATUS; `None` when unknown.
     pub uidvalidity: Option<u32>,
+    pub delimiter: Option<char>,
 }
 
 /// Finds the mailbox a durable reference means today (plan §3.4): by
@@ -741,10 +799,10 @@ mod tests {
     #[test]
     fn archive_mailbox_follows_mode() {
         let boxes = [
-            ("INBOX", None),
-            ("Archive", None),
-            ("Old", Some(SpecialUse::Archive)),
-            ("[Gmail]/All", Some(SpecialUse::All)),
+            ("INBOX", None, Some('/')),
+            ("Archive", None, Some('/')),
+            ("Old", Some(SpecialUse::Archive), Some('/')),
+            ("[Gmail]/All", Some(SpecialUse::All), Some('/')),
         ];
         assert_eq!(
             archive_mailbox(ArchiveMode::MoveArchive, boxes.iter().copied()),
@@ -770,11 +828,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn archive_mailbox_finds_the_folder_under_the_inbox_namespace() {
+        let boxes = [
+            ("INBOX", None, Some('.')),
+            ("INBOX.Projects.Archive", None, Some('.')),
+            ("INBOX.archive", None, Some('.')),
+        ];
+        assert_eq!(
+            archive_mailbox(ArchiveMode::MoveArchive, boxes.iter().copied()),
+            Some("INBOX.archive")
+        );
+    }
+
+    #[test]
+    fn folder_named_prefers_top_level_then_inbox_children() {
+        let names = ["Trash", "Deleted Items"];
+        let find =
+            |boxes: &[(&'static str, Option<char>)]| folder_named(&names, boxes.iter().copied());
+        assert_eq!(
+            find(&[("INBOX.Trash", Some('.')), ("trash", Some('.'))]),
+            Some("trash")
+        );
+        assert_eq!(
+            find(&[("INBOX", Some('.')), ("INBOX.Deleted Items", Some('.'))]),
+            Some("INBOX.Deleted Items")
+        );
+        assert_eq!(find(&[("Projects.Trash", Some('.'))]), None);
+        assert_eq!(find(&[("INBOX.Projects.Trash", Some('.'))]), None);
+        assert_eq!(find(&[("INBOX.Trash", None)]), None);
+        assert_eq!(find(&[("INBOX/Trash", Some('.'))]), None);
+    }
+
+    #[test]
+    fn new_folders_follow_the_inbox_namespace() {
+        let dovecot = [
+            ("INBOX", Some('.')),
+            ("INBOX.Sent", Some('.')),
+            ("INBOX.Drafts", Some('.')),
+        ];
+        assert_eq!(new_folder_name("Trash", dovecot), "INBOX.Trash");
+        let flat = [
+            ("INBOX", Some('/')),
+            ("Sent", Some('/')),
+            ("INBOX/Receipts", Some('/')),
+            ("Drafts", Some('/')),
+        ];
+        assert_eq!(new_folder_name("Trash", flat), "Trash");
+        assert_eq!(new_folder_name("Junk", [("INBOX", Some('/'))]), "Junk");
+    }
+
     fn cand(name: &str, special_use: Option<SpecialUse>, uidvalidity: Option<u32>) -> Candidate {
         Candidate {
             name: name.into(),
             special_use,
             uidvalidity,
+            delimiter: Some('/'),
         }
     }
 
