@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { APP_NAME } from '#lib/document-title.ts';
-	import { fullDate } from '#lib/format.ts';
+	import { describeAgent, fullDate } from '#lib/format.ts';
 	import {
 		addPasskey,
 		api,
@@ -68,30 +68,6 @@
 
 	function defaultPasskeyName(): string {
 		return describeAgent(navigator.userAgent);
-	}
-
-	function describeAgent(ua: string): string {
-		const browser = /Firefox/.test(ua)
-			? 'Firefox'
-			: /Edg\//.test(ua)
-				? 'Edge'
-				: /Chrome/.test(ua)
-					? 'Chrome'
-					: /Safari/.test(ua)
-						? 'Safari'
-						: 'Browser';
-		const os = /iPhone|iPad/.test(ua)
-			? 'iOS'
-			: /Android/.test(ua)
-				? 'Android'
-				: /Mac OS/.test(ua)
-					? 'macOS'
-					: /Windows/.test(ua)
-						? 'Windows'
-						: /Linux/.test(ua)
-							? 'Linux'
-							: '';
-		return os ? `${browser} on ${os}` : browser;
 	}
 
 	function submitPasskey(event: SubmitEvent) {

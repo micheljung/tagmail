@@ -72,3 +72,28 @@ export function fileSize(bytes: number): string {
 export function labelColor(key: string, color: string | null | undefined): string {
 	return color ?? `oklch(0.66 0.14 ${labelHue(key)})`;
 }
+
+/** "Chrome on Android" from a user agent string. */
+export function describeAgent(ua: string): string {
+	const browser = /Firefox/.test(ua)
+		? 'Firefox'
+		: /Edg\//.test(ua)
+			? 'Edge'
+			: /Chrome/.test(ua)
+				? 'Chrome'
+				: /Safari/.test(ua)
+					? 'Safari'
+					: 'Browser';
+	const os = /iPhone|iPad/.test(ua)
+		? 'iOS'
+		: /Android/.test(ua)
+			? 'Android'
+			: /Mac OS/.test(ua)
+				? 'macOS'
+				: /Windows/.test(ua)
+					? 'Windows'
+					: /Linux/.test(ua)
+						? 'Linux'
+						: '';
+	return os ? `${browser} on ${os}` : browser;
+}

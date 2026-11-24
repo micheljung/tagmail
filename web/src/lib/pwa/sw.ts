@@ -64,3 +64,62 @@ export function safeAppUrl(url: unknown, origin: string): string {
 	const parsed = new URL(url, origin);
 	return parsed.origin === origin ? parsed.pathname + parsed.search + parsed.hash : FALLBACK_URL;
 }
+
+export const NOTIFICATION_ICON = '/icons/icon-192.png';
+export const NOTIFICATION_BADGE = '/icons/badge-96.png';
+const DEFAULT_TAG = 'tagmail';
+const PAYLOAD_VERSION = 1;
+
+export interface NotificationSpec {
+	title: string;
+	options: {
+		body: string;
+		tag: string;
+		renotify: boolean;
+		icon: string;
+		badge: string;
+		data: { url: string };
+	};
+}
+
+const text = (value: unknown) => (typeof value === 'string' && value !== '' ? value : undefined);
+const positiveInt = (value: unknown) =>
+	Number.isSafeInteger(value) && (value as number) > 0 ? (value as number) : undefined;
+
+/**
+ * The notification for a push payload. Anything unexpected still shows
+ * "New mail": Safari revokes the permission after silent pushes. Text
+ * only, nothing is rendered as HTML.
+ */
+export function notificationFor(data: string | null | undefined, origin: string): NotificationSpec {
+	let payload: Record<string, unknown> = {};
+	try {
+		const parsed: unknown = JSON.parse(data ?? '');
+		if (parsed && typeof parsed === 'object') payload = parsed as Record<string, unknown>;
+	} catch {
+		// Malformed payloads fall through to the generic notification.
+	}
+	const known = payload.v === PAYLOAD_VERSION;
+	const kind = known ? payload.kind : undefined;
+	const count = positiveInt(payload.count) ?? 1;
+	const accountId = positiveInt(payload.accountId);
+	const from = text(payload.from);
+	const subject = text(payload.subject);
+	const url = kind === 'newMail' || kind === 'test' ? payload.url : undefined;
+	const spec = (title: string, body: string, tag: string, renotify: boolean): NotificationSpec => ({
+		title,
+		options: {
+			body,
+			tag,
+			renotify,
+			icon: NOTIFICATION_ICON,
+			badge: NOTIFICATION_BADGE,
+			data: { url: safeAppUrl(url, origin) }
+		}
+	});
+	if (kind === 'test') return spec('Test notification', '', DEFAULT_TAG, false);
+	if (kind !== 'newMail') return spec('New mail', '', DEFAULT_TAG, false);
+	const tag = accountId === undefined ? DEFAULT_TAG : `inbox-${accountId}`;
+	const title = count > 1 ? `${count} new messages` : (from ?? 'New mail');
+	return spec(title, subject ?? '', tag, count > 1);
+}

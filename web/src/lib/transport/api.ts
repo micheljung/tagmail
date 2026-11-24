@@ -21,6 +21,10 @@ import type {
 	PasskeyChallengeDto,
 	PasskeyDto,
 	PasskeysDto,
+	PushKeyDto,
+	PushSubscribeDto,
+	PushSubscriptionDto,
+	PushSubscriptionPatchDto,
 	SessionDto,
 	SessionsDto,
 	StatusDto,
@@ -101,6 +105,8 @@ export class Api {
 	onUnauthorized: (error: ApiError) => void = () => {};
 	/** Called when the desktop app could not reach the server for a request. */
 	onOffline: (error: ApiError) => void = () => {};
+	/** Runs before logout and must settle quickly; its failure never blocks logout. */
+	beforeLogout: () => Promise<void> = () => Promise.resolve();
 
 	constructor(transport: ApiTransport) {
 		this.transport = transport;
@@ -207,8 +213,36 @@ export class Api {
 		return this.#post<CurrentAuthDto>('/api/auth/setup', { token, password });
 	}
 
-	logout(): Promise<void> {
+	async logout(): Promise<void> {
+		await this.beforeLogout().catch(() => {});
 		return this.#empty('/api/auth/logout', 'POST');
+	}
+
+	pushKey(): Promise<PushKeyDto> {
+		return this.#json<PushKeyDto>('/api/push/key');
+	}
+
+	pushSubscriptions(): Promise<PushSubscriptionDto[]> {
+		return this.#json<PushSubscriptionDto[]>('/api/push/subscriptions');
+	}
+
+	subscribePush(subscription: PushSubscribeDto): Promise<PushSubscriptionDto> {
+		return this.#post<PushSubscriptionDto>('/api/push/subscriptions', subscription);
+	}
+
+	updatePushSubscription(
+		id: number,
+		patch: PushSubscriptionPatchDto
+	): Promise<PushSubscriptionDto> {
+		return this.#post<PushSubscriptionDto>(`/api/push/subscriptions/${id}`, patch, 'PATCH');
+	}
+
+	removePushSubscription(id: number): Promise<void> {
+		return this.#empty(`/api/push/subscriptions/${id}`, 'DELETE');
+	}
+
+	testPush(id: number): Promise<void> {
+		return this.#empty(`/api/push/subscriptions/${id}/test`, 'POST');
 	}
 
 	passkeyLoginStart(): Promise<PasskeyChallengeDto> {

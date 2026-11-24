@@ -276,6 +276,15 @@
 				<Icon name="keyboard" size={18} />
 			</button>
 			{#if !inApp}
+				<a
+					href="/settings/notifications"
+					aria-label="Notifications"
+					title="Notifications"
+					aria-current={page.url.pathname === '/settings/notifications' ? 'page' : undefined}
+					onclick={onnavigate}
+				>
+					<Icon name="bell" size={18} />
+				</a>
 				<button onclick={onlogout} aria-label="Sign out" title="Sign out">
 					<Icon name="logout" size={18} />
 				</button>
@@ -420,9 +429,10 @@
 		padding: 8px 0 0 10px;
 	}
 
-	.tools button {
+	.tools :is(button, a) {
 		display: grid;
 		place-items: center;
+		padding: 0;
 		width: 36px;
 		height: 36px;
 		border: 0;
@@ -432,9 +442,14 @@
 		cursor: pointer;
 	}
 
-	.tools button:hover {
+	.tools :is(button, a):hover {
 		background: var(--hover);
 		color: var(--ink);
+	}
+
+	.tools a[aria-current='page'] {
+		background: var(--accent-soft);
+		color: var(--accent);
 	}
 
 	@media (pointer: coarse), (max-width: 720px) {
@@ -443,7 +458,7 @@
 			height: 44px;
 		}
 
-		.tools button {
+		.tools :is(button, a) {
 			width: 44px;
 			height: 44px;
 		}

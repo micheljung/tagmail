@@ -12,6 +12,20 @@ function api(handler: (path: string, init?: RequestInit) => Response) {
 }
 
 describe('Api', () => {
+	it('runs the logout hook first and logs out even when it fails', async () => {
+		const seen: string[] = [];
+		const client = api((path) => {
+			seen.push(path);
+			return new Response(null, { status: 204 });
+		});
+		client.beforeLogout = () => {
+			seen.push('hook');
+			return Promise.reject(new Error('no service worker'));
+		};
+		await client.logout();
+		expect(seen).toEqual(['hook', '/api/auth/logout']);
+	});
+
 	it('decodes a view index with its cursor', async () => {
 		const seen: string[] = [];
 		const client = api((path) => {

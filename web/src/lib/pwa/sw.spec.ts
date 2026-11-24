@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
 	FALLBACK_URL,
+	notificationFor,
 	fetchStrategy,
 	safeAppUrl,
 	shellCacheName,
@@ -95,5 +96,126 @@ describe('safeAppUrl', () => {
 		undefined
 	])('falls back for %j', (url) => {
 		expect(safeAppUrl(url, ORIGIN)).toBe(FALLBACK_URL);
+	});
+});
+
+describe('notificationFor', () => {
+	const push = (payload: object) => JSON.stringify({ v: 1, ...payload });
+	const generic = {
+		title: 'New mail',
+		options: {
+			body: '',
+			tag: 'tagmail',
+			renotify: false,
+			icon: '/icons/icon-192.png',
+			badge: '/icons/badge-96.png',
+			data: { url: '/inbox' }
+		}
+	};
+	it.each([
+		[
+			'one message with preview',
+			push({
+				kind: 'newMail',
+				accountId: 1,
+				count: 1,
+				threadId: 4711,
+				from: 'Alice Example',
+				subject: 'Lunch?',
+				url: '/thread/4711'
+			}),
+			{
+				title: 'Alice Example',
+				body: 'Lunch?',
+				tag: 'inbox-1',
+				renotify: false,
+				url: '/thread/4711'
+			}
+		],
+		[
+			'preview off',
+			push({ kind: 'newMail', accountId: 2, count: 1, url: '/inbox' }),
+			{ title: 'New mail', body: '', tag: 'inbox-2', renotify: false, url: '/inbox' }
+		],
+		[
+			'several messages',
+			push({
+				kind: 'newMail',
+				accountId: 1,
+				count: 5,
+				from: 'Bob',
+				subject: 'Re: plans',
+				url: '/inbox'
+			}),
+			{ title: '5 new messages', body: 'Re: plans', tag: 'inbox-1', renotify: true, url: '/inbox' }
+		],
+		[
+			'a test push',
+			push({ kind: 'test', url: '/settings/notifications' }),
+			{
+				title: 'Test notification',
+				body: '',
+				tag: 'tagmail',
+				renotify: false,
+				url: '/settings/notifications'
+			}
+		],
+		[
+			'a hostile URL',
+			push({
+				kind: 'newMail',
+				accountId: 1,
+				count: 1,
+				from: 'Eve',
+				subject: 'Hi',
+				url: '//evil.test/'
+			}),
+			{ title: 'Eve', body: 'Hi', tag: 'inbox-1', renotify: false, url: '/inbox' }
+		],
+		[
+			'markup in the sender',
+			push({
+				kind: 'newMail',
+				accountId: 1,
+				count: 1,
+				from: '<img src=x onerror=alert(1)>',
+				url: '/inbox'
+			}),
+			{
+				title: '<img src=x onerror=alert(1)>',
+				body: '',
+				tag: 'inbox-1',
+				renotify: false,
+				url: '/inbox'
+			}
+		]
+	])('%s', (_name, data, want) => {
+		const { title, options } = notificationFor(data, ORIGIN);
+		expect({
+			title,
+			body: options.body,
+			tag: options.tag,
+			renotify: options.renotify,
+			url: options.data.url
+		}).toEqual(want);
+		expect(options.icon).toBe('/icons/icon-192.png');
+		expect(options.badge).toBe('/icons/badge-96.png');
+	});
+
+	it.each([
+		['malformed JSON', '{"v":1,'],
+		['an empty push', null],
+		[
+			'an unknown version',
+			JSON.stringify({ v: 2, kind: 'newMail', from: 'Alice', url: '/thread/1' })
+		],
+		['an unknown kind', push({ kind: 'reminder', from: 'Alice', url: '/thread/1' })],
+		['a JSON string', '"hello"'],
+		[
+			'wrong field types',
+			push({ kind: 'newMail', from: 42, subject: {}, count: 'many', accountId: -1, url: 7 })
+		]
+	])('shows a generic notification for %s', (_name, data) => {
+		expect(notificationFor(data, ORIGIN)).toEqual(generic);
 	});
 });
