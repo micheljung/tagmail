@@ -6,6 +6,7 @@ const noSandbox = process.env.PW_NO_SANDBOX === '1' ? ['--no-sandbox'] : [];
 export default defineConfig({
 	testDir: 'e2e',
 	testMatch: '**/*.spec.ts',
+	snapshotPathTemplate: '{testDir}/__screenshots__/{testFilePath}-{projectName}/{arg}{ext}',
 	fullyParallel: false,
 	workers: 1,
 	forbidOnly: !!process.env.CI,
