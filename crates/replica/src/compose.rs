@@ -242,7 +242,7 @@ fn outbox_by_op(c: &Connection, op_id: &str) -> rusqlite::Result<Option<OutboxRo
     .optional()
 }
 
-fn outbox_by_id(c: &Connection, id: i64) -> rusqlite::Result<Option<OutboxRow>> {
+pub(crate) fn outbox_by_id(c: &Connection, id: i64) -> rusqlite::Result<Option<OutboxRow>> {
     c.query_row(
         &format!("SELECT {OUTBOX_COLUMNS} FROM outbox WHERE id = ?1"),
         [id],
@@ -729,6 +729,7 @@ impl Replica {
     }
 
     async fn cancel(&self, id: i64) -> ComposeResult<()> {
+        let _sending = self.send_lock().lock().await;
         let o = outbox_by_id(&self.durable().conn(), id)?
             .ok_or(ComposeError::NotFound("outbox item"))?;
         if o.state == OutboxState::Sent {
@@ -746,6 +747,7 @@ impl Replica {
     }
 
     async fn retry(&self, id: i64) -> ComposeResult<()> {
+        let _sending = self.send_lock().lock().await;
         let o = outbox_by_id(&self.durable().conn(), id)?
             .ok_or(ComposeError::NotFound("outbox item"))?;
         if o.state != OutboxState::Failed {

@@ -382,6 +382,10 @@ impl Replica {
                 .set_outbox(o, OutboxState::Failed, Some(&error), None)
                 .await;
         };
+        let _sending = self.send_lock().lock().await;
+        if compose::outbox_by_id(&self.durable().conn(), o.id)?.is_none() {
+            return Ok(());
+        }
         let body = json!({ "opId": o.op_id, "draftId": draft_id });
         match self
             .client()
@@ -447,6 +451,10 @@ impl Replica {
                     else {
                         continue;
                     };
+                    let _sending = self.send_lock().lock().await;
+                    if compose::outbox_by_id(&self.durable().conn(), o.id)?.is_none() {
+                        continue;
+                    }
                     let body = json!({ "opId": o.op_id, "draftId": draft_id });
                     match self
                         .client()

@@ -285,3 +285,53 @@ async fn a_finished_send_is_published_as_sent() {
         "{changes:?}"
     );
 }
+
+#[tokio::test]
+async fn a_send_cancelled_during_its_upload_is_never_sent() {
+    let f = Fixture::start().await;
+    let replica = f.replica().await;
+    let compose = DesktopCompose(Arc::clone(&replica));
+    let me = identity(&compose).await;
+    let file = compose.upload_dir().join("big.bin");
+    std::fs::create_dir_all(compose.upload_dir()).unwrap();
+    let size = 10 * 1024 * 1024;
+    std::fs::write(&file, vec![b'x'; size]).unwrap();
+    let upload = compose
+        .add_upload(NewUpload {
+            name: "big.bin".into(),
+            content_type: "application/octet-stream".into(),
+            file,
+            size: size as u64,
+        })
+        .await
+        .unwrap();
+    let draft = compose
+        .create_draft(input(me, "Big", vec![upload.id.parse().unwrap()]))
+        .await
+        .unwrap()
+        .draft;
+    compose.send("send-c".into(), draft.id).await.unwrap();
+    let id = compose.outbox().await.unwrap()[0].id;
+
+    let flushing = tokio::spawn({
+        let replica = Arc::clone(&replica);
+        async move { replica.flush().await }
+    });
+    let uploading = || -> bool {
+        replica
+            .durable()
+            .conn()
+            .query_row("SELECT state FROM outbox", [], |r| r.get::<_, String>(0))
+            .is_ok_and(|s| s == "uploading")
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !uploading() {
+        assert!(std::time::Instant::now() < deadline, "never uploading");
+        tokio::task::yield_now().await;
+    }
+    compose.cancel(id).await.unwrap();
+    flushing.await.unwrap().unwrap();
+
+    assert!(server_outbox(&f).await.is_empty());
+    assert!(compose.outbox().await.unwrap().is_empty());
+}

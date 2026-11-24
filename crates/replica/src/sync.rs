@@ -76,6 +76,7 @@ pub struct Replica {
     client: ServerClient,
     durable: Durable,
     flush_lock: AsyncMutex<()>,
+    send_lock: AsyncMutex<()>,
     flush_wanted: Notify,
     settings: Mutex<Settings>,
     store: RwLock<Option<Arc<SqliteStore>>>,
@@ -126,6 +127,7 @@ impl Replica {
             client,
             durable,
             flush_lock: AsyncMutex::new(()),
+            send_lock: AsyncMutex::new(()),
             flush_wanted: Notify::new(),
             settings: Mutex::new(settings),
             store: RwLock::new(store),
@@ -165,6 +167,12 @@ impl Replica {
 
     pub(crate) fn flush_lock(&self) -> &AsyncMutex<()> {
         &self.flush_lock
+    }
+
+    /// Held while a send is posted and while one is cancelled or retried,
+    /// so a cancelled item is never posted.
+    pub(crate) fn send_lock(&self) -> &AsyncMutex<()> {
+        &self.send_lock
     }
 
     /// Asks the running sync loop to flush queued writes now.
