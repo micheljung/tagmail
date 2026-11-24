@@ -4,12 +4,16 @@ import {
 	base64url,
 	disablePush,
 	enablePush,
+	fetchPushApi,
 	pushAvailability,
+	renewPush,
 	syncPush,
 	unsubscribeQuietly,
+	updatePush,
 	type PushApi,
 	type PushEnv
 } from './client';
+import type { PushPrefStore, PushPrefs } from './prefs';
 
 const OLD_KEY = new Uint8Array([4, 1, 2, 3]);
 const NEW_KEY = new Uint8Array([4, 9, 8, 7]);
@@ -63,6 +67,24 @@ function row(overrides: Partial<PushSubscriptionDto> = {}): PushSubscriptionDto 
 	};
 }
 
+function memoryPrefs(initial?: PushPrefs): PushPrefStore & { value: PushPrefs | undefined } {
+	const store = {
+		value: initial,
+		get: () => Promise.resolve(store.value),
+		set: (prefs: PushPrefs) => {
+			store.value = prefs;
+			return Promise.resolve();
+		},
+		clear: () => {
+			store.value = undefined;
+			return Promise.resolve();
+		}
+	};
+	return store;
+}
+
+const SAVED: PushPrefs = { endpoint: 'https://push.example/a', preview: false, accountIds: [2] };
+
 function fakeApi(key: Uint8Array, rows: PushSubscriptionDto[] = []) {
 	const posted: PushSubscribeDto[] = [];
 	const removePushSubscription = vi.fn<(id: number) => Promise<void>>(() => Promise.resolve());
@@ -73,9 +95,14 @@ function fakeApi(key: Uint8Array, rows: PushSubscriptionDto[] = []) {
 		pushSubscriptions: () => Promise.resolve(rows),
 		subscribePush: (dto) => {
 			posted.push(dto);
-			return Promise.resolve(row());
+			return Promise.resolve(
+				row({ preview: dto.preview ?? true, accountIds: dto.accountIds ?? null })
+			);
 		},
-		updatePushSubscription: (id) => Promise.resolve(row({ id })),
+		updatePushSubscription: (id, patch) =>
+			Promise.resolve(
+				row({ id, preview: patch.preview ?? true, accountIds: patch.accountIds ?? null })
+			),
 		removePushSubscription
 	};
 	return api;
@@ -121,15 +148,16 @@ describe('pushAvailability', () => {
 describe('syncPush', () => {
 	it('does nothing without a subscription', async () => {
 		const api = fakeApi(OLD_KEY);
-		expect(await syncPush(asManager(new FakeManager(null)), api)).toBeNull();
+		expect(await syncPush(asManager(new FakeManager(null)), api, memoryPrefs())).toBeNull();
 		expect(api.posted).toEqual([]);
 	});
 
-	it('upserts the subscription when the key matches', async () => {
+	it('upserts the subscription when the key matches and remembers the result', async () => {
 		const sub = new FakeSubscription('https://push.example/a', OLD_KEY);
 		const manager = new FakeManager(sub);
 		const api = fakeApi(OLD_KEY);
-		await syncPush(asManager(manager), api);
+		const prefs = memoryPrefs();
+		await syncPush(asManager(manager), api, prefs);
 		expect(sub.unsubscribe).not.toHaveBeenCalled();
 		expect(manager.subscribe).not.toHaveBeenCalled();
 		expect(api.posted).toEqual([
@@ -138,24 +166,78 @@ describe('syncPush', () => {
 				keys: { p256dh: 'p-https://push.example/a', auth: 'a' }
 			}
 		]);
+		expect(prefs.value).toEqual({
+			endpoint: 'https://push.example/a',
+			preview: true,
+			accountIds: null
+		});
 	});
 
-	it('resubscribes with the new key and keeps the settings when the key changed', async () => {
+	it('sends the saved settings, so a server that lost the row keeps them', async () => {
+		const sub = new FakeSubscription('https://push.example/a', OLD_KEY);
+		const api = fakeApi(OLD_KEY);
+		const mine = await syncPush(asManager(new FakeManager(sub)), api, memoryPrefs(SAVED));
+		expect(api.posted).toMatchObject([
+			{ endpoint: 'https://push.example/a', preview: false, accountIds: [2] }
+		]);
+		expect(api.posted[0]).not.toHaveProperty('oldEndpoint');
+		expect(mine).toMatchObject({ preview: false, accountIds: [2] });
+	});
+
+	it('sends "all accounts" by leaving the accounts out', async () => {
+		const sub = new FakeSubscription('https://push.example/a', OLD_KEY);
+		const api = fakeApi(OLD_KEY);
+		await syncPush(
+			asManager(new FakeManager(sub)),
+			api,
+			memoryPrefs({ ...SAVED, accountIds: null })
+		);
+		expect(api.posted[0]).not.toHaveProperty('accountIds');
+	});
+
+	it('names the saved endpoint when the browser renewed it unnoticed', async () => {
+		const sub = new FakeSubscription('https://push.example/b', OLD_KEY);
+		const api = fakeApi(OLD_KEY);
+		await syncPush(asManager(new FakeManager(sub)), api, memoryPrefs(SAVED));
+		expect(api.posted).toMatchObject([
+			{ endpoint: 'https://push.example/b', oldEndpoint: 'https://push.example/a' }
+		]);
+	});
+
+	it('resubscribes with the new key in place of the old endpoint', async () => {
 		const sub = new FakeSubscription('https://push.example/a', OLD_KEY);
 		const manager = new FakeManager(sub);
-		const api = fakeApi(NEW_KEY, [
-			row({ current: false, id: 9 }),
-			row({ preview: false, accountIds: [2] })
-		]);
-		await syncPush(asManager(manager), api);
+		const api = fakeApi(NEW_KEY);
+		const prefs = memoryPrefs(SAVED);
+		await syncPush(asManager(manager), api, prefs);
 		expect(sub.unsubscribe).toHaveBeenCalledOnce();
 		expect(manager.subscribe).toHaveBeenCalledWith({
 			userVisibleOnly: true,
 			applicationServerKey: base64url(NEW_KEY)
 		});
 		expect(api.posted).toMatchObject([
-			{ endpoint: 'https://push.example/1', preview: false, accountIds: [2] }
+			{
+				endpoint: 'https://push.example/1',
+				oldEndpoint: 'https://push.example/a',
+				preview: false,
+				accountIds: [2]
+			}
 		]);
+		expect(prefs.value?.endpoint).toBe('https://push.example/1');
+	});
+
+	it('replaces the old endpoint on a key change even without saved settings', async () => {
+		const sub = new FakeSubscription('https://push.example/a', OLD_KEY);
+		const api = fakeApi(NEW_KEY);
+		await syncPush(asManager(new FakeManager(sub)), api, memoryPrefs());
+		expect(api.posted).toEqual([
+			{
+				endpoint: 'https://push.example/1',
+				keys: { p256dh: 'p-https://push.example/1', auth: 'a' },
+				oldEndpoint: 'https://push.example/a'
+			}
+		]);
+		expect(api.removed).not.toHaveBeenCalled();
 	});
 });
 
@@ -163,18 +245,22 @@ describe('enablePush', () => {
 	it('subscribes only after permission is granted', async () => {
 		const manager = new FakeManager(null);
 		const api = fakeApi(NEW_KEY);
+		const prefs = memoryPrefs();
 		const request = vi.fn(() => Promise.resolve('granted' as const));
-		expect(await enablePush(asManager(manager), api, request)).toEqual(row());
+		expect(await enablePush(asManager(manager), api, prefs, request)).toEqual(row());
 		expect(request.mock.invocationCallOrder[0]).toBeLessThan(
 			manager.subscribe.mock.invocationCallOrder[0]
 		);
 		expect(api.posted).toHaveLength(1);
+		expect(prefs.value?.endpoint).toBe('https://push.example/1');
 	});
 
 	it.each(['denied', 'default'] as const)('stops when permission is %s', async (answer) => {
 		const manager = new FakeManager(null);
 		const api = fakeApi(NEW_KEY);
-		expect(await enablePush(asManager(manager), api, () => Promise.resolve(answer))).toBeNull();
+		expect(
+			await enablePush(asManager(manager), api, memoryPrefs(), () => Promise.resolve(answer))
+		).toBeNull();
 		expect(manager.subscribe).not.toHaveBeenCalled();
 		expect(api.posted).toEqual([]);
 	});
@@ -182,19 +268,90 @@ describe('enablePush', () => {
 	it('replaces a subscription made with another key', async () => {
 		const sub = new FakeSubscription('https://push.example/a', OLD_KEY);
 		const manager = new FakeManager(sub);
-		await enablePush(asManager(manager), fakeApi(NEW_KEY), () => Promise.resolve('granted'));
+		const api = fakeApi(NEW_KEY);
+		await enablePush(asManager(manager), api, memoryPrefs(), () => Promise.resolve('granted'));
 		expect(sub.unsubscribe).toHaveBeenCalledOnce();
 		expect(manager.subscribe).toHaveBeenCalledOnce();
+		expect(api.posted).toMatchObject([{ oldEndpoint: 'https://push.example/a' }]);
+	});
+});
+
+describe('updatePush', () => {
+	it('remembers the applied settings for this endpoint', async () => {
+		const prefs = memoryPrefs({ ...SAVED, preview: true });
+		await updatePush(fakeApi(OLD_KEY), prefs, 1, { preview: false });
+		expect(prefs.value).toEqual({ ...SAVED, accountIds: null });
 	});
 });
 
 describe('disablePush', () => {
-	it('unsubscribes the browser and removes the server row', async () => {
+	it('unsubscribes the browser, forgets the settings and removes the server row', async () => {
 		const sub = new FakeSubscription('https://push.example/a', OLD_KEY);
 		const api = fakeApi(OLD_KEY);
-		await disablePush(asManager(new FakeManager(sub)), api, row({ id: 4 }));
+		const prefs = memoryPrefs(SAVED);
+		await disablePush(asManager(new FakeManager(sub)), api, prefs, row({ id: 4 }));
 		expect(sub.unsubscribe).toHaveBeenCalledOnce();
+		expect(prefs.value).toBeUndefined();
 		expect(api.removed).toHaveBeenCalledWith(4);
+	});
+});
+
+describe('renewPush', () => {
+	it('registers the renewed endpoint in place of the old one with the saved settings', async () => {
+		const old = new FakeSubscription('https://push.example/a', OLD_KEY);
+		const manager = new FakeManager(null);
+		const api = fakeApi(NEW_KEY);
+		const prefs = memoryPrefs(SAVED);
+		await renewPush(asManager(manager), api, prefs, old as unknown as PushSubscription);
+		expect(manager.subscribe).toHaveBeenCalledWith({
+			userVisibleOnly: true,
+			applicationServerKey: base64url(OLD_KEY)
+		});
+		expect(api.posted).toMatchObject([
+			{
+				endpoint: 'https://push.example/1',
+				oldEndpoint: 'https://push.example/a',
+				preview: false,
+				accountIds: [2]
+			}
+		]);
+		expect(prefs.value).toEqual({ ...SAVED, endpoint: 'https://push.example/1' });
+	});
+
+	it('subscribes with the server key when the browser passes no old subscription', async () => {
+		const manager = new FakeManager(null);
+		const api = fakeApi(NEW_KEY);
+		await renewPush(asManager(manager), api, memoryPrefs(SAVED), null);
+		expect(manager.subscribe).toHaveBeenCalledWith({
+			userVisibleOnly: true,
+			applicationServerKey: base64url(NEW_KEY)
+		});
+		expect(api.posted).toMatchObject([
+			{ endpoint: 'https://push.example/1', oldEndpoint: 'https://push.example/a', preview: false }
+		]);
+	});
+});
+
+describe('fetchPushApi', () => {
+	it('posts with the CSRF header and the session cookie', async () => {
+		const fetcher = vi.fn<typeof fetch>(() =>
+			Promise.resolve(new Response(JSON.stringify(row()), { status: 201 }))
+		);
+		const dto: PushSubscribeDto = {
+			endpoint: 'https://push.example/a',
+			keys: { p256dh: 'p', auth: 'a' }
+		};
+		expect(await fetchPushApi(fetcher).subscribePush(dto)).toEqual(row());
+		const [path, init] = fetcher.mock.calls[0];
+		expect(path).toBe('/api/push/subscriptions');
+		expect(init).toMatchObject({ method: 'POST', credentials: 'same-origin' });
+		expect(new Headers(init?.headers).get('X-Requested-With')).toBe('tagmail');
+		expect(JSON.parse(init?.body as string)).toEqual(dto);
+	});
+
+	it('fails on an error status', async () => {
+		const fetcher = () => Promise.resolve(new Response('', { status: 401 }));
+		await expect(fetchPushApi(fetcher).pushKey()).rejects.toThrow('401');
 	});
 });
 

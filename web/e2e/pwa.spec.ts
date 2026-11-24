@@ -177,6 +177,26 @@ test('an existing subscription is registered again when the app starts', async (
 	expect((await stubState(page)).unsubscribed).toBe(0);
 });
 
+test('re-registering after the server lost the subscription keeps its settings', async ({
+	page
+}) => {
+	await stubPush(page, { existing: VAPID_PUBLIC_KEY });
+	await openSettings(page);
+	await expect(page.locator('[data-push-state="enabled"]')).toBeVisible();
+	await page.getByLabel('Show sender and subject').uncheck();
+	await expect.poll(async () => (await mockPush(page)).subscriptions[0]?.preview).toBe(false);
+
+	const [lost] = (await mockPush(page)).subscriptions;
+	await page.request.delete(`/api/push/subscriptions/${lost.id}`, {
+		headers: { 'X-Requested-With': 'tagmail' }
+	});
+	await page.reload();
+	await expect
+		.poll(async () => (await mockPush(page)).subscriptions)
+		.toMatchObject([{ preview: false }]);
+	await expect(page.getByLabel('Show sender and subject')).not.toBeChecked();
+});
+
 test('a subscription made with an old server key is replaced', async ({ page }) => {
 	await stubPush(page, { existing: 'BAECAwQ' });
 	await signIn(page);

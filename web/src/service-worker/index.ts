@@ -10,7 +10,8 @@ import {
 	shellReferences,
 	staleCaches
 } from '#lib/pwa/sw.ts';
-import { base64url } from '#lib/push/client.ts';
+import { fetchPushApi, renewPush } from '#lib/push/client.ts';
+import { pushPrefs } from '#lib/push/prefs.ts';
 
 const CACHE = shellCacheName(version);
 
@@ -88,23 +89,11 @@ interface PushSubscriptionChangeEvent extends ExtendableEvent {
 	readonly oldSubscription: PushSubscription | null;
 }
 
-async function resubscribe(old: PushSubscription | null): Promise<void> {
-	const key = old?.options.applicationServerKey;
-	if (!key) return;
-	const renewed = await self.registration.pushManager.subscribe({
-		userVisibleOnly: true,
-		applicationServerKey: base64url(key)
-	});
-	const { keys } = renewed.toJSON();
-	await fetch('/api/push/subscriptions', {
-		method: 'POST',
-		credentials: 'same-origin',
-		headers: { 'content-type': 'application/json', 'X-Requested-With': 'tagmail' },
-		body: JSON.stringify({ endpoint: renewed.endpoint, keys })
-	});
-}
-
 self.addEventListener('pushsubscriptionchange', (event) => {
 	const change = event as PushSubscriptionChangeEvent;
-	change.waitUntil(resubscribe(change.oldSubscription).catch(() => {}));
+	change.waitUntil(
+		renewPush(self.registration.pushManager, fetchPushApi(), pushPrefs, change.oldSubscription)
+			.then(() => undefined)
+			.catch(() => {})
+	);
 });

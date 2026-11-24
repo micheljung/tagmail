@@ -4,6 +4,8 @@ import type {
 	PushSubscriptionDto,
 	PushSubscriptionPatchDto
 } from '@tagmail/api-types';
+import { CSRF_HEADER, CSRF_VALUE } from '../transport/http';
+import type { PushPrefStore, PushPrefs } from './prefs';
 
 export type PushAvailability = 'unsupported' | 'ios-tab' | 'blocked' | 'ready';
 
@@ -58,20 +60,37 @@ function sameKey(subscription: PushSubscription, publicKey: string): boolean {
 	return key !== null && base64url(key) === publicKey;
 }
 
-function subscribeDto(
-	subscription: PushSubscription,
-	settings: Pick<PushSubscribeDto, 'preview' | 'accountIds'> = {}
-): PushSubscribeDto {
-	const json = subscription.toJSON();
-	return {
-		endpoint: subscription.endpoint,
-		keys: { p256dh: json.keys?.p256dh ?? '', auth: json.keys?.auth ?? '' },
-		...settings
-	};
+type Settings = Pick<PushSubscribeDto, 'preview' | 'accountIds'>;
+
+function settingsOf(prefs: PushPrefs | undefined): Settings {
+	if (!prefs) return {};
+	return prefs.accountIds === null
+		? { preview: prefs.preview }
+		: { preview: prefs.preview, accountIds: prefs.accountIds };
 }
 
-function settingsOf(row: PushSubscriptionDto | undefined) {
-	return row ? { preview: row.preview, accountIds: row.accountIds ?? undefined } : {};
+/**
+ * Posts `subscription` with this device's saved settings and remembers what
+ * the server applied. A changed endpoint names its predecessor, so the
+ * server replaces that row instead of keeping a dead one.
+ */
+async function register(
+	api: Pick<PushApi, 'subscribePush'>,
+	prefs: PushPrefStore,
+	subscription: PushSubscription,
+	saved: PushPrefs | undefined,
+	previousEndpoint = saved?.endpoint
+): Promise<PushSubscriptionDto> {
+	const json = subscription.toJSON();
+	const { endpoint } = subscription;
+	const row = await api.subscribePush({
+		endpoint,
+		keys: { p256dh: json.keys?.p256dh ?? '', auth: json.keys?.auth ?? '' },
+		...settingsOf(saved),
+		...(previousEndpoint && previousEndpoint !== endpoint ? { oldEndpoint: previousEndpoint } : {})
+	});
+	await prefs.set({ endpoint, preview: row.preview, accountIds: row.accountIds });
+	return row;
 }
 
 /**
@@ -80,19 +99,20 @@ function settingsOf(row: PushSubscriptionDto | undefined) {
  */
 export async function syncPush(
 	manager: PushManager,
-	api: PushApi
+	api: PushApi,
+	prefs: PushPrefStore
 ): Promise<PushSubscriptionDto | null> {
 	const existing = await manager.getSubscription();
 	if (!existing) return null;
+	const saved = await prefs.get();
 	const { publicKey } = await api.pushKey();
-	if (sameKey(existing, publicKey)) return api.subscribePush(subscribeDto(existing));
-	const previous = (await api.pushSubscriptions()).find((s) => s.current);
+	if (sameKey(existing, publicKey)) return register(api, prefs, existing, saved);
 	await existing.unsubscribe();
 	const renewed = await manager.subscribe({
 		userVisibleOnly: true,
 		applicationServerKey: publicKey
 	});
-	return api.subscribePush(subscribeDto(renewed, settingsOf(previous)));
+	return register(api, prefs, renewed, saved, existing.endpoint);
 }
 
 /**
@@ -102,26 +122,81 @@ export async function syncPush(
 export async function enablePush(
 	manager: PushManager,
 	api: PushApi,
+	prefs: PushPrefStore,
 	requestPermission: () => Promise<NotificationPermission>
 ): Promise<PushSubscriptionDto | null> {
 	if ((await requestPermission()) !== 'granted') return null;
+	const saved = await prefs.get();
 	const { publicKey } = await api.pushKey();
 	const existing = await manager.getSubscription();
-	if (existing && sameKey(existing, publicKey)) return api.subscribePush(subscribeDto(existing));
+	if (existing && sameKey(existing, publicKey)) return register(api, prefs, existing, saved);
 	await existing?.unsubscribe();
 	const created = await manager.subscribe({
 		userVisibleOnly: true,
 		applicationServerKey: publicKey
 	});
-	return api.subscribePush(subscribeDto(created));
+	return register(api, prefs, created, saved, existing?.endpoint ?? saved?.endpoint);
+}
+
+/** Changes this device's settings and remembers them for re-registration. */
+export async function updatePush(
+	api: PushApi,
+	prefs: PushPrefStore,
+	id: number,
+	patch: PushSubscriptionPatchDto
+): Promise<PushSubscriptionDto> {
+	const row = await api.updatePushSubscription(id, patch);
+	const saved = await prefs.get();
+	if (saved) await prefs.set({ ...saved, preview: row.preview, accountIds: row.accountIds });
+	return row;
+}
+
+/**
+ * `pushsubscriptionchange`: subscribes again and registers the new endpoint
+ * in place of the old one. Chrome passes no old subscription, so the key
+ * then comes from the server and the old endpoint from the saved settings.
+ */
+export async function renewPush(
+	manager: PushManager,
+	api: Pick<PushApi, 'pushKey' | 'subscribePush'>,
+	prefs: PushPrefStore,
+	old: PushSubscription | null
+): Promise<PushSubscriptionDto> {
+	const saved = await prefs.get();
+	const key = old?.options.applicationServerKey;
+	const applicationServerKey = key ? base64url(key) : (await api.pushKey()).publicKey;
+	const renewed = await manager.subscribe({ userVisibleOnly: true, applicationServerKey });
+	return register(api, prefs, renewed, saved, old?.endpoint ?? saved?.endpoint);
+}
+
+/** The push API over plain `fetch`, for the service worker. */
+export function fetchPushApi(
+	fetcher: typeof fetch = fetch
+): Pick<PushApi, 'pushKey' | 'subscribePush'> {
+	const json = async <T>(path: string, init?: RequestInit): Promise<T> => {
+		const response = await fetcher(path, { credentials: 'same-origin', ...init });
+		if (!response.ok) throw new Error(`${path} answered ${response.status}`);
+		return (await response.json()) as T;
+	};
+	return {
+		pushKey: () => json<PushKeyDto>('/api/push/key'),
+		subscribePush: (subscription) =>
+			json<PushSubscriptionDto>('/api/push/subscriptions', {
+				method: 'POST',
+				headers: { 'content-type': 'application/json', [CSRF_HEADER]: CSRF_VALUE },
+				body: JSON.stringify(subscription)
+			})
+	};
 }
 
 export async function disablePush(
 	manager: PushManager,
 	api: PushApi,
+	prefs: PushPrefStore,
 	row: PushSubscriptionDto | null
 ): Promise<void> {
 	await (await manager.getSubscription())?.unsubscribe();
+	await prefs.clear();
 	if (row) await api.removePushSubscription(row.id);
 }
 

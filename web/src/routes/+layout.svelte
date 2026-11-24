@@ -9,6 +9,7 @@
 	import { connectivity } from '#lib/pwa/connectivity.svelte.ts';
 	import { registerServiceWorker, shouldRegister } from '#lib/pwa/register.ts';
 	import { pushEnv, syncPush, unsubscribeQuietly } from '#lib/push/client.ts';
+	import { pushPrefs } from '#lib/push/prefs.ts';
 	import { theme, toasts } from '#lib/stores/index.ts';
 	import { TauriTransport, api } from '#lib/transport/index.ts';
 	import PairConfirm from '#lib/ui/PairConfirm.svelte';
@@ -51,7 +52,7 @@
 		if (pushEnv().permission !== 'granted') return;
 		pushSyncedFor = id;
 		void registration
-			.then((r) => syncPush(r.pushManager, api))
+			.then((r) => syncPush(r.pushManager, api, pushPrefs))
 			.catch((error: unknown) => console.warn('push subscription sync failed', error));
 	});
 

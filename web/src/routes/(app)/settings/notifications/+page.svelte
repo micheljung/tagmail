@@ -8,8 +8,10 @@
 		pushAvailability,
 		pushEnv,
 		syncPush,
+		updatePush,
 		type PushAvailability
 	} from '#lib/push/client.ts';
+	import { pushPrefs } from '#lib/push/prefs.ts';
 	import { accounts } from '#lib/stores/index.ts';
 	import { api, isDesktop } from '#lib/transport/index.ts';
 	import { errorText } from '#lib/ui/errors.ts';
@@ -41,7 +43,8 @@
 		const registration = await navigator.serviceWorker?.getRegistration();
 		manager = registration?.pushManager ?? null;
 		if (availability === 'ready' && !manager) availability = 'unsupported';
-		if (manager && Notification.permission === 'granted') mine = await syncPush(manager, api);
+		if (manager && Notification.permission === 'granted')
+			mine = await syncPush(manager, api, pushPrefs);
 		await refresh();
 	}
 
@@ -65,7 +68,7 @@
 		const push = manager;
 		if (!push) return;
 		void act('enable', async () => {
-			mine = await enablePush(push, api, () => Notification.requestPermission());
+			mine = await enablePush(push, api, pushPrefs, () => Notification.requestPermission());
 			if (!mine) availability = pushAvailability(pushEnv());
 		});
 	}
@@ -74,7 +77,7 @@
 		const push = manager;
 		if (!push) return;
 		void act('off', async () => {
-			await disablePush(push, api, mine);
+			await disablePush(push, api, pushPrefs, mine);
 			mine = null;
 		});
 	}
@@ -83,7 +86,7 @@
 		const row = mine;
 		if (!row) return;
 		void act('preview', async () => {
-			mine = await api.updatePushSubscription(row.id, { preview });
+			mine = await updatePush(api, pushPrefs, row.id, { preview });
 		});
 	}
 
@@ -97,7 +100,9 @@
 		const chosen = accountIds.filter((a) => (a === id ? on : notifies(row, a)));
 		const all = chosen.length === accountIds.length;
 		void act('accounts', async () => {
-			mine = await api.updatePushSubscription(row.id, { accountIds: all ? null : chosen });
+			mine = await updatePush(api, pushPrefs, row.id, {
+				accountIds: all ? null : chosen
+			});
 		});
 	}
 
