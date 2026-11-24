@@ -1,5 +1,5 @@
 import type { Locator, Page } from '@playwright/test';
-import { idAt } from './mock/fixture.ts';
+import { PASSWORD, idAt } from './mock/fixture.ts';
 import { expect, openInbox, row, signIn, test } from './helpers.ts';
 
 const TOUCH_TARGET = 44;
@@ -85,6 +85,17 @@ test('a conversation opens full screen and Back returns to the list', async ({ p
 test('Back from a deep link goes to the inbox', async ({ page }) => {
 	await signIn(page);
 	await page.goto(`/thread/${idAt(4)}`);
+	await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
+	await page.getByRole('button', { name: 'Back' }).tap();
+	await expect(page).toHaveURL(/\/inbox$/);
+	await expect(row(page, 0).locator('[data-loaded]')).toBeVisible();
+});
+
+test('Back from a deep link opened before signing in goes to the inbox', async ({ page }) => {
+	await page.goto(`/thread/${idAt(4)}`);
+	await expect(page).toHaveURL(/\/login\?next=/);
+	await page.getByLabel('Password').fill(PASSWORD);
+	await page.getByRole('button', { name: 'Sign in', exact: true }).click();
 	await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
 	await page.getByRole('button', { name: 'Back' }).tap();
 	await expect(page).toHaveURL(/\/inbox$/);

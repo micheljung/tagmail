@@ -40,8 +40,13 @@
 	let compact = $state(false);
 	let menuButton: HTMLButtonElement | undefined = $state();
 	let navEl: HTMLDivElement | undefined = $state();
-	/** Set once the app navigated in place, so history.back() stays inside it. */
-	let hasHistory = false;
+	/**
+	 * History entries the app pushed since it was entered, so history.back()
+	 * stays inside it. The navigation that mounts the app (a page load, or the
+	 * replacing redirect after login) adds none.
+	 */
+	let depth = 0;
+	let entered = false;
 
 	const PHONE_QUERY = '(max-width: 720px)';
 	const onThread = $derived(page.url.pathname.startsWith('/thread/'));
@@ -67,12 +72,13 @@
 		page.url.pathname === '/search' ? (page.url.searchParams.get('q') ?? '') : ''
 	);
 
-	afterNavigate(({ from }) => {
-		if (from) hasHistory = true;
+	afterNavigate((navigation) => {
+		if (!entered) entered = true;
+		else depth = Math.max(0, depth + (navigation.type === 'popstate' ? navigation.delta : 1));
 	});
 
 	function back() {
-		if (hasHistory) history.back();
+		if (depth > 0) history.back();
 		else void goto('/inbox');
 	}
 
