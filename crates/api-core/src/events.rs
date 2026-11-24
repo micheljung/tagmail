@@ -6,16 +6,32 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use tagmail_core::ChangeCursor;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, watch};
 
 use crate::api::{change_page_dto, gone_error};
-use crate::dto::{ApiErrorDto, ChangesDto};
+use crate::dto::{AddressDto, ApiErrorDto, ChangesDto};
 use crate::store::{ChangePage, Store, StoreResult};
 
 /// Changes arriving within this window go out as one event.
 pub const COALESCE: Duration = Duration::from_millis(100);
 /// Changes per event; a larger backlog is sent as several events.
 pub const EVENT_PAGE: usize = 500;
+
+/// Committed arrival batches buffered for a slow subscriber; beyond this
+/// it gets `RecvError::Lagged`.
+pub const ARRIVALS_CAPACITY: usize = 64;
+
+/// A newly arrived message that may warrant a notification (contract §5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Arrival {
+    pub account_id: i64,
+    pub message_id: i64,
+    pub thread_id: Option<i64>,
+    pub from: Option<AddressDto>,
+    pub subject: Option<String>,
+    /// Unix seconds.
+    pub date: i64,
+}
 
 /// Source of change-log head updates.
 pub trait EventSource: Send + Sync + 'static {
@@ -29,17 +45,32 @@ pub trait EventSource: Send + Sync + 'static {
 #[derive(Debug)]
 pub struct ChangeFeed {
     tx: watch::Sender<ChangeCursor>,
+    arrivals: broadcast::Sender<Arc<[Arrival]>>,
 }
 
 impl ChangeFeed {
     pub fn new(head: ChangeCursor) -> ChangeFeed {
         ChangeFeed {
             tx: watch::Sender::new(head),
+            arrivals: broadcast::Sender::new(ARRIVALS_CAPACITY),
         }
     }
 
     pub fn publish(&self, head: ChangeCursor) {
         self.tx.send_replace(head);
+    }
+
+    /// Called after the commit that inserted `arrivals`.
+    pub fn publish_arrivals(&self, arrivals: Vec<Arrival>) {
+        if arrivals.is_empty() {
+            return;
+        }
+        // No subscriber is not an error: nothing wants notifications.
+        let _ = self.arrivals.send(arrivals.into());
+    }
+
+    pub fn subscribe_arrivals(&self) -> broadcast::Receiver<Arc<[Arrival]>> {
+        self.arrivals.subscribe()
     }
 }
 
@@ -170,5 +201,43 @@ impl<S: Store> EventSession<S> {
     fn reset(&mut self) -> Event {
         self.ended = true;
         Event::Reset(gone_error())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tagmail_core::CacheEpoch;
+
+    use super::*;
+
+    fn arrival(message_id: i64) -> Arrival {
+        Arrival {
+            account_id: 1,
+            message_id,
+            thread_id: Some(message_id),
+            from: Some(AddressDto {
+                name: Some("Alice".into()),
+                email: "alice@example.com".into(),
+            }),
+            subject: Some("Hi".into()),
+            date: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn arrivals_reach_every_subscriber() {
+        let feed = ChangeFeed::new(ChangeCursor {
+            epoch: CacheEpoch(1),
+            seq: 0,
+        });
+        feed.publish_arrivals(vec![arrival(1)]);
+        let mut a = feed.subscribe_arrivals();
+        let mut b = feed.subscribe_arrivals();
+        feed.publish_arrivals(Vec::new());
+        feed.publish_arrivals(vec![arrival(2), arrival(3)]);
+        for rx in [&mut a, &mut b] {
+            assert_eq!(&*rx.recv().await.unwrap(), [arrival(2), arrival(3)]);
+            assert!(rx.try_recv().is_err(), "empty batch published");
+        }
     }
 }

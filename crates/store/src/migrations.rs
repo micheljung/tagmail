@@ -10,6 +10,7 @@ pub(crate) const CONFIG: &[&str] = &[
     include_str!("../migrations/config/V5__multi_account.sql"),
     include_str!("../migrations/config/V6__default_identity.sql"),
     include_str!("../migrations/config/V7__draft_client_id.sql"),
+    include_str!("../migrations/config/V8__push_subscription.sql"),
 ];
 pub(crate) const CACHE: &[&str] = &[
     include_str!("../migrations/cache/V1__init.sql"),

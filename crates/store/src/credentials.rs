@@ -167,21 +167,7 @@ impl Vault {
     }
 
     pub fn seal(&self, account: AccountId, secret: &str) -> Result<Sealed, CredentialError> {
-        let nonce = XNonce::generate();
-        let ciphertext = self
-            .cipher
-            .encrypt(
-                &nonce,
-                Payload {
-                    msg: secret.as_bytes(),
-                    aad: &account_aad(account),
-                },
-            )
-            .map_err(|_| CredentialError::Crypto)?;
-        Ok(Sealed {
-            ciphertext,
-            nonce: nonce.to_vec(),
-        })
+        self.seal_bytes(&account_aad(account), secret.as_bytes())
     }
 
     pub fn open(
@@ -189,21 +175,41 @@ impl Vault {
         account: AccountId,
         sealed: &Sealed,
     ) -> Result<Zeroizing<String>, CredentialError> {
-        let nonce =
-            XNonce::try_from(sealed.nonce.as_slice()).map_err(|_| CredentialError::Crypto)?;
-        let plain = Zeroizing::new(
-            self.cipher
-                .decrypt(
-                    &nonce,
-                    Payload {
-                        msg: &sealed.ciphertext,
-                        aad: &account_aad(account),
-                    },
-                )
-                .map_err(|_| CredentialError::Crypto)?,
-        );
+        let plain = self.open_bytes(&account_aad(account), sealed)?;
         let text = std::str::from_utf8(&plain).map_err(|_| CredentialError::Crypto)?;
         Ok(Zeroizing::new(text.to_owned()))
+    }
+
+    /// Seals `plain` bound to `aad`, which [`Vault::open_bytes`] must repeat.
+    pub fn seal_bytes(&self, aad: &[u8], plain: &[u8]) -> Result<Sealed, CredentialError> {
+        let nonce = XNonce::generate();
+        let ciphertext = self
+            .cipher
+            .encrypt(&nonce, Payload { msg: plain, aad })
+            .map_err(|_| CredentialError::Crypto)?;
+        Ok(Sealed {
+            ciphertext,
+            nonce: nonce.to_vec(),
+        })
+    }
+
+    pub fn open_bytes(
+        &self,
+        aad: &[u8],
+        sealed: &Sealed,
+    ) -> Result<Zeroizing<Vec<u8>>, CredentialError> {
+        let nonce =
+            XNonce::try_from(sealed.nonce.as_slice()).map_err(|_| CredentialError::Crypto)?;
+        self.cipher
+            .decrypt(
+                &nonce,
+                Payload {
+                    msg: &sealed.ciphertext,
+                    aad,
+                },
+            )
+            .map(Zeroizing::new)
+            .map_err(|_| CredentialError::Crypto)
     }
 }
 
@@ -255,6 +261,19 @@ mod tests {
         assert!(vault.open(AccountId(1), &tampered).is_err());
         let (other, _) = Vault::create(&key(1)).unwrap();
         assert!(other.open(AccountId(1), &sealed).is_err());
+    }
+
+    #[test]
+    fn bytes_round_trip_only_under_their_aad() {
+        let (vault, _) = Vault::create(&key(1)).unwrap();
+        let plain = [0u8, 1, 2, 255];
+        let sealed = vault.seal_bytes(b"vapid", &plain).unwrap();
+        assert_eq!(*vault.open_bytes(b"vapid", &sealed).unwrap(), plain);
+        assert_eq!(
+            vault.open_bytes(b"other", &sealed).err(),
+            Some(CredentialError::Crypto)
+        );
+        assert!(vault.open(AccountId(1), &sealed).is_err());
     }
 
     #[test]

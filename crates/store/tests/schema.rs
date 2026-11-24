@@ -241,7 +241,7 @@ fn cache_references(conn: &Connection) -> rusqlite::Result<Vec<String>> {
             .query_map([&table], |r| r.get(0))?
             .collect::<Result<_, _>>()?;
         for target in targets {
-            if !["account", "identity", "draft"].contains(&target.as_str()) {
+            if !["account", "identity", "draft", "session"].contains(&target.as_str()) {
                 found.push(format!("{table} -> {target}"));
             }
         }
@@ -487,7 +487,7 @@ async fn config_v5_gives_identityless_accounts_a_default() {
 
 #[test]
 fn schema_constants_count_the_migrations() {
-    assert_eq!((CONFIG_SCHEMA, CACHE_SCHEMA), (7, 3));
+    assert_eq!((CONFIG_SCHEMA, CACHE_SCHEMA), (8, 3));
 }
 
 #[tokio::test]
@@ -516,7 +516,7 @@ async fn config_v7_makes_draft_client_ids_unique() {
         .unwrap();
     }
     let db = ConfigDb::open(&path).unwrap();
-    assert_eq!(user_version(&db).await, 7);
+    assert_eq!(user_version(&db).await, CONFIG_SCHEMA);
     let insert = |id: i64, client_id: Option<&'static str>| {
         db.write(move |c| {
             Ok(c.execute(
@@ -534,6 +534,96 @@ async fn config_v7_makes_draft_client_ids_unique() {
         .await
         .unwrap();
     assert_eq!(legacy, None);
+    integrity(&db).await;
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn config_v8_ties_push_subscriptions_to_their_session() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("config.db");
+    {
+        let conn = open_raw(&path);
+        for sql in [
+            include_str!("../migrations/config/V1__init.sql"),
+            include_str!("../migrations/config/V2__image_sender.sql"),
+            include_str!("../migrations/config/V3__compose.sql"),
+            include_str!("../migrations/config/V4__outbox_file.sql"),
+            include_str!("../migrations/config/V5__multi_account.sql"),
+            include_str!("../migrations/config/V6__default_identity.sql"),
+            include_str!("../migrations/config/V7__draft_client_id.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 7).unwrap();
+        conn.execute_batch(
+            "INSERT INTO push_subscription (endpoint, p256dh, auth) \
+             VALUES ('https://push.example/legacy', x'01', x'02');",
+        )
+        .unwrap();
+    }
+    let db = ConfigDb::open(&path).unwrap();
+    assert_eq!(user_version(&db).await, CONFIG_SCHEMA);
+    let p256dh = vec![4u8; 65];
+    let auth = vec![7u8; 16];
+    let (inserted, preview, short_key) = db
+        .write(move |c| {
+            c.execute_batch(
+                "INSERT INTO session (id_hash, expires_at) VALUES (x'aa', 0), (x'bb', 0);",
+            )?;
+            let mut insert = c.prepare(
+                "INSERT INTO push_subscription (session_hash, endpoint, p256dh, auth) \
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?;
+            let mut inserted = 0;
+            for (session, endpoint) in [
+                (vec![0xaau8], "https://push.example/a1"),
+                (vec![0xaau8], "https://push.example/a2"),
+                (vec![0xbbu8], "https://push.example/b1"),
+            ] {
+                inserted += insert.execute(rusqlite::params![session, endpoint, p256dh, auth])?;
+            }
+            let short_key = insert
+                .execute(rusqlite::params![
+                    vec![0xbbu8],
+                    "https://push.example/short",
+                    &p256dh[..64],
+                    auth
+                ])
+                .is_err();
+            let preview: i64 = c.query_row(
+                "SELECT preview FROM push_subscription WHERE endpoint = 'https://push.example/a1'",
+                [],
+                |r| r.get(0),
+            )?;
+            Ok((inserted, preview, short_key))
+        })
+        .await
+        .unwrap();
+    assert_eq!((inserted, preview, short_key), (3, 1, true));
+    let orphan = db
+        .write(|c| {
+            Ok(c.execute(
+                "INSERT INTO push_subscription (session_hash, endpoint, p256dh, auth) \
+                 VALUES (x'cc', 'https://push.example/c', zeroblob(65), zeroblob(16))",
+                [],
+            )?)
+        })
+        .await;
+    assert!(orphan.is_err(), "subscription without a session accepted");
+
+    db.write(|c| Ok(c.execute("DELETE FROM session WHERE id_hash = x'aa'", [])?))
+        .await
+        .unwrap();
+    let left: Vec<String> = db
+        .read(|c| {
+            let mut stmt = c.prepare("SELECT endpoint FROM push_subscription ORDER BY id")?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(left, ["https://push.example/b1"]);
     integrity(&db).await;
     db.close().await.unwrap();
 }

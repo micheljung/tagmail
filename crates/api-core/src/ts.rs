@@ -12,6 +12,7 @@ use crate::compose_dto::*;
 use crate::desktop_dto::*;
 use crate::dto::*;
 use crate::ops_dto::*;
+use crate::push_dto::*;
 
 /// Path of the generated bindings, relative to the workspace root.
 pub const OUT_DIR: &str = "packages/api-types/src/generated";
@@ -135,6 +136,13 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<OpKindDto>(&cfg, &mut files)?;
     file::<OpStatusDto>(&cfg, &mut files)?;
     file::<OpsDto>(&cfg, &mut files)?;
+    file::<PushKeyDto>(&cfg, &mut files)?;
+    file::<PushKeysDto>(&cfg, &mut files)?;
+    file::<PushKindDto>(&cfg, &mut files)?;
+    file::<PushPayloadDto>(&cfg, &mut files)?;
+    file::<PushSubscribeDto>(&cfg, &mut files)?;
+    file::<PushSubscriptionDto>(&cfg, &mut files)?;
+    file::<PushSubscriptionPatchDto>(&cfg, &mut files)?;
     files.insert(CSP_FILE.to_owned(), csp());
     let index: String = std::iter::once(INDEX_HEADER.to_owned())
         .chain(files.keys().map(|f| {

@@ -14,6 +14,7 @@ pub mod identities;
 pub mod messages;
 pub mod mime;
 pub mod ops_dto;
+pub mod push_dto;
 pub mod replica_dto;
 pub mod routes;
 pub mod signing;
@@ -24,7 +25,7 @@ pub mod ts;
 pub mod writes;
 
 pub use api::{API_VERSION, Api, Method, PARTIAL_HEADER, Request, Response, offline_error};
-pub use events::{ChangeFeed, Event, EventSession, EventSource, OpenError};
+pub use events::{Arrival, ChangeFeed, Event, EventSession, EventSource, OpenError};
 pub use store::{
     AccountPatch, AccountRegistry, AccountSummary, BoxFuture, ChangePage, FetchRawError,
     ImageProxy, MarkDeleting, MessageRecord, NewAccount, ProxiedImage, ProxyError, RuntimeStatus,
