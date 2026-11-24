@@ -22,8 +22,9 @@ use tagmail_api_core::Arrival;
 use tagmail_api_core::dto::AddressDto;
 use tagmail_api_server::auth::DEFAULT_SESSION_IDLE;
 use tagmail_api_server::outbound::{EndpointPolicy, Resolver};
+use tagmail_api_server::push::dispatch::BATCH_DELAY;
 use tagmail_api_server::push::ece;
-use tagmail_api_server::push::store::MAX_SUBSCRIPTIONS;
+use tagmail_api_server::push::store::{MAX_FAILURES, MAX_SUBSCRIPTIONS};
 use tagmail_api_server::push::{PUSH_WRITES, PushConfig};
 use tagmail_api_server::{Config, Server};
 use tagmail_store::rusqlite::params;
@@ -555,6 +556,48 @@ async fn idle_sessions_get_no_pushes_and_hold_no_slots() {
         .publish_arrivals(vec![arrival(1, 2, "Alice", "Hi")]);
     assert_eq!(mock.next().await.path, "/push/live");
     mock.quiet().await;
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn local_faults_do_not_count_against_a_subscription() {
+    let dirs = Dirs::new();
+    let server = Server::start(&dirs.config(loopback()), None).await.unwrap();
+    let c = owner(&server).await;
+    add_accounts(&server, &[1]).await;
+    let mut mock = Mock::start().await;
+    subscribed(
+        &c,
+        &server,
+        &Browser::new().subscription(&mock.endpoint("a")),
+    )
+    .await;
+    server
+        .store()
+        .config()
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO meta (key, value) VALUES ('vapid_key', 'not hex')",
+                [],
+            )?;
+            tx.execute(
+                "UPDATE push_subscription SET failures = ?1",
+                [MAX_FAILURES - 1],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    server
+        .feed()
+        .publish_arrivals(vec![arrival(1, 1, "Alice", "Hi")]);
+    tokio::time::sleep(BATCH_DELAY + Duration::from_secs(1)).await;
+    mock.quiet().await;
+    assert_eq!(
+        column(&server, "SELECT failures FROM push_subscription").await,
+        [MAX_FAILURES - 1],
+        "an unreadable VAPID key is not the subscription's failure"
+    );
     server.shutdown().await.unwrap();
 }
 

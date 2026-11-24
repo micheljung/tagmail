@@ -18,7 +18,7 @@ use url::Url;
 
 use super::store::{self, Target};
 use super::{Push, ece, payload};
-use crate::outbound;
+use crate::outbound::{self, PinError};
 use crate::session;
 
 /// A push goes out this long after the first arrival it carries.
@@ -44,6 +44,8 @@ enum Outcome {
     Gone,
     RetryAfter(Duration),
     Failed,
+    /// This server could not send: no fault of the subscription.
+    LocalFault,
 }
 
 #[derive(Debug)]
@@ -312,6 +314,7 @@ impl Dispatcher {
                     );
                 }
             }),
+            Outcome::LocalFault => Ok(()),
         };
         if let Err(e) = result {
             tracing::error!(subscription = sent.id, error = %e, "recording push result");
@@ -346,8 +349,12 @@ async fn send(
     };
     let addr = match push.policy.pin(&url, &*push.resolver).await {
         Ok(addr) => addr,
+        Err(e @ PinError::Unresolved(_)) => {
+            tracing::warn!(subscription = id, %host, error = ?e, "push endpoint not resolved");
+            return Outcome::LocalFault;
+        }
         Err(e) => {
-            tracing::warn!(subscription = id, %host, error = ?e, "push endpoint not reachable");
+            tracing::warn!(subscription = id, %host, error = ?e, "push endpoint refused");
             return Outcome::Failed;
         }
     };
@@ -355,7 +362,7 @@ async fn send(
         Ok(vapid) => vapid,
         Err(e) => {
             tracing::error!(error = %e, "loading the VAPID key");
-            return Outcome::Failed;
+            return Outcome::LocalFault;
         }
     };
     let body = match payload::encode(payload)
@@ -364,7 +371,7 @@ async fn send(
         Ok(body) => body,
         Err(e) => {
             tracing::error!(subscription = id, error = %e, "encrypting push payload");
-            return Outcome::Failed;
+            return Outcome::LocalFault;
         }
     };
     let client =
@@ -372,7 +379,7 @@ async fn send(
             Ok(client) => client,
             Err(e) => {
                 tracing::error!(error = %e, "building push client");
-                return Outcome::Failed;
+                return Outcome::LocalFault;
             }
         };
     let mut request = client
