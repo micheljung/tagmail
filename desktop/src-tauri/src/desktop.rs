@@ -15,7 +15,7 @@ use tagmail_api_core::desktop_dto::{
 use tagmail_api_core::dto::ApiErrorDto;
 use tagmail_api_core::events::EventSource;
 use tagmail_api_core::sqlite_store::SqliteStore;
-use tagmail_replica::client::REQUEST_TIMEOUT;
+use tagmail_replica::client::{REQUEST_TIMEOUT, is_secure};
 use tagmail_replica::durable::FROM_OTHER_SERVER;
 use tagmail_replica::{
     Binding, ClientError, Durable, Layout, Phase, Replica, ReplicaEvent, Router, ServerClient,
@@ -32,7 +32,6 @@ use crate::token::{FILE_WARNING, TokenStore};
 pub const STATUS: &str = "desktop:status";
 pub const UPDATE_REQUIRED: &str = "desktop:update-required";
 const SERVER_KEY: &str = "server_url";
-const BOUND_SERVER_KEY: &str = "bound_server";
 const DEVICE_NAME_KEY: &str = "device_name";
 const TOKEN_FILE: &str = "device-token";
 const EVENT_BUFFER: usize = 64;
@@ -129,15 +128,6 @@ pub fn device_name() -> String {
     name.unwrap_or_else(|| "Tagmail desktop".to_owned())
 }
 
-fn loopback(url: &Url) -> bool {
-    match url.host() {
-        Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
-        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
-        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
-        None => false,
-    }
-}
-
 fn host_label(url: &Url) -> String {
     let host = url.host_str().unwrap_or_default();
     match url.port() {
@@ -148,13 +138,7 @@ fn host_label(url: &Url) -> String {
 
 /// Plain http only reaches this machine; anything else needs https.
 pub fn server_url(raw: &str) -> Option<Url> {
-    let url = Url::parse(raw.trim()).ok()?;
-    let allowed = match url.scheme() {
-        "https" => url.host().is_some(),
-        "http" => loopback(&url),
-        _ => false,
-    };
-    allowed.then_some(url)
+    Url::parse(raw.trim()).ok().filter(is_secure)
 }
 
 impl Desktop {
@@ -255,7 +239,7 @@ impl Desktop {
     fn bind(&self, server: &Url) -> tagmail_replica::Result<Option<String>> {
         let previous = self
             .durable
-            .meta(BOUND_SERVER_KEY)?
+            .bound_server()?
             .and_then(|raw| Url::parse(&raw).ok());
         if self.durable.bind_server(server)? == Binding::Bound {
             return Ok(None);
