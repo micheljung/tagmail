@@ -8,3 +8,6 @@
 .github
 docs
 test
+*.key
+.env*
+compose.yml
