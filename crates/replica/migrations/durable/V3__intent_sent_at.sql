@@ -1,0 +1,1 @@
+ALTER TABLE intent ADD COLUMN sent_at INTEGER;

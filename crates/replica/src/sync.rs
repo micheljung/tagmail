@@ -372,6 +372,7 @@ impl Replica {
         *self.store.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(store));
         *self.last_sweep.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
         let _ = self.events.send(ReplicaEvent::Replaced);
+        self.durable.recheck_all_sent()?;
         self.refresh_overlay(None, Vec::new()).await
     }
 }

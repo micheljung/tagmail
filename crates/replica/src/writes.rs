@@ -23,7 +23,7 @@ use tagmail_store::changes::{self, ChangeOp, Entity, NewChange};
 
 use crate::client::ClientError;
 use crate::error::{Error, Result};
-use crate::intents::{Intent, IntentState};
+use crate::intents::{Intent, IntentState, SENT_RECHECK_SECS};
 use crate::overlay;
 use crate::sync::{Replica, now};
 
@@ -360,12 +360,12 @@ impl Replica {
         let durable = self.durable();
         let now = now();
         let mut changed = durable.expire_intents(now)?;
+        let mut stop = self.recheck_sent(now, &mut changed).await?;
         let due: Vec<Intent> = durable
             .intents(&[IntentState::Pending])?
             .into_iter()
-            .filter(|i| i.next_at.is_none_or(|t| t <= now))
+            .filter(|i| stop.is_none() && i.next_at.is_none_or(|t| t <= now))
             .collect();
-        let mut stop = None;
         for i in due {
             let body = json!({
                 "opId": i.op_id,
@@ -381,12 +381,12 @@ impl Replica {
                         OpStatusDto::Done => (IntentState::Done, None),
                         OpStatusDto::Failed => (IntentState::Failed, op.error),
                     };
-                    durable.set_intent_state(&i.op_id, state, error.as_deref())?;
+                    durable.advance_intent(&i.op_id, state, error.as_deref())?;
                 }
                 Err(ClientError::Api { status, body })
                     if (400..500).contains(&status) && status != 429 =>
                 {
-                    durable.set_intent_state(&i.op_id, IntentState::Failed, Some(&body.message))?;
+                    durable.advance_intent(&i.op_id, IntentState::Failed, Some(&body.message))?;
                 }
                 Err(
                     e @ (ClientError::Offline(_) | ClientError::Unauthorized | ClientError::Gone),
@@ -414,6 +414,53 @@ impl Replica {
             Some(ClientError::Offline(_)) | None => Ok(()),
             Some(e) => Err(e.into()),
         }
+    }
+
+    /// Asks the server for the verdict of `sent` intents that are due, so
+    /// one whose op change was never pulled still settles.
+    async fn recheck_sent(
+        &self,
+        now: i64,
+        changed: &mut Vec<Intent>,
+    ) -> Result<Option<ClientError>> {
+        let durable = self.durable();
+        let due: Vec<Intent> = durable
+            .intents(&[IntentState::Sent])?
+            .into_iter()
+            .filter(|i| i.next_at.is_none_or(|t| t <= now))
+            .collect();
+        for i in due {
+            let path = format!(
+                "api/ops/{}",
+                percent_encoding::utf8_percent_encode(&i.op_id, percent_encoding::NON_ALPHANUMERIC)
+            );
+            let verdict = match self.client().get_json::<OpDto>(&path).await {
+                Ok(op) => match op.status {
+                    OpStatusDto::Pending => None,
+                    OpStatusDto::Done => Some((IntentState::Done, None)),
+                    OpStatusDto::Failed => Some((IntentState::Failed, op.error)),
+                },
+                Err(ClientError::Api { status: 404, .. } | ClientError::Status { status: 404 }) => {
+                    Some((IntentState::Done, None))
+                }
+                Err(
+                    e @ (ClientError::Offline(_) | ClientError::Unauthorized | ClientError::Gone),
+                ) => return Ok(Some(e)),
+                Err(e) => {
+                    tracing::debug!(op = %i.op_id, error = %e, "op verdict unknown");
+                    None
+                }
+            };
+            match verdict {
+                Some((state, error)) => {
+                    if durable.advance_intent(&i.op_id, state, error.as_deref())? {
+                        changed.extend(durable.intent(&i.op_id)?);
+                    }
+                }
+                None => durable.recheck_at(&i.op_id, now + SENT_RECHECK_SECS)?,
+            }
+        }
+        Ok(None)
     }
 
     /// Server `op` changes settle the intents with the same op id.
@@ -448,10 +495,9 @@ impl Replica {
             let Some(i) = durable.intent(&op_id)? else {
                 continue;
             };
-            if !i.state.is_open() || i.state == verdict.0 {
+            if !durable.advance_intent(&op_id, verdict.0, verdict.1.as_deref())? {
                 continue;
             }
-            durable.set_intent_state(&op_id, verdict.0, verdict.1.as_deref())?;
             changed.push(durable.intent(&op_id)?.unwrap_or(i));
         }
         if !changed.is_empty() {

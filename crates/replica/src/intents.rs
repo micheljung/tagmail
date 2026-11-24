@@ -17,6 +17,11 @@ use crate::error::{Error, Result};
 pub const INTENT_TTL_SECS: i64 = 90 * 24 * 60 * 60;
 pub const DONE_RETENTION_SECS: i64 = 7 * 24 * 60 * 60;
 pub const EXPIRED: &str = "expired";
+/// How long the server may run an accepted op before the replica gives up
+/// on its verdict.
+pub const SENT_TTL_SECS: i64 = 24 * 60 * 60;
+pub const SENT_RECHECK_SECS: i64 = 5 * 60;
+pub const NO_VERDICT: &str = "No answer from the server";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntentState {
@@ -194,23 +199,48 @@ impl Durable {
         rows.into_iter().map(decode).collect()
     }
 
-    pub fn set_intent_state(
+    /// Moves an intent forward only: `pending` → `sent` → `done`/`failed`,
+    /// or `pending` straight to a verdict. Whether it moved.
+    pub fn advance_intent(
         &self,
         op_id: &str,
         state: IntentState,
         error: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
+        let now = crate::sync::now();
+        Ok(self.conn().execute(
+            "UPDATE intent SET state = ?2, error = ?3,
+                 next_at = CASE WHEN ?2 = 'sent' THEN ?4 + ?5 END,
+                 sent_at = CASE WHEN ?2 = 'sent' THEN ?4 ELSE sent_at END
+             WHERE op_id = ?1
+               AND (state = 'pending' AND ?2 != 'pending'
+                    OR state = 'sent' AND ?2 IN ('done', 'failed'))",
+            params![op_id, state.as_str(), error, now, SENT_RECHECK_SECS],
+        )? == 1)
+    }
+
+    /// Asks the server about a `sent` intent again at `next_at`.
+    pub fn recheck_at(&self, op_id: &str, next_at: i64) -> Result<()> {
         self.conn().execute(
-            "UPDATE intent SET state = ?2, error = ?3, next_at = NULL WHERE op_id = ?1",
-            params![op_id, state.as_str(), error],
+            "UPDATE intent SET next_at = ?2 WHERE op_id = ?1 AND state = 'sent'",
+            params![op_id, next_at],
         )?;
+        Ok(())
+    }
+
+    /// Every `sent` intent is due for a recheck, as after a re-bootstrap
+    /// that skipped the server's op changes.
+    pub fn recheck_all_sent(&self) -> Result<()> {
+        self.conn()
+            .execute("UPDATE intent SET next_at = NULL WHERE state = 'sent'", [])?;
         Ok(())
     }
 
     /// A flush that did not reach a verdict; try again at `next_at`.
     pub fn defer_intent(&self, op_id: &str, next_at: i64, error: &str) -> Result<()> {
         self.conn().execute(
-            "UPDATE intent SET attempts = attempts + 1, next_at = ?2, error = ?3 WHERE op_id = ?1",
+            "UPDATE intent SET attempts = attempts + 1, next_at = ?2, error = ?3
+             WHERE op_id = ?1 AND state = 'pending'",
             params![op_id, next_at, error],
         )?;
         Ok(())
@@ -232,16 +262,27 @@ impl Durable {
             == 1)
     }
 
-    /// Fails pending intents older than [`INTENT_TTL_SECS`] and prunes old
-    /// done ones. Returns the expired intents.
+    /// Fails pending intents older than [`INTENT_TTL_SECS`] and sent ones
+    /// without a verdict after [`SENT_TTL_SECS`], and prunes old done ones.
+    /// Returns the intents that failed.
     pub fn expire_intents(&self, now: i64) -> Result<Vec<Intent>> {
-        let expired: Vec<Intent> = self
-            .intents(&[IntentState::Pending])?
-            .into_iter()
-            .filter(|i| i.created_at <= now - INTENT_TTL_SECS)
-            .collect();
-        for i in &expired {
-            self.set_intent_state(&i.op_id, IntentState::Failed, Some(EXPIRED))?;
+        let stale_sent: BTreeSet<String> = {
+            let conn = self.conn();
+            let mut stmt =
+                conn.prepare("SELECT op_id FROM intent WHERE state = 'sent' AND sent_at <= ?1")?;
+            stmt.query_map([now - SENT_TTL_SECS], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let mut expired = Vec::new();
+        for i in self.intents(&[IntentState::Pending, IntentState::Sent])? {
+            let error = match i.state {
+                IntentState::Pending if i.created_at <= now - INTENT_TTL_SECS => EXPIRED,
+                IntentState::Sent if stale_sent.contains(&i.op_id) => NO_VERDICT,
+                _ => continue,
+            };
+            if self.advance_intent(&i.op_id, IntentState::Failed, Some(error))? {
+                expired.extend(self.intent(&i.op_id)?);
+            }
         }
         self.conn().execute(
             "DELETE FROM intent WHERE state = 'done' AND created_at <= ?1",
@@ -277,6 +318,53 @@ mod tests {
     }
 
     #[test]
+    fn a_verdict_is_never_undone() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = Durable::open(&dir.path().join("d.db")).unwrap();
+        d.add_intent(&intent("done", 10)).unwrap();
+        assert!(d.advance_intent("done", IntentState::Done, None).unwrap());
+        assert!(!d.advance_intent("done", IntentState::Sent, None).unwrap());
+        assert_eq!(d.intent("done").unwrap().unwrap().state, IntentState::Done);
+
+        d.add_intent(&intent("sent", 10)).unwrap();
+        assert!(d.advance_intent("sent", IntentState::Sent, None).unwrap());
+        assert!(
+            !d.advance_intent("sent", IntentState::Pending, None)
+                .unwrap()
+        );
+        assert!(
+            d.advance_intent("sent", IntentState::Failed, Some("x"))
+                .unwrap()
+        );
+        assert!(!d.advance_intent("sent", IntentState::Done, None).unwrap());
+    }
+
+    #[test]
+    fn a_sent_intent_without_a_verdict_fails_in_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = Durable::open(&dir.path().join("d.db")).unwrap();
+        let now = crate::sync::now();
+        d.add_intent(&intent("old", now)).unwrap();
+        d.add_intent(&intent("new", now)).unwrap();
+        d.advance_intent("old", IntentState::Sent, None).unwrap();
+        d.advance_intent("new", IntentState::Sent, None).unwrap();
+        d.conn()
+            .execute(
+                "UPDATE intent SET sent_at = ?1 WHERE op_id = 'old'",
+                [now - SENT_TTL_SECS],
+            )
+            .unwrap();
+
+        let failed = d.expire_intents(now).unwrap();
+
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].op_id, "old");
+        assert_eq!(failed[0].state, IntentState::Failed);
+        assert_eq!(failed[0].error.as_deref(), Some(NO_VERDICT));
+        assert_eq!(d.intent("new").unwrap().unwrap().state, IntentState::Sent);
+    }
+
+    #[test]
     fn round_trips_and_ignores_a_replayed_op_id() {
         let dir = tempfile::tempdir().unwrap();
         let d = Durable::open(&dir.path().join("d.db")).unwrap();
@@ -305,7 +393,7 @@ mod tests {
         d.add_intent(&intent("old", now - 91 * day)).unwrap();
         d.add_intent(&intent("new", now - day)).unwrap();
         d.add_intent(&intent("done", now - 8 * day)).unwrap();
-        d.set_intent_state("done", IntentState::Done, None).unwrap();
+        d.advance_intent("done", IntentState::Done, None).unwrap();
 
         let expired = d.expire_intents(now).unwrap();
 

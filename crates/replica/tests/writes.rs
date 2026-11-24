@@ -93,7 +93,8 @@ async fn an_intent_shows_before_flush_and_a_replay_stays_one_op() {
     assert_eq!(state(&replica, "op-a").0, IntentState::Sent);
     replica
         .durable()
-        .set_intent_state("op-a", IntentState::Pending, None)
+        .conn()
+        .execute("UPDATE intent SET state = 'pending', next_at = NULL", [])
         .unwrap();
     replica.flush().await.unwrap();
 
@@ -225,4 +226,41 @@ async fn a_server_op_change_settles_the_intent() {
         "without the overlay the replica shows the server state again"
     );
     f.server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_sent_intent_settles_after_a_rebootstrap_skipped_its_verdict() {
+    let f = Fixture::start().await;
+    let replica = f.replica().await;
+    replica
+        .submit_op(op("op-s", OpKind::MarkRead))
+        .await
+        .unwrap();
+    replica.flush().await.unwrap();
+    assert_eq!(state(&replica, "op-s").0, IntentState::Sent);
+    let mut settled = 0;
+    for _ in 0..200 {
+        settled = f
+            .server
+            .store()
+            .config()
+            .write(|tx| {
+                Ok(tx.execute(
+                    "UPDATE pending_op SET state = 'done' WHERE op_id = 'op-s' AND state != 'running'",
+                    [],
+                )?)
+            })
+            .await
+            .unwrap();
+        if settled == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(settled, 1);
+
+    replica.rebootstrap().await.unwrap();
+    replica.flush().await.unwrap();
+
+    assert_eq!(state(&replica, "op-s").0, IntentState::Done);
 }

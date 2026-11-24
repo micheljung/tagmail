@@ -12,6 +12,7 @@ use crate::error::{Error, Result};
 const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/durable/V1__init.sql"),
     include_str!("../migrations/durable/V2__server_binding.sql"),
+    include_str!("../migrations/durable/V3__intent_sent_at.sql"),
 ];
 
 const BOUND_SERVER_KEY: &str = "bound_server";
