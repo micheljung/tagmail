@@ -2,7 +2,6 @@
 //! server's ids, and derives what the server does not ship.
 
 use std::collections::BTreeSet;
-use std::io::Read;
 
 use base64::Engine;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -14,7 +13,7 @@ use tagmail_api_core::replica_dto::{
 };
 use tagmail_core::{AccountId, EmailId, MessageRowId};
 use tagmail_store::fts::{self, FtsDocument};
-use tagmail_store::{BlobKey, BlobStore, Error, Result, TEXT_CAP};
+use tagmail_store::{BlobKey, BlobStore, Error, Result};
 
 pub fn put_account(conn: &Connection, a: &AccountDto) -> Result<()> {
     conn.execute(
@@ -338,11 +337,7 @@ pub fn put_text(conn: &Connection, blobs: &BlobStore, t: &TextRecord) -> Result<
     let compressed = base64::engine::general_purpose::STANDARD
         .decode(&t.zstd)
         .map_err(|e| Error::Corrupt(format!("text of message {}: {e}", t.message_id)))?;
-    blobs.put_text_zstd(&key, &compressed)?;
-    let mut text = String::new();
-    zstd::Decoder::new(compressed.as_slice())?
-        .take(TEXT_CAP as u64)
-        .read_to_string(&mut text)?;
+    let text = blobs.put_text_zstd(&key, &compressed)?;
     conn.execute(
         "UPDATE message SET text_blob = ?2 WHERE id = ?1",
         params![t.message_id, key.as_str()],

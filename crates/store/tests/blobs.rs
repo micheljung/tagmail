@@ -117,6 +117,29 @@ fn compressed_text_moves_between_stores_unchanged() {
 }
 
 #[test]
+fn compressed_text_with_a_huge_window_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let store = BlobStore::open(dir.path()).unwrap();
+    let mut encoder = zstd::Encoder::new(Vec::new(), 3).unwrap();
+    encoder.window_log(27).unwrap();
+    encoder.include_contentsize(false).unwrap();
+    std::io::Write::write_all(&mut encoder, b"tiny").unwrap();
+    let huge_window = encoder.finish().unwrap();
+    assert!(matches!(
+        store.put_text_zstd(&key(1), &huge_window),
+        Err(Error::Io(_) | Error::Corrupt(_))
+    ));
+
+    let text: String = (0..TEXT_CAP)
+        .map(|i| char::from(b'a' + (i * 7 % 26) as u8))
+        .collect();
+    store.put_text(&key(2), &text).unwrap();
+    let shipped = store.read_text_zstd(&key(2)).unwrap().unwrap();
+    assert_eq!(store.put_text_zstd(&key(3), &shipped).unwrap(), text);
+    assert_eq!(store.read_text(&key(3)).unwrap().unwrap(), text);
+}
+
+#[test]
 fn eviction_removes_least_recently_used_raw_only() {
     let dir = TempDir::new().unwrap();
     let store = BlobStore::open(dir.path()).unwrap();

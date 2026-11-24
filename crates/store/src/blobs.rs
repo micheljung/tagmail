@@ -6,7 +6,7 @@
 //! runtime.
 
 use std::fs::{self, File};
-use std::io::{BufReader, ErrorKind, Read, Write};
+use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -23,6 +23,9 @@ pub const TEXT_CAP: usize = 64 * 1024;
 pub const DEFAULT_RAW_CAP: u64 = 50 * 1024 * 1024;
 
 const ZSTD_LEVEL: i32 = 3;
+/// The window [`ZSTD_LEVEL`] declares when the input size is not known up
+/// front, as in [`BlobStore::put_text`].
+const TEXT_WINDOW_LOG: u32 = 21;
 const KEY_HEX_LEN: usize = 32;
 const EXTENSION: &str = "zst";
 
@@ -204,7 +207,7 @@ impl BlobStore {
             return Ok(None);
         };
         let mut text = String::new();
-        zstd::Decoder::new(file)?
+        text_decoder(BufReader::new(file))?
             .take(TEXT_CAP as u64 + 1)
             .read_to_string(&mut text)?;
         if text.len() > TEXT_CAP {
@@ -224,23 +227,35 @@ impl BlobStore {
     }
 
     /// Stores a text blob from [`BlobStore::read_text_zstd`] of another
-    /// store; refused unless it decodes within [`TEXT_CAP`].
-    pub fn put_text_zstd(&self, key: &BlobKey, compressed: &[u8]) -> Result<()> {
+    /// store and returns its text; refused unless it decodes within
+    /// [`TEXT_CAP`].
+    pub fn put_text_zstd(&self, key: &BlobKey, compressed: &[u8]) -> Result<String> {
         let mut text = Vec::new();
-        zstd::Decoder::new(compressed)?
+        text_decoder(compressed)?
             .take(TEXT_CAP as u64 + 1)
             .read_to_end(&mut text)?;
-        if text.len() > TEXT_CAP || std::str::from_utf8(&text).is_err() {
+        if text.len() > TEXT_CAP {
             return Err(Error::Corrupt(format!("text blob {} is not text", key.0)));
         }
+        let text = String::from_utf8(text)
+            .map_err(|_| Error::Corrupt(format!("text blob {} is not text", key.0)))?;
         let mut file = self.temp()?;
         file.write_all(compressed)?;
-        self.persist(file, Kind::Text, key)
+        self.persist(file, Kind::Text, key)?;
+        Ok(text)
     }
 
     pub fn delete_text(&self, key: &BlobKey) -> Result<()> {
         self.delete(Kind::Text, key)
     }
+}
+
+/// A decoder refusing frames with a larger window than text blobs have, so
+/// a forged one cannot make it allocate up to 128 MiB.
+fn text_decoder<'a, R: BufRead>(compressed: R) -> io::Result<zstd::Decoder<'a, R>> {
+    let mut decoder = zstd::Decoder::with_buffer(compressed)?;
+    decoder.window_log_max(TEXT_WINDOW_LOG)?;
+    Ok(decoder)
 }
 
 pub struct RawWriter<'a> {
