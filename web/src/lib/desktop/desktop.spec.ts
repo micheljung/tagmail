@@ -1,10 +1,11 @@
-import type { DesktopStatusDto } from '@tagmail/api-types';
+import type { DesktopPairDto, DesktopStatusDto } from '@tagmail/api-types';
 import { describe, expect, it, vi } from 'vitest';
 import type { DraftInit } from '../compose/draft.svelte';
 import { Api, ApiError } from '../transport/api';
 import { HttpTransport } from '../transport/http';
 import type { Listen } from '../transport/tauri';
 import { DesktopStore, OFFLINE_TEXT, mailtoDraft } from './desktop.svelte';
+import { serverHost } from './host';
 
 const live: DesktopStatusDto = {
 	paired: true,
@@ -34,13 +35,14 @@ async function setup(routes: Record<string, () => Response>) {
 		return Promise.resolve(() => handlers.delete(event));
 	};
 	const drafts: DraftInit[] = [];
+	const pairs: DesktopPairDto[] = [];
 	const store = new DesktopStore();
 	const stop = await store.start(api, listen, {
 		mailto: (d) => drafts.push(d),
-		pair: () => undefined
+		pair: (p) => pairs.push(p)
 	});
 	const emit = (event: string, payload: unknown) => handlers.get(event)?.(payload);
-	return { api, store, emit, drafts, stop, handlers };
+	return { api, store, emit, drafts, pairs, stop, handlers };
 }
 
 describe('DesktopStore', () => {
@@ -97,6 +99,42 @@ describe('DesktopStore', () => {
 		]);
 		stop();
 		expect(handlers.size).toBe(0);
+	});
+});
+
+describe('pair links', () => {
+	const link = { server: 'https://other.example.com', code: 'K7QD2XPM' };
+	const settle = () => new Promise((r) => setTimeout(r));
+
+	it('go straight to the pairing form while unpaired', async () => {
+		const { store, emit, pairs } = await setup({
+			'/api/desktop/status': () =>
+				json(200, { ...live, paired: false, server: null, phase: { kind: 'unpaired' } })
+		});
+		emit('desktop:pair', link);
+		await settle();
+		expect(pairs).toEqual([link]);
+		expect(store.pairing).toEqual(link);
+		expect(store.repair).toBeNull();
+	});
+
+	it('wait for confirmation while paired or while the state is unknown', async () => {
+		for (const status of [() => json(200, live), () => json(500, {})]) {
+			const { store, emit, pairs } = await setup({ '/api/desktop/status': status });
+			emit('desktop:pair', link);
+			await settle();
+			expect(pairs).toEqual([]);
+			expect(store.pairing).toBeNull();
+			expect(store.repair).toEqual(link);
+			expect(store.confirmRepair()).toEqual(link);
+			expect(store.repair).toBeNull();
+			expect(store.pairing).toEqual(link);
+		}
+	});
+
+	it('name hosts in punycode', () => {
+		expect(serverHost('https://bücher.example:8443/x')).toBe('xn--bcher-kva.example:8443');
+		expect(serverHost('not a url')).toBe('not a url');
 	});
 });
 

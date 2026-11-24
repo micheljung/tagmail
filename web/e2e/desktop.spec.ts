@@ -112,12 +112,42 @@ test('an unpaired app pairs from a tagmail://pair link', async ({ page }) => {
 	await expect(page.getByRole('alert')).toHaveText('That code is wrong or expired');
 	await emit(page, 'desktop:pair', { server: 'https://other.example.com', code: 'K7QD2XPM' });
 	await expect(page.getByLabel('Server address')).toHaveValue('https://other.example.com');
+	await expect(page.locator('[data-desktop="pair-confirm"]')).toBeHidden();
 	await expect(page.getByLabel('Pairing code')).toHaveValue('K7QD2XPM');
 	await page.getByRole('button', { name: 'Connect' }).click();
 	await expect(page).toHaveURL(/\/inbox$/);
 	await expect(page.getByRole('link', { name: 'This device' })).toBeVisible();
 	await expect(page.getByRole('link', { name: /Devices/ })).toHaveCount(0);
 	await expect(page.getByRole('button', { name: 'Sign out' })).toHaveCount(0);
+});
+
+test('a pair link while paired asks first and never navigates on its own', async ({ page }) => {
+	await asDesktop(page);
+	await signIn(page);
+	await page.goto('/inbox');
+	const link = { server: 'https://bücher.example', code: 'K7QD2XPM' };
+	await emit(page, 'desktop:pair', link);
+	const confirm = page.getByRole('dialog', { name: 'Connect to a different server?' });
+	await expect(confirm).toBeVisible();
+	await expect(confirm.locator('[data-host="current"]')).toHaveText('mail.example.com');
+	await expect(confirm.locator('[data-host="new"]')).toHaveText('xn--bcher-kva.example');
+	await expect(confirm).toContainText('stay on this device and are never sent');
+	await expect(page).toHaveURL(/\/inbox$/);
+	await confirm.getByRole('button', { name: 'Cancel' }).click();
+	await expect(confirm).toBeHidden();
+	await expect(page).toHaveURL(/\/inbox$/);
+
+	await page.evaluate(([e, p]) => window.__tauriEmit(e as string, p), ['desktop:pair', link]);
+	await expect(confirm).toBeVisible();
+	await page.keyboard.press('Escape');
+	await expect(confirm).toBeHidden();
+	await expect(page).toHaveURL(/\/inbox$/);
+
+	await page.evaluate(([e, p]) => window.__tauriEmit(e as string, p), ['desktop:pair', link]);
+	await confirm.getByRole('button', { name: 'Continue' }).click();
+	await expect(page).toHaveURL(/\/pair$/);
+	await expect(page.getByLabel('Server address')).toHaveValue('https://bücher.example');
+	await expect(page.getByLabel('Pairing code')).toHaveValue('K7QD2XPM');
 });
 
 test('a mailto link opens a prefilled compose window', async ({ page }) => {

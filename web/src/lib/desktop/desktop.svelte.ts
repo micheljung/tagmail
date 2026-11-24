@@ -46,6 +46,8 @@ export class DesktopStore {
 	updateRequired = $state<UpdateRequiredDto | null>(null);
 	/** A `tagmail://pair` link to prefill the pairing form with. */
 	pairing = $state<DesktopPairDto | null>(null);
+	/** A `tagmail://pair` link that would replace the current pairing, until confirmed. */
+	repair = $state<DesktopPairDto | null>(null);
 
 	offlineText = $derived(
 		this.offlineMessage ??
@@ -72,10 +74,7 @@ export class DesktopStore {
 			listen<DesktopStatusDto>('desktop:status', (s) => this.setStatus(s)),
 			listen<UpdateRequiredDto>('desktop:update-required', (u) => (this.updateRequired = u)),
 			listen<MailtoDto>('desktop:mailto', (m) => handlers.mailto(mailtoDraft(m))),
-			listen<DesktopPairDto>('desktop:pair', (p) => {
-				this.pairing = p;
-				handlers.pair(p);
-			})
+			listen<DesktopPairDto>('desktop:pair', (p) => void this.#pairLink(api, p, handlers))
 		]);
 		try {
 			this.setStatus(await api.desktopStatus());
@@ -85,6 +84,24 @@ export class DesktopStore {
 		return () => {
 			for (const unlisten of unlisteners) unlisten();
 		};
+	}
+
+	async #pairLink(api: Api, pairing: DesktopPairDto, handlers: DesktopHandlers): Promise<void> {
+		const status = this.status ?? (await api.desktopStatus().catch(() => null));
+		if (status && !status.paired) {
+			this.pairing = pairing;
+			handlers.pair(pairing);
+		} else {
+			this.repair = pairing;
+		}
+	}
+
+	/** Takes the confirmed link over to the pairing form. */
+	confirmRepair(): DesktopPairDto | null {
+		const pairing = this.repair;
+		this.repair = null;
+		this.pairing = pairing;
+		return pairing;
 	}
 }
 

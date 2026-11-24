@@ -43,6 +43,9 @@
 >
 	<form onsubmit={submit}>
 		{#if error}<p class="error" role="alert">{error}</p>{/if}
+		{#each desktop.status?.warnings ?? [] as warning (warning)}
+			<p class="warning" role="status" data-desktop="warning">{warning}</p>
+		{/each}
 		<label>
 			Server address
 			<input

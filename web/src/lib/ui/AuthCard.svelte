@@ -93,6 +93,14 @@
 		font-size: 13px;
 	}
 
+	.card :global(.warning) {
+		margin: 0 0 14px;
+		padding: 10px 12px;
+		border-radius: 10px;
+		background: var(--hover);
+		font-size: 13px;
+	}
+
 	.card :global(.alt) {
 		margin: 18px 0 0;
 		color: var(--muted);
