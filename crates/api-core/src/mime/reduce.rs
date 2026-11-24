@@ -25,8 +25,8 @@ fn text_raw_cap(encoding: Encoding) -> usize {
 const HEAD_RAW_CAP: usize = 128;
 const HEADER_BLOCK_CAP: usize = 1 << 20;
 const HEADERS_CAP: usize = 4 << 20;
-/// Open multiparts and messages past which the parser rendering reads the
-/// copy with keeps parts as leaves; so does the copy.
+/// Nesting depth (open multiparts plus messages) past which the parser
+/// that renders the copy keeps parts as leaves; the copy does the same.
 const MAX_DEPTH: usize = 64;
 
 enum State {

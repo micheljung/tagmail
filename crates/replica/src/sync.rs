@@ -359,6 +359,7 @@ impl Replica {
     /// old replica serves until the swap and stays installed on any error.
     pub async fn rebootstrap(&self) -> Result<()> {
         let _guard = self.sync_lock.lock().await;
+        let old_dir = self.layout.replica();
         self.set_phase(Phase::Bootstrapping { records: 0 });
         let settings = self.settings();
         let snapshot =
@@ -387,14 +388,19 @@ impl Replica {
         *self.last_sweep.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
         let _ = self.events.send(ReplicaEvent::Replaced);
         if let Some(old) = old {
-            let layout = self.layout.clone();
             tokio::spawn(async move {
                 if close_when_released(old).await {
-                    let _ = tokio::task::spawn_blocking(move || layout.sweep()).await;
+                    let removed =
+                        tokio::task::spawn_blocking(move || db::remove_dir(&old_dir)).await;
+                    if let Ok(Err(e)) = removed {
+                        tracing::debug!(error = %e, "old replica directory kept until the next start");
+                    }
                 }
             });
         }
-        self.durable.recheck_all_sent()?;
+        if let Err(e) = self.durable.recheck_all_sent() {
+            tracing::warn!(error = %e, "cannot recheck sent intents after a re-bootstrap");
+        }
         self.refresh_overlay(None, Vec::new()).await
     }
 

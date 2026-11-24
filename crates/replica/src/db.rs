@@ -24,6 +24,7 @@ const DURABLE_FILE: &str = "replica-durable.db";
 const CACHE_FILE: &str = "cache.db";
 const CONFIG_FILE: &str = "config.db";
 const BLOBS_DIR: &str = "blobs";
+const RANDOM_NAME_BYTES: usize = 8;
 
 const KEY_FORMAT: &str = "replica_snapshot_format";
 const KEY_SERVER_EPOCH: &str = "replica_server_epoch";
@@ -61,7 +62,7 @@ impl Layout {
 
     /// A new directory name for an import; not created.
     pub fn fresh_replica(&self) -> Result<PathBuf> {
-        let mut bytes = [0u8; 8];
+        let mut bytes = [0u8; RANDOM_NAME_BYTES];
         getrandom::fill(&mut bytes).map_err(|e| Error::Corrupt(format!("random: {e}")))?;
         let name: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         Ok(self.root.join(format!("{DIR_PREFIX}{name}")))
@@ -86,6 +87,8 @@ impl Layout {
             f.sync_all()?;
         }
         std::fs::rename(&tmp, self.root.join(POINTER_FILE))?;
+        #[cfg(unix)]
+        std::fs::File::open(&self.root)?.sync_all()?;
         Ok(())
     }
 
@@ -103,8 +106,7 @@ impl Layout {
     /// Removes replica directories other than the current one; best effort,
     /// as a store being closed may still hold some.
     pub fn sweep(&self) {
-        let current = self.installed().then(|| self.replica());
-        self.sweep_except(current.as_deref());
+        self.sweep_except(Some(&self.replica()));
     }
 
     fn sweep_except(&self, keep: Option<&Path>) {
@@ -463,6 +465,20 @@ mod tests {
             open(&layout, Expected::current(), None).unwrap(),
             Opened::NeedsBootstrap(Discard::Missing)
         ));
+    }
+
+    #[tokio::test]
+    async fn a_sweep_keeps_a_replica_from_before_the_pointer() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = Layout::new(dir.path());
+        bootstrapped(&layout, Some(meta())).await;
+
+        layout.sweep();
+
+        match open(&layout, Expected::current(), Some(EPOCH)).unwrap() {
+            Opened::Ready(dbs) => dbs.close().await.unwrap(),
+            Opened::NeedsBootstrap(why) => panic!("discarded: {why:?}"),
+        }
     }
 
     #[tokio::test]

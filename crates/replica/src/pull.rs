@@ -41,9 +41,9 @@ struct Plan {
     labels: BTreeSet<i64>,
     threads: BTreeSet<i64>,
     messages: BTreeSet<i64>,
-    /// Mailboxes of `bulk` changes with the UID range they added, `None`
-    /// for all of the mailbox.
-    bulk: BTreeMap<i64, Option<[u32; 2]>>,
+    /// Mailboxes of `bulk` changes with the disjoint UID ranges they
+    /// added, `None` for all of the mailbox.
+    bulk: BTreeMap<i64, Option<Vec<[u32; 2]>>>,
     deletes: Vec<(EntityDto, i64)>,
     merges: Vec<(i64, i64)>,
     log: Vec<NewChange>,
@@ -70,14 +70,11 @@ impl Plan {
                 }
                 ChangeOpDto::Bulk { mailbox } => {
                     let added = bulk_uids(c.payload.as_ref());
-                    plan.bulk
-                        .entry(mailbox)
-                        .and_modify(|range| {
-                            *range = range
-                                .zip(added)
-                                .map(|([a, b], [lo, hi])| [a.min(lo), b.max(hi)]);
-                        })
-                        .or_insert(added);
+                    let ranges = plan.bulk.entry(mailbox).or_insert(Some(Vec::new()));
+                    match (ranges.as_mut(), added) {
+                        (Some(ranges), Some(added)) => add_range(ranges, added),
+                        _ => *ranges = None,
+                    }
                 }
             }
             plan.log.push(NewChange {
@@ -150,6 +147,21 @@ impl Plan {
     }
 }
 
+/// Adds `[lo, hi]` to sorted disjoint ranges, joining overlapping and
+/// adjacent ones.
+fn add_range(ranges: &mut Vec<[u32; 2]>, added: [u32; 2]) {
+    ranges.push(added);
+    ranges.sort_unstable();
+    let mut joined: Vec<[u32; 2]> = Vec::with_capacity(ranges.len());
+    for &[lo, hi] in ranges.iter() {
+        match joined.last_mut() {
+            Some(last) if lo <= last[1].saturating_add(1) => last[1] = last[1].max(hi),
+            _ => joined.push([lo, hi]),
+        }
+    }
+    *ranges = joined;
+}
+
 fn bulk_uids(payload: Option<&serde_json::Value>) -> Option<[u32; 2]> {
     serde_json::from_value(payload?.get("uids")?.clone()).ok()
 }
@@ -197,16 +209,22 @@ pub async fn pull(
             imported.threads.extend(part.threads);
             imported.arrivals.extend(part.arrivals);
         }
-        for (mailbox, uids) in &plan.bulk {
-            let request = ReplicaRowsDto {
-                mailbox: Some(*mailbox),
-                uids: *uids,
-                window_days: Some(window_days),
-                ..ReplicaRowsDto::default()
+        for (mailbox, ranges) in &plan.bulk {
+            let uids: Vec<Option<[u32; 2]>> = match ranges {
+                Some(ranges) => ranges.iter().copied().map(Some).collect(),
+                None => vec![None],
             };
-            imported
-                .threads
-                .extend(rows(client, &target, &request).await?.threads);
+            for uids in uids {
+                let request = ReplicaRowsDto {
+                    mailbox: Some(*mailbox),
+                    uids,
+                    window_days: Some(window_days),
+                    ..ReplicaRowsDto::default()
+                };
+                imported
+                    .threads
+                    .extend(rows(client, &target, &request).await?.threads);
+            }
         }
         out.local_head = Some(finish(store, plan, imported.threads, next).await?);
         out.cursor = Some(next);
@@ -364,12 +382,20 @@ mod tests {
             bulk(2, None),
             bulk(3, None),
             bulk(3, Some(json!({ "uids": [5, 9] }))),
+            bulk(4, Some(json!({ "uids": [1201, 1700] }))),
+            bulk(4, Some(json!({ "uids": [1, 100] }))),
+            bulk(4, Some(json!({ "uids": [90, 120] }))),
         ];
         let plan = Plan::new(&changes, &mut Vec::new());
 
         assert_eq!(
             plan.bulk,
-            BTreeMap::from([(1, Some([101, 1100])), (2, None), (3, None)])
+            BTreeMap::from([
+                (1, Some(vec![[101, 1100]])),
+                (2, None),
+                (3, None),
+                (4, Some(vec![[1, 120], [1201, 1700]])),
+            ])
         );
     }
 

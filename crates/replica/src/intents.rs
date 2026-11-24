@@ -268,8 +268,10 @@ impl Durable {
     pub fn expire_intents(&self, now: i64) -> Result<Vec<Intent>> {
         let stale_sent: BTreeSet<String> = {
             let conn = self.conn();
-            let mut stmt =
-                conn.prepare("SELECT op_id FROM intent WHERE state = 'sent' AND sent_at <= ?1")?;
+            let mut stmt = conn.prepare(
+                "SELECT op_id FROM intent
+                 WHERE state = 'sent' AND coalesce(sent_at, created_at) <= ?1",
+            )?;
             stmt.query_map([now - SENT_TTL_SECS], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?
         };
@@ -362,6 +364,24 @@ mod tests {
         assert_eq!(failed[0].state, IntentState::Failed);
         assert_eq!(failed[0].error.as_deref(), Some(NO_VERDICT));
         assert_eq!(d.intent("new").unwrap().unwrap().state, IntentState::Sent);
+    }
+
+    #[test]
+    fn a_sent_intent_from_before_sent_at_also_fails_in_time() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = Durable::open(&dir.path().join("d.db")).unwrap();
+        let now = crate::sync::now();
+        d.add_intent(&intent("legacy", now - SENT_TTL_SECS))
+            .unwrap();
+        d.advance_intent("legacy", IntentState::Sent, None).unwrap();
+        d.conn()
+            .execute("UPDATE intent SET sent_at = NULL", [])
+            .unwrap();
+
+        let failed = d.expire_intents(now).unwrap();
+
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].error.as_deref(), Some(NO_VERDICT));
     }
 
     #[test]

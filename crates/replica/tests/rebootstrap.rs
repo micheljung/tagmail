@@ -59,3 +59,25 @@ async fn a_rebootstrap_with_an_open_session_never_leaves_the_replica_empty() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 }
+
+#[tokio::test]
+async fn closing_the_old_replica_removes_only_its_directory() {
+    let f = Fixture::start().await;
+    let replica = f.replica().await;
+    let layout = tagmail_replica::Layout::new(f.desktop.path());
+    let old = layout.replica();
+    let session = replica.store().unwrap();
+    replica.rebootstrap().await.unwrap();
+    let importing = layout.fresh_replica().unwrap();
+    std::fs::create_dir(&importing).unwrap();
+
+    drop(session);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while old.exists() {
+        assert!(Instant::now() < deadline, "the old replica stays");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    assert!(importing.exists());
+    assert!(layout.replica().exists());
+}
