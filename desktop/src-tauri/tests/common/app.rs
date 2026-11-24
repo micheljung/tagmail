@@ -1,6 +1,8 @@
 //! The desktop app as a child process with test hooks, its stdout read
 //! line by line. Run under `dbus-run-session` and `xvfb-run`.
 
+#![allow(dead_code)]
+
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};

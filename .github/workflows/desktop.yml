@@ -45,7 +45,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
-            libayatana-appindicator3-dev xvfb dbus xdg-utils
+            libayatana-appindicator3-dev xvfb dbus xdg-utils xdotool
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.100"
@@ -72,7 +72,7 @@ jobs:
       - run: >-
           dbus-run-session -- xvfb-run -a
           cargo test --locked -p tagmail-desktop --features app,test-hooks
-          --test notify --test mailto --test writes --test parity -- --test-threads=1
+          --test notify --test mailto --test writes --test parity --test links -- --test-threads=1
         timeout-minutes: 10
 
   # Build everywhere; the in-webview self-test is informational until

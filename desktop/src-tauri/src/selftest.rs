@@ -20,12 +20,14 @@ pub const PREFIX: &str = "/__selftest/";
 const PROBE_PREFIX: &str = "/__probe/";
 /// `TAGMAIL_DESKTOP_PROBE=compose` reports compose windows, `writes` runs
 /// the offline write check step by step, `parity` the 100k list checks,
-/// `offline` the AC 19 checks of `tests/offline.rs`.
+/// `offline` the AC 19 checks of `tests/offline.rs`, `links` the link
+/// handling of `tests/links.rs`.
 pub fn probe_head(kind: &str) -> String {
     let script = match kind {
         "writes" => "writes.js",
         "parity" => "parity.js",
         "offline" => "offline.js",
+        "links" => "links.js",
         _ => "probe.js",
     };
     format!(r#"<script type="module" src="/__probe/{script}"></script>"#)
@@ -114,6 +116,7 @@ pub fn probe(req: &http::Request<Vec<u8>>) -> Option<HttpResponse> {
         (&Method::GET, "offline.js") => {
             file("text/javascript", include_str!("../selftest/offline.js"))
         }
+        (&Method::GET, "links.js") => file("text/javascript", include_str!("../selftest/links.js")),
         (&Method::GET, "step") => {
             let name = form_urlencoded::parse(req.uri().query().unwrap_or("").as_bytes())
                 .find(|(k, _)| k == "name")

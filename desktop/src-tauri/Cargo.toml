@@ -22,6 +22,7 @@ required-features = ["app"]
 # The Tauri shell needs WebKitGTK dev libs on Linux; the lib does not, so the
 # main CI job builds and tests it without them.
 app = [
+    "dep:open",
     "dep:tauri",
     "dep:tauri-build",
     "dep:tauri-plugin-autostart",
@@ -34,11 +35,13 @@ app = [
 test-hooks = []
 # Tests against Dovecot and Mailpit (`cargo xtask dovecot up`).
 stack-tests = []
+open = ["dep:open"]
 
 [dependencies]
 form_urlencoded.workspace = true
 http = "1"
 keyring = { version = "4", default-features = false, features = ["v1"] }
+open = { version = "5", optional = true }
 percent-encoding.workspace = true
 reqwest = { workspace = true, features = ["rustls-no-provider", "json"] }
 serde.workspace = true
@@ -72,6 +75,10 @@ required-features = ["app", "test-hooks"]
 
 [[test]]
 name = "parity"
+required-features = ["app", "test-hooks"]
+
+[[test]]
+name = "links"
 required-features = ["app", "test-hooks"]
 
 [[test]]

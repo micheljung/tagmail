@@ -10,16 +10,12 @@ use tagmail_desktop::backend::Backend;
 use tagmail_desktop::desktop::Desktop;
 use tagmail_desktop::events::{self, Emit, EventControl};
 use tagmail_desktop::mailto::LinkQueue;
+use tagmail_desktop::navigation::{self, Navigation, ORIGIN};
 use tagmail_desktop::protocol::{Asset, Assets, HttpResponse, Shell};
-use tauri::webview::PageLoadEvent;
+use tauri::webview::{NewWindowResponse, PageLoadEvent};
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, Wry};
 
 mod native;
-
-#[cfg(windows)]
-const ORIGIN: &str = "http://app.localhost/";
-#[cfg(not(windows))]
-const ORIGIN: &str = "app://localhost/";
 
 struct TauriAssets(tauri::AssetResolver<Wry>);
 
@@ -144,6 +140,11 @@ fn open(
     )
     .title("Tagmail")
     .inner_size(1200.0, 800.0)
+    .on_navigation(|url| follow(navigation::navigate(url)))
+    .on_new_window(|url, _| {
+        follow(navigation::new_window(url));
+        NewWindowResponse::Deny
+    })
     .on_page_load(move |_, payload| {
         if let (Some(links), PageLoadEvent::Started) = (&links, payload.event()) {
             links.unready();
@@ -151,6 +152,20 @@ fn open(
     })
     .build()?;
     Ok(())
+}
+
+/// Whether the webview may load a URL; external links go to the system.
+fn follow(navigation: Navigation) -> bool {
+    match navigation {
+        Navigation::Allow => true,
+        Navigation::External(url) => {
+            if let Err(e) = open::that_detached(url.as_str()) {
+                tracing::warn!(error = %e, "opening a link failed");
+            }
+            false
+        }
+        Navigation::Deny => false,
+    }
 }
 
 #[cfg(feature = "test-hooks")]

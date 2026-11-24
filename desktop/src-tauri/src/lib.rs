@@ -5,6 +5,7 @@ pub mod backend;
 pub mod desktop;
 pub mod events;
 pub mod mailto;
+pub mod navigation;
 pub mod notify;
 pub mod protocol;
 #[cfg(feature = "test-hooks")]
