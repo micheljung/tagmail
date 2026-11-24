@@ -37,15 +37,19 @@ can read them.
 
 ```sh
 cp docker-compose.example.yml compose.yml
-docker compose up -d
-docker compose logs tagmail
 ```
 
 Set `--public-origin` in `compose.yml` to the `https` origin your reverse
 proxy serves. The server refuses to listen on a non-loopback address without
-an `https` public origin, because it does not terminate TLS itself. On first
-start it logs a one-time setup token; open the public origin and finish setup
-with it.
+an `https` public origin, because it does not terminate TLS itself. Then:
+
+```sh
+docker compose up -d
+docker compose logs tagmail
+```
+
+On first start it logs a one-time setup token; open the public origin and
+finish setup with it.
 
 The port is published on `127.0.0.1` only, for a reverse proxy on the same
 host (Caddy, nginx, Traefik). Behind Docker's port forwarding the server sees
@@ -65,7 +69,9 @@ change it (see [Upgrade](#upgrade)).
 
 Compose prefixes the volume with the project name, which defaults to the
 directory name: in `~/tagmail` the data lives in the volume
-`tagmail_tagmail-data` (`docker volume ls`).
+`tagmail_tagmail-data` (`docker volume ls`). To bind-mount a host directory
+at `/data` instead, it must belong to uid 65532
+(`sudo chown -R 65532:65532 <dir>`).
 
 ## Run without Compose
 

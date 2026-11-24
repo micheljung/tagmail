@@ -51,20 +51,24 @@ multiple users, JMAP, Gmail API labels and OAuth2.
 
 ## Quick start
 
-With Docker Compose, from a copy of
-[`deploy/docker/docker-compose.example.yml`](deploy/docker/docker-compose.example.yml):
+With Docker Compose, from a clone of this repository:
 
 ```sh
+cp deploy/docker/docker-compose.example.yml compose.yml
 openssl rand -hex 32 > master.key
 sudo chown 65532:65532 master.key && sudo chmod 400 master.key
+```
+
+In `compose.yml`, replace `https://mail.example.com` after `--public-origin`
+with the `https` address your TLS reverse proxy serves, then:
+
+```sh
 docker compose up -d
 docker compose logs tagmail | grep "setup token"
 ```
 
-Put a TLS reverse proxy in front, open your address, and enter the setup
-token with a new owner password. The full steps, including the public
-origin the server needs, are in
-[deploy/docker/README.md](deploy/docker/README.md).
+Open your address and enter the setup token with a new owner password. The
+full steps are in [deploy/docker/README.md](deploy/docker/README.md).
 
 ## Documentation
 
