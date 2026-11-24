@@ -390,14 +390,21 @@ fn bench(opts: &Options, server: &Path, work: &Path) -> Result<()> {
     let sse_connected = !sse.reader.is_finished();
     let pass =
         sse_connected && window_max_kib * BYTES_PER_KIB <= opts.limit_mb * BYTES_PER_MB as u64;
-    let replica = bench_replica::measure(&running, pid, work);
+    let replica = bench_replica::measure(&mut running, pid, work);
     stop(&mut running);
     let (replica_json, replica_row) = match replica {
         Ok(cost) => (cost.json(), cost.summary()),
-        Err(e) => (
-            json!({ "error": format!("{e:#}") }),
-            format!("failed: {e:#}"),
-        ),
+        Err(e) => {
+            let log = fs::read_to_string(work.join("server.log")).unwrap_or_default();
+            let tail: Vec<&str> = log.lines().rev().take(LOG_TAIL_LINES).collect();
+            for line in tail.iter().rev() {
+                eprintln!("{line}");
+            }
+            (
+                json!({ "error": format!("{e:#}") }),
+                format!("failed: {e:#}"),
+            )
+        }
     };
     println!("replica bootstrap (not gated): {replica_row}");
     let sse_bytes = sse.reader.join().unwrap_or(0);

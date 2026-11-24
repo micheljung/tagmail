@@ -4,7 +4,7 @@
 //! imported by `tagmail-replica` as the desktop app does.
 
 use std::fs;
-use std::io::{Read as _, Write as _};
+use std::io::{ErrorKind, Read as _, Write as _};
 use std::net::TcpStream;
 use std::path::Path;
 use std::sync::Arc;
@@ -14,7 +14,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use tagmail_replica::{Layout, Phase, Replica, ServerClient, Settings};
 
-use crate::bench_rss::{Running, http, proc_status_kib, reset_peak_rss};
+use crate::bench_rss::{Running, check_alive, http, proc_status_kib, reset_peak_rss};
 
 const SNAPSHOT_READ_TIMEOUT: Duration = Duration::from_secs(120);
 const DEVICE_NAME: &str = "bench";
@@ -123,14 +123,21 @@ fn stream_snapshot(running: &Running, pid: u32, token: &str) -> Result<(u64, f64
             head.lines().next().unwrap_or("")
         );
     }
-    Ok((body_bytes, elapsed, proc_status_kib(pid, "VmHWM")?))
+    let peak = proc_status_kib(pid, "VmHWM").context("server VmHWM after the snapshot")?;
+    Ok((body_bytes, elapsed, peak))
 }
 
+/// Bytes of the files below `dir`; SQLite's journal and temp files may
+/// vanish while it walks.
 fn disk_bytes(dir: &Path) -> Result<u64> {
     let mut total = 0;
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
-        let meta = entry.metadata()?;
+        let meta = match entry.metadata() {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+        };
         total += if meta.is_dir() {
             disk_bytes(&entry.path())?
         } else {
@@ -148,10 +155,11 @@ fn bootstrap(running: &Running, token: &str, dir: &Path) -> Result<(f64, u64)> {
     runtime.block_on(async {
         let server = url::Url::parse(&format!("http://{}/", running.addr))?;
         let client = ServerClient::new(&server, Some(token.to_owned()))?;
-        let replica: Arc<Replica> =
-            Replica::open(Layout::new(dir), client, Settings::default()).await?;
+        let replica: Arc<Replica> = Replica::open(Layout::new(dir), client, Settings::default())
+            .await
+            .context("opening the replica")?;
         let started = Instant::now();
-        replica.rebootstrap().await?;
+        replica.rebootstrap().await.context("bootstrapping")?;
         let elapsed = started.elapsed().as_secs_f64();
         let records = match *replica.phase().borrow() {
             Phase::Bootstrapping { records } => records,
@@ -161,17 +169,21 @@ fn bootstrap(running: &Running, token: &str, dir: &Path) -> Result<(f64, u64)> {
     })
 }
 
-pub(crate) fn measure(running: &Running, pid: u32, work: &Path) -> Result<Cost> {
-    let token = pair(running)?;
-    let (ndjson_bytes, snapshot_seconds, server_peak_kib) = stream_snapshot(running, pid, &token)?;
+pub(crate) fn measure(running: &mut Running, pid: u32, work: &Path) -> Result<Cost> {
+    let token = pair(running).context("pairing")?;
+    let (ndjson_bytes, snapshot_seconds, server_peak_kib) =
+        stream_snapshot(running, pid, &token).context("streaming the snapshot")?;
+    check_alive(running).context("after the snapshot")?;
     let dir = work.join("replica-bench");
-    let (bootstrap_seconds, records) = bootstrap(running, &token, &dir)?;
+    let (bootstrap_seconds, records) =
+        bootstrap(running, &token, &dir).context("importing the snapshot")?;
+    check_alive(running).context("after the import")?;
     Ok(Cost {
         ndjson_bytes,
         snapshot_seconds,
         server_peak_kib,
         bootstrap_seconds,
         records,
-        replica_disk_bytes: disk_bytes(&dir)?,
+        replica_disk_bytes: disk_bytes(&dir).context("measuring the replica")?,
     })
 }
