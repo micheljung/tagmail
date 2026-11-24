@@ -51,10 +51,11 @@ class FakeContainer extends EventTarget {
 	}
 }
 
-async function setup(controlled: boolean, waiting?: FakeWorker) {
+async function setup(controlled: boolean, waiting?: FakeWorker, installing?: FakeWorker) {
 	vi.stubGlobal('location', new URL('https://mail.example.com/inbox'));
 	const container = new FakeContainer(controlled);
 	container.registration.waiting = waiting ?? null;
+	container.registration.installing = installing ?? null;
 	const updates: (() => void)[] = [];
 	const paths: string[] = [];
 	const reload = vi.fn();
@@ -118,6 +119,23 @@ describe('registerServiceWorker', () => {
 		const { updates } = await setup(true, waiting);
 		updates[0]();
 		expect(waiting.postMessage).toHaveBeenCalledWith({ type: 'skipWaiting' });
+	});
+
+	it('offers an update that was already installing when register() resolved', async () => {
+		const installing = new FakeWorker();
+		const { updates } = await setup(true, undefined, installing);
+		installing.moveTo('installed');
+		expect(updates).toHaveLength(1);
+		updates[0]();
+		expect(installing.postMessage).toHaveBeenCalledWith({ type: 'skipWaiting' });
+	});
+
+	it('offers no update for a first install already in progress at register()', async () => {
+		const installing = new FakeWorker();
+		const { container, updates } = await setup(false, undefined, installing);
+		container.controller = {};
+		installing.moveTo('installed');
+		expect(updates).toHaveLength(0);
 	});
 
 	it('navigates only to same-origin app paths', async () => {

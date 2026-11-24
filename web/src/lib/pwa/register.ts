@@ -48,15 +48,17 @@ export async function registerServiceWorker(
 			worker.postMessage({ type: 'skipWaiting' });
 		});
 
-	if (registration.waiting && container.controller) offer(registration.waiting);
-	registration.addEventListener('updatefound', () => {
-		const worker = registration.installing;
-		// WebKit can deliver "installed" after the first worker has already
-		// claimed the page, so whether this is an update is decided here.
-		const update = container.controller !== null;
-		worker?.addEventListener('statechange', () => {
-			if (worker.state === 'installed' && update) offer(worker);
+	// WebKit can deliver "installed" after the first worker has already
+	// claimed the page, so whether this is an update is decided up front.
+	const watch = (worker: ServiceWorker | null) => {
+		if (!worker || container.controller === null) return;
+		worker.addEventListener('statechange', () => {
+			if (worker.state === 'installed') offer(worker);
 		});
-	});
+	};
+
+	if (registration.waiting && container.controller) offer(registration.waiting);
+	watch(registration.installing);
+	registration.addEventListener('updatefound', () => watch(registration.installing));
 	return registration;
 }
