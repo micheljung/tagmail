@@ -98,6 +98,7 @@ impl Replica {
     ) -> Result<Arc<Replica>> {
         std::fs::create_dir_all(layout.root())?;
         let durable = Durable::open(&layout.durable())?;
+        layout.sweep();
         if durable.bind_server(client.server())? == Binding::Changed {
             tracing::warn!(server = %client.server(), "paired with another server; earlier unsent changes stay local");
         }
@@ -347,8 +348,8 @@ impl Replica {
         });
     }
 
-    /// Imports a fresh snapshot and swaps it in; the old replica stays
-    /// readable until the import completed.
+    /// Imports a fresh snapshot into a new directory and swaps it in. The
+    /// old replica serves until the swap and stays installed on any error.
     pub async fn rebootstrap(&self) -> Result<()> {
         let _guard = self.sync_lock.lock().await;
         self.set_phase(Phase::Bootstrapping { records: 0 });
@@ -358,52 +359,83 @@ impl Replica {
         self.set_phase(Phase::Bootstrapping {
             records: snapshot.records,
         });
-        let old = self.store.write().unwrap_or_else(|e| e.into_inner()).take();
+        let (store, meta) = match self.open_import(&snapshot).await {
+            Ok(opened) => opened,
+            Err(e) => {
+                if let Err(rm) = db::remove_dir(&snapshot.dir) {
+                    tracing::debug!(error = %rm, "removing a rejected import");
+                }
+                return Err(e);
+            }
+        };
+        store.set_feed(Arc::clone(&self.feed));
+        let head = store.cache().head().await?;
+        let old = self
+            .store
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .replace(Arc::new(store));
+        *self.cursor.lock().unwrap_or_else(|e| e.into_inner()) = Some(meta.cursor);
+        self.feed.publish(head);
+        *self.last_sweep.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+        let _ = self.events.send(ReplicaEvent::Replaced);
         if let Some(old) = old {
-            close_when_released(old).await;
+            let layout = self.layout.clone();
+            tokio::spawn(async move {
+                if close_when_released(old).await {
+                    let _ = tokio::task::spawn_blocking(move || layout.sweep()).await;
+                }
+            });
         }
-        self.layout.install_tmp()?;
-        let dbs = match db::open(
-            &self.layout,
+        self.durable.recheck_all_sent()?;
+        self.refresh_overlay(None, Vec::new()).await
+    }
+
+    async fn open_import(
+        &self,
+        snapshot: &bootstrap::Snapshot,
+    ) -> Result<(SqliteStore, db::ReplicaMeta)> {
+        let dbs = match db::open_at(
+            &snapshot.dir,
             Expected::current(),
             Some(snapshot.meta.server_epoch),
         )? {
-            Opened::Ready(dbs) => dbs,
-            Opened::NeedsBootstrap(why) => {
+            Ok(dbs) => dbs,
+            Err(why) => {
                 return Err(Error::Corrupt(format!("fresh replica rejected: {why:?}")));
             }
         };
         let (store, meta) = dbs.into_store().await?;
-        store.set_feed(Arc::clone(&self.feed));
-        self.feed.publish(store.cache().head().await?);
-        *self.cursor.lock().unwrap_or_else(|e| e.into_inner()) = Some(meta.cursor);
-        *self.store.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(store));
-        *self.last_sweep.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
-        let _ = self.events.send(ReplicaEvent::Replaced);
-        self.durable.recheck_all_sent()?;
-        self.refresh_overlay(None, Vec::new()).await
+        if let Err(e) = self.layout.install(&snapshot.dir) {
+            if let Err(close) = store.close().await {
+                tracing::debug!(error = %close, "closing a rejected import");
+            }
+            return Err(e);
+        }
+        Ok((store, meta))
     }
 }
 
 /// Waits briefly for in-flight readers before closing; files of a store
-/// still referenced close when its last reader lets go.
-async fn close_when_released(mut store: Arc<SqliteStore>) {
+/// still referenced close when its last reader lets go. Whether it closed.
+async fn close_when_released(mut store: Arc<SqliteStore>) -> bool {
     let deadline = Instant::now() + CLOSE_WAIT;
     loop {
         match Arc::try_unwrap(store) {
             Ok(owned) => {
                 if let Err(e) = owned.close().await {
                     tracing::warn!(error = %e, "closing the old replica");
+                    return false;
                 }
-                return;
+                return true;
             }
             Err(shared) if Instant::now() < deadline => {
                 store = shared;
                 tokio::time::sleep(CLOSE_POLL).await;
             }
             Err(_) => {
-                tracing::warn!("old replica still in use; closing it on last release");
-                return;
+                tracing::debug!("old replica still in use; closing it on last release");
+                return false;
             }
         }
     }

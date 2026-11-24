@@ -15,9 +15,11 @@ use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
 
-const REPLICA_DIR: &str = "replica";
-const TMP_DIR: &str = "replica.tmp";
-const OLD_DIR: &str = "replica.old";
+/// Before versioned directories: the replica's only directory.
+const LEGACY_DIR: &str = "replica";
+/// Names the current replica directory; replaced atomically on install.
+const POINTER_FILE: &str = "replica.current";
+const DIR_PREFIX: &str = "replica.";
 const DURABLE_FILE: &str = "replica-durable.db";
 const CACHE_FILE: &str = "cache.db";
 const CONFIG_FILE: &str = "config.db";
@@ -42,43 +44,95 @@ impl Layout {
         &self.root
     }
 
+    /// The current replica directory. Each bootstrap imports into a new
+    /// one, so a store still open on an older one is never moved or
+    /// overwritten.
     pub fn replica(&self) -> PathBuf {
-        self.root.join(REPLICA_DIR)
+        match std::fs::read_to_string(self.root.join(POINTER_FILE)) {
+            Ok(name) if is_replica_dir(name.trim()) => self.root.join(name.trim()),
+            _ => self.root.join(LEGACY_DIR),
+        }
     }
 
-    /// Where a bootstrap imports before it replaces [`Layout::replica`].
-    pub fn replica_tmp(&self) -> PathBuf {
-        self.root.join(TMP_DIR)
+    /// Whether a bootstrap completed and its directory is the replica.
+    pub fn installed(&self) -> bool {
+        self.root.join(POINTER_FILE).exists()
+    }
+
+    /// A new directory name for an import; not created.
+    pub fn fresh_replica(&self) -> Result<PathBuf> {
+        let mut bytes = [0u8; 8];
+        getrandom::fill(&mut bytes).map_err(|e| Error::Corrupt(format!("random: {e}")))?;
+        let name: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        Ok(self.root.join(format!("{DIR_PREFIX}{name}")))
     }
 
     pub fn durable(&self) -> PathBuf {
         self.root.join(DURABLE_FILE)
     }
 
-    /// Replaces the replica with a completed import in `replica.tmp`. The
-    /// old replica stays readable up to the rename.
-    pub fn install_tmp(&self) -> Result<()> {
-        let old = self.root.join(OLD_DIR);
-        remove_dir(&old)?;
-        let current = self.replica();
-        if current.exists() {
-            std::fs::rename(&current, &old)?;
+    /// Makes `dir`, a completed import, the replica in one rename.
+    pub fn install(&self, dir: &Path) -> Result<()> {
+        let name = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|n| is_replica_dir(n) && dir.parent() == Some(self.root.as_path()))
+            .ok_or_else(|| Error::Corrupt(format!("not a replica directory: {}", dir.display())))?;
+        let tmp = self.root.join(format!("{POINTER_FILE}.tmp"));
+        {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(name.as_bytes())?;
+            f.sync_all()?;
         }
-        std::fs::rename(self.replica_tmp(), &current)?;
-        remove_dir(&old)
+        std::fs::rename(&tmp, self.root.join(POINTER_FILE))?;
+        Ok(())
     }
 
+    /// Forgets the replica. Its files go at once where nothing holds them
+    /// open, otherwise at a later [`Layout::sweep`].
     pub fn discard(&self) -> Result<()> {
-        remove_dir(&self.replica())?;
-        self.discard_tmp()
+        match std::fs::remove_file(self.root.join(POINTER_FILE)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+        self.sweep_except(None);
+        Ok(())
     }
 
-    pub fn discard_tmp(&self) -> Result<()> {
-        remove_dir(&self.replica_tmp())
+    /// Removes replica directories other than the current one; best effort,
+    /// as a store being closed may still hold some.
+    pub fn sweep(&self) {
+        let current = self.installed().then(|| self.replica());
+        self.sweep_except(current.as_deref());
+    }
+
+    fn sweep_except(&self, keep: Option<&Path>) {
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ours = entry
+                .file_name()
+                .to_str()
+                .is_some_and(|n| n == LEGACY_DIR || is_replica_dir(n));
+            if !ours || !path.is_dir() || Some(path.as_path()) == keep {
+                continue;
+            }
+            if let Err(e) = remove_dir(&path) {
+                tracing::debug!(dir = %path.display(), error = %e, "replica directory kept for now");
+            }
+        }
     }
 }
 
-fn remove_dir(dir: &Path) -> Result<()> {
+fn is_replica_dir(name: &str) -> bool {
+    name.strip_prefix(DIR_PREFIX)
+        .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
+pub(crate) fn remove_dir(dir: &Path) -> Result<()> {
     match std::fs::remove_dir_all(dir) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
@@ -182,16 +236,26 @@ pub fn open(
     expected: Expected,
     server_epoch: Option<CacheEpoch>,
 ) -> Result<Opened> {
-    let dir = layout.replica();
-    let verdict = inspect(&dir, expected, server_epoch)?;
-    let meta = match verdict {
-        Ok(meta) => meta,
+    match open_at(&layout.replica(), expected, server_epoch)? {
+        Ok(dbs) => Ok(Opened::Ready(dbs)),
         Err(discard) => {
             layout.discard()?;
-            return Ok(Opened::NeedsBootstrap(discard));
+            Ok(Opened::NeedsBootstrap(discard))
         }
+    }
+}
+
+/// Opens the replica in `dir` if it matches; leaves the files alone.
+pub fn open_at(
+    dir: &Path,
+    expected: Expected,
+    server_epoch: Option<CacheEpoch>,
+) -> Result<std::result::Result<LocalDbs, Discard>> {
+    let meta = match inspect(dir, expected, server_epoch)? {
+        Ok(meta) => meta,
+        Err(discard) => return Ok(Err(discard)),
     };
-    Ok(Opened::Ready(LocalDbs {
+    Ok(Ok(LocalDbs {
         cache: CacheDb::open(&dir.join(CACHE_FILE))?,
         config: ConfigDb::open(&dir.join(CONFIG_FILE))?,
         blobs: BlobStore::open(&dir.join(BLOBS_DIR))?,
@@ -413,14 +477,17 @@ mod tests {
             },
             ..meta()
         };
-        let (cache, config, _) = create(&layout.replica_tmp()).unwrap();
+        let fresh = layout.fresh_replica().unwrap();
+        let (cache, config, _) = create(&fresh).unwrap();
         cache.write(move |tx| newer.write(tx)).await.unwrap();
         cache.close().await.unwrap();
         config.close().await.unwrap();
 
-        layout.install_tmp().unwrap();
+        layout.install(&fresh).unwrap();
+        layout.sweep();
 
-        assert!(!layout.replica_tmp().exists());
+        assert_eq!(layout.replica(), fresh);
+        assert!(!dir.path().join(LEGACY_DIR).exists());
         match open(&layout, Expected::current(), Some(EPOCH)).unwrap() {
             Opened::Ready(dbs) => {
                 assert_eq!(dbs.meta.cursor.seq, 99);

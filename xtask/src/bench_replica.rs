@@ -290,7 +290,7 @@ pub(crate) fn desktop(
     let result = (|| {
         let started = Instant::now();
         let replica = Layout::new(&data);
-        while !(replica.replica().join("cache.db").exists() && !replica.replica_tmp().exists()) {
+        while !replica.installed() {
             if let Some(status) = child.try_wait()? {
                 bail!("the desktop app exited with {status}");
             }

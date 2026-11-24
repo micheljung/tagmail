@@ -1,6 +1,8 @@
-//! Full bootstrap (§3): the snapshot is imported into `replica.tmp/`, which
-//! replaces the replica only once the stream ended complete. Not resumable.
+//! Full bootstrap (§3): the snapshot is imported into a new replica
+//! directory, which replaces the replica only once the stream ended
+//! complete. Not resumable.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use reqwest::Method;
@@ -13,22 +15,24 @@ use crate::db::{self, Layout, ReplicaMeta};
 use crate::error::{Error, Result};
 use crate::import::{RecordReader, Target, import};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
+    /// The import, for [`Layout::install`].
+    pub dir: PathBuf,
     pub meta: ReplicaMeta,
     pub window_start: i64,
     pub records: u64,
 }
 
-/// Imports a snapshot into [`Layout::replica_tmp`]; install it with
-/// [`Layout::install_tmp`] after closing the current replica. On error the
-/// temporary copy is removed and the current replica is untouched.
+/// Imports a snapshot into a new directory; install it with
+/// [`Layout::install`]. On error the import is removed and the current
+/// replica is untouched.
 pub async fn import_snapshot(
     client: &ServerClient,
     layout: &Layout,
     window_days: u32,
 ) -> Result<Snapshot> {
-    let tmp = layout.replica_tmp();
+    let tmp = layout.fresh_replica()?;
     let (cache, config, blobs) = db::create(&tmp)?;
     let blobs = Arc::new(blobs);
     let result = async {
@@ -64,6 +68,7 @@ pub async fn import_snapshot(
             })
             .await?;
         Ok(Snapshot {
+            dir: tmp.clone(),
             meta,
             window_start: header.window_start,
             records: imported.records,
@@ -74,7 +79,7 @@ pub async fn import_snapshot(
     config.close().await?;
     drop(blobs);
     if result.is_err() {
-        layout.discard_tmp()?;
+        db::remove_dir(&tmp)?;
     }
     result
 }
@@ -223,6 +228,14 @@ mod tests {
         }
     }
 
+    fn replica_dirs(layout: &Layout) -> usize {
+        std::fs::read_dir(layout.root())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .count()
+    }
+
     #[tokio::test]
     async fn imports_a_snapshot_readable_through_the_store() {
         let (url, mut heads) = canned(vec![(200, snapshot(7, true))]).await;
@@ -231,7 +244,7 @@ mod tests {
         let layout = Layout::new(dir.path());
 
         let snap = import_snapshot(&client, &layout, 30).await.unwrap();
-        layout.install_tmp().unwrap();
+        layout.install(&snap.dir).unwrap();
 
         assert_eq!(snap.meta.cursor.seq, 7);
         assert_eq!(snap.records, 7);
@@ -261,13 +274,13 @@ mod tests {
         let client = ServerClient::new(&url, None).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let layout = Layout::new(dir.path());
-        import_snapshot(&client, &layout, 90).await.unwrap();
-        layout.install_tmp().unwrap();
+        let snap = import_snapshot(&client, &layout, 90).await.unwrap();
+        layout.install(&snap.dir).unwrap();
 
         let err = import_snapshot(&client, &layout, 90).await.unwrap_err();
 
         assert!(matches!(err, Error::Incomplete(_)), "{err:?}");
-        assert!(!layout.replica_tmp().exists());
+        assert_eq!(replica_dirs(&layout), 1);
         let (store, meta) = open_store(&layout).await;
         assert_eq!(meta.cursor.seq, 7);
         store.close().await.unwrap();
@@ -297,6 +310,6 @@ mod tests {
             "{:?}",
             result.err()
         );
-        assert!(!layout.replica_tmp().exists());
+        assert_eq!(replica_dirs(&layout), 0);
     }
 }
