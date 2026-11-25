@@ -70,6 +70,30 @@ async fn login_enables_qresync_and_lists_special_use() {
 }
 
 #[tokio::test]
+async fn personal_namespace_needs_the_capability() {
+    let steps = with(
+        login("NAMESPACE"),
+        vec![cmd(
+            "NAMESPACE",
+            &[
+                "* NAMESPACE ((\"INBOX.\" \".\")) NIL ((\"#shared.\" \".\"))",
+                "{tag} OK done",
+            ],
+        )],
+    );
+    let (mut s, server) = session(steps, &config()).await;
+    assert_eq!(
+        s.personal_namespace().await.unwrap().as_deref(),
+        Some("INBOX.")
+    );
+    server.await.unwrap();
+
+    let (mut s, server) = session(login(""), &config()).await;
+    assert_eq!(s.personal_namespace().await.unwrap(), None);
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn authenticate_plain_with_and_without_sasl_ir() {
     for caps in ["AUTH=PLAIN SASL-IR", "AUTH=PLAIN"] {
         let (s, server) = session(login(caps), &config()).await;

@@ -84,6 +84,9 @@ impl ImapSession for SinkSession {
     async fn create_mailbox(&mut self, _: &str) -> Result<()> {
         unsupported("CREATE")
     }
+    async fn personal_namespace(&mut self) -> Result<Option<String>> {
+        unsupported("NAMESPACE")
+    }
     async fn select(&mut self, name: &str, options: SelectOptions) -> Result<SelectedMailbox> {
         self.selected = Some(name.to_owned());
         Ok(SelectedMailbox {

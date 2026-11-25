@@ -669,6 +669,40 @@ async fn trash_and_junk_are_created_under_the_inbox_namespace() {
     f.engine.shutdown().await;
 }
 
+/// A new Hetzner account: only INBOX, so no other folder shows where the
+/// namespace is; only NAMESPACE does.
+#[tokio::test]
+async fn trash_is_created_in_the_personal_namespace() {
+    let srv = inbox_namespace_server();
+    {
+        let mut s = lock(&srv);
+        s.mailboxes.retain(|m| m.name == "INBOX");
+        s.namespace = Some("INBOX.".into());
+        s.append("INBOX", msg("fresh@x", "Bin me", 1_790_000_000));
+    }
+    let f = fixture(&srv).await;
+    f.engine.start_all().await.unwrap();
+    eventually("initial sync", || f.all_live()).await;
+    let thread = f.thread_of("fresh@x").await;
+
+    created(
+        f.engine
+            .queue_op(op("trash-fresh", OpKind::Trash, thread))
+            .await
+            .unwrap(),
+    );
+    eventually("done", || async {
+        f.status("trash-fresh").await == OpStatusDto::Done
+    })
+    .await;
+    {
+        let mut s = lock(&srv);
+        assert!(s.uid_of("INBOX.Trash", "fresh@x").is_some());
+        assert!(s.uid_of("INBOX", "fresh@x").is_none());
+    }
+    f.engine.shutdown().await;
+}
+
 #[tokio::test]
 async fn move_and_trash_fail_visibly_without_a_destination() {
     let srv = server(CAPS);

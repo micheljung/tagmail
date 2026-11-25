@@ -60,6 +60,10 @@ pub trait ImapSession: Send {
 
     fn create_mailbox(&mut self, name: &str) -> impl Future<Output = Result<()>> + Send;
 
+    /// The prefix of the personal namespace (RFC 2342), e.g. `INBOX.`;
+    /// `None` without NAMESPACE.
+    fn personal_namespace(&mut self) -> impl Future<Output = Result<Option<String>>> + Send;
+
     /// SELECT or EXAMINE. With QRESYNC parameters the result carries
     /// `VANISHED (EARLIER)` UIDs and the messages changed since the modseq.
     fn select(
@@ -685,6 +689,21 @@ impl ImapSession for TokioSession {
         })
         .await?;
         Ok(())
+    }
+
+    async fn personal_namespace(&mut self) -> Result<Option<String>> {
+        if !self.caps.has("NAMESPACE") {
+            return Ok(None);
+        }
+        let (out, _) = self.run(CommandBody::Namespace).await?;
+        let prefix = out.data.iter().find_map(|d| match d {
+            Data::Namespace { personal, .. } => personal
+                .first()
+                .map(|n| String::from_utf8_lossy(n.prefix.as_ref()).into_owned()),
+            _ => None,
+        });
+        self.split_events(out, |_| false);
+        Ok(prefix)
     }
 
     async fn select(&mut self, name: &str, options: SelectOptions) -> Result<SelectedMailbox> {
