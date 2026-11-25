@@ -164,6 +164,9 @@ impl ImapSession for Counted {
     async fn create_mailbox(&mut self, name: &str) -> Result<()> {
         self.inner.create_mailbox(name).await
     }
+    async fn personal_namespace(&mut self) -> Result<Option<String>> {
+        self.inner.personal_namespace().await
+    }
     async fn select(&mut self, name: &str, options: SelectOptions) -> Result<SelectedMailbox> {
         self.inner.select(name, options).await
     }

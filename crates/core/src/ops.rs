@@ -298,12 +298,16 @@ where
     })
 }
 
-/// The name to create the missing folder `leaf` under: below `INBOX` when
-/// most of the account's other folders live there, else top-level.
-pub fn new_folder_name<'a, I>(leaf: &str, mailboxes: I) -> String
+/// The name to create the missing folder `leaf` under: in the server's
+/// personal `namespace`; without one, below `INBOX` when most of the
+/// account's other folders live there, else top-level.
+pub fn new_folder_name<'a, I>(leaf: &str, namespace: Option<&str>, mailboxes: I) -> String
 where
     I: IntoIterator<Item = (&'a str, Option<char>)>,
 {
+    if let Some(prefix) = namespace.filter(|p| !p.is_empty()) {
+        return format!("{prefix}{leaf}");
+    }
     let (mut nested, mut top) = (0usize, 0usize);
     let mut delimiter = None;
     for (name, d) in mailboxes {
@@ -867,15 +871,29 @@ mod tests {
             ("INBOX.Sent", Some('.')),
             ("INBOX.Drafts", Some('.')),
         ];
-        assert_eq!(new_folder_name("Trash", dovecot), "INBOX.Trash");
+        assert_eq!(new_folder_name("Trash", None, dovecot), "INBOX.Trash");
         let flat = [
             ("INBOX", Some('/')),
             ("Sent", Some('/')),
             ("INBOX/Receipts", Some('/')),
             ("Drafts", Some('/')),
         ];
-        assert_eq!(new_folder_name("Trash", flat), "Trash");
-        assert_eq!(new_folder_name("Junk", [("INBOX", Some('/'))]), "Junk");
+        assert_eq!(new_folder_name("Trash", None, flat), "Trash");
+        assert_eq!(
+            new_folder_name("Junk", None, [("INBOX", Some('/'))]),
+            "Junk"
+        );
+    }
+
+    #[test]
+    fn new_folders_go_into_the_personal_namespace() {
+        let inbox_only = [("INBOX", Some('.'))];
+        assert_eq!(
+            new_folder_name("Trash", Some("INBOX."), inbox_only),
+            "INBOX.Trash"
+        );
+        let flat = [("INBOX", Some('/')), ("Sent", Some('/'))];
+        assert_eq!(new_folder_name("Trash", Some(""), flat), "Trash");
     }
 
     fn cand(name: &str, special_use: Option<SpecialUse>, uidvalidity: Option<u32>) -> Candidate {

@@ -1169,7 +1169,7 @@ impl Mailboxes {
             .map(str::to_owned)
     }
 
-    /// Creates the folder `leaf` where the account keeps its folders and
+    /// Creates the folder `leaf` in the account's personal namespace and
     /// reloads the mailboxes.
     async fn create<S: ImapSession>(
         &mut self,
@@ -1177,8 +1177,10 @@ impl Mailboxes {
         ctx: &Ctx,
         leaf: &str,
     ) -> std::result::Result<(), OpError> {
+        let namespace = s.personal_namespace().await?;
         let name = ops::new_folder_name(
             leaf,
+            namespace.as_deref(),
             self.candidates
                 .iter()
                 .map(|c| (c.name.as_str(), c.delimiter)),

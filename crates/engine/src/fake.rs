@@ -173,6 +173,8 @@ pub struct FakeServer {
     pub reject_login: bool,
     /// The hierarchy delimiter LIST reports.
     pub delimiter: char,
+    /// The personal namespace prefix NAMESPACE reports.
+    pub namespace: Option<String>,
     /// CREATEs fail with NO.
     pub fail_creates: bool,
     /// APPENDs fail with NO.
@@ -271,6 +273,7 @@ pub fn server(caps: &[&str]) -> Shared {
         fail_after_full_fetches: None,
         reject_login: false,
         delimiter: '/',
+        namespace: None,
         fail_creates: false,
         fail_appends: false,
         fail_stores: false,
@@ -559,12 +562,26 @@ impl ImapSession for FakeSession {
             .collect())
     }
 
+    async fn personal_namespace(&mut self) -> Result<Option<String>> {
+        Ok(self.server().namespace.clone())
+    }
+
     async fn create_mailbox(&mut self, name: &str) -> Result<()> {
         let mut server = self.server();
         if server.fail_creates {
             return Err(Error::No {
                 code: None,
                 text: "create refused".into(),
+            });
+        }
+        if let Some(prefix) = server.namespace.as_deref()
+            && !name.starts_with(prefix)
+        {
+            return Err(Error::No {
+                code: None,
+                text: format!(
+                    "Client tried to access nonexistent namespace. (Mailbox name should probably be prefixed with: {prefix})"
+                ),
             });
         }
         if server.mailboxes.iter().any(|m| m.name == name) {
