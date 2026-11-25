@@ -4,6 +4,7 @@
 
 pub mod api;
 pub mod auth_dto;
+pub mod calendar_dto;
 pub mod compose;
 pub mod compose_dto;
 pub mod desktop_dto;
@@ -11,6 +12,7 @@ pub mod dto;
 pub mod events;
 pub mod id_index;
 pub mod identities;
+mod invitation;
 pub mod messages;
 pub mod mime;
 pub mod ops_dto;

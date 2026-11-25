@@ -7,6 +7,7 @@ use tagmail_api_core::dto::{
     MailboxDto, SpecialUseDto, TestStepDto, ThreadRowDto,
 };
 use tagmail_api_core::id_index;
+use tagmail_api_core::mime::reduce::CalendarParts;
 use tagmail_api_core::ops_dto::{
     LabelChangeDto, LabelJobDto, LabelPatchDto, NewLabelDto, OpDto, OpKindDto, OpStatusDto,
 };
@@ -247,6 +248,10 @@ impl Store for MemStore {
         Ok(None)
     }
 
+    async fn calendar_source(&self, _: MessageRowId) -> StoreResult<Option<CalendarParts>> {
+        Ok(None)
+    }
+
     async fn url_keys(&self) -> StoreResult<UrlKeys> {
         Err("no keys".into())
     }
@@ -407,6 +412,12 @@ async fn version_reports_api_and_min_client() {
     let body = json_body(&resp);
     assert_eq!(body["api"], json!({ "major": 1, "minor": 3 }));
     assert_eq!(body["minClient"], json!({ "major": 1, "minor": 0 }));
+    let features = if cfg!(feature = "calendar") {
+        json!(["calendar"])
+    } else {
+        json!([])
+    };
+    assert_eq!(body["features"], features);
     assert_eq!(resp.header("x-content-type-options"), Some("nosniff"));
     assert!(resp.header("content-security-policy").is_some());
 }

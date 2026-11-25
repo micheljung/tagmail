@@ -20,6 +20,10 @@ pub struct VersionDto {
     pub api: ApiVersion,
     pub min_client: ApiVersion,
     pub server: String,
+    /// Optional features this server was built with, e.g. `calendar`;
+    /// absent from older servers.
+    #[serde(default)]
+    pub features: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
@@ -492,6 +496,9 @@ pub struct MessageDto {
     /// A sender is on the "always show images" list.
     pub images_allowed: bool,
     pub parts: Vec<PartDto>,
+    /// An iCalendar part was seen at sync; `GET /api/messages/{id}/invitation`
+    /// reads it.
+    pub has_invitation: bool,
 }
 
 /// One message of `GET /api/threads/{id}`.

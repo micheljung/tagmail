@@ -1,0 +1,49 @@
+{
+  "autoApply": "none",
+  "events": [
+    {
+      "allDay": false,
+      "attendees": [
+        {
+          "email": "bob@example.org",
+          "name": "Bob Tester",
+          "partstat": "needs_action"
+        },
+        {
+          "email": "erin@contoso.example",
+          "name": "Erin Placeholder",
+          "partstat": "needs_action"
+        },
+        {
+          "email": "room-zug-402@contoso.example",
+          "name": "Room Zug4.02",
+          "partstat": "accepted"
+        }
+      ],
+      "cancelled": false,
+      "description": "Weekly sync on the migration.\n________________________________________________________________________________\nMicrosoft Teams meeting\nJoin on your computer, mobile app or room device\nClick here to join the meeting<https://teams.microsoft.com/l/meetup-join/19%3ameeting_EXAMPLE%40thread.v2/0>\nMeeting ID: 123 456 789 012\nPasscode: abC1dE\n________________________________________________________________________________\n",
+      "end": "2026-12-15T14:15:00Z",
+      "location": "Microsoft Teams Meeting",
+      "organizer": {
+        "altEmail": null,
+        "email": "dana.sample@contoso.example",
+        "name": "Dana Sample"
+      },
+      "recurrence": null,
+      "recurrenceId": null,
+      "start": "2026-12-15T13:30:00Z",
+      "summary": "Migration sync",
+      "tzid": "W. Europe Standard Time",
+      "uid": "040000008200E00074C5B7101A82E00800000000B0C1D2E3F4A5DB01000000000000000010000000A1B2C3D4E5F60718293A4B5C6D7E8F90",
+      "url": null
+    }
+  ],
+  "method": "request",
+  "outdated": false,
+  "scheduling": null,
+  "senderAuth": "untrusted_config",
+  "stored": null,
+  "target": null,
+  "tooLarge": false,
+  "truncated": false
+}

@@ -84,6 +84,7 @@ async fn record(running: &Running, msgid: &str) -> MessageRecord {
         unread: true,
         starred: false,
         has_attachment: false,
+        has_calendar: false,
     }
 }
 

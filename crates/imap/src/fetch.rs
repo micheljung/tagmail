@@ -14,6 +14,7 @@ use imap_next::imap_types::fetch::{
 use imap_next::imap_types::flag::FlagFetch;
 use imap_next::imap_types::mailbox::Mailbox;
 use imap_next::imap_types::sequence::{SeqOrUid, Sequence, SequenceSet};
+use mail_parser::Charset;
 
 use crate::caps::{FetchAttr, FetchPlan, FetchSpec};
 use crate::error::{Error, Result};
@@ -99,6 +100,85 @@ fn param<'a>(params: &'a [(IString<'_>, IString<'_>)], name: &str) -> Option<&'a
         .map(|(_, v)| v)
 }
 
+/// An RFC 2231 parameter as UTF-8: `name*`, else the continuations
+/// `name*0`, `name*1*`, ... joined in order, percent-decoded where marked
+/// and converted from the declared charset.
+fn extended_param(params: &[(IString<'_>, IString<'_>)], name: &str) -> Option<Vec<u8>> {
+    let suffix = |key: &[u8]| -> Option<String> {
+        let key = std::str::from_utf8(key).ok()?;
+        let head = key.get(..name.len())?;
+        head.eq_ignore_ascii_case(name)
+            .then(|| key[name.len()..].strip_prefix('*').map(str::to_owned))
+            .flatten()
+    };
+    let mut segments: Vec<(u32, bool, &[u8])> = Vec::new();
+    for (k, v) in params {
+        let Some(rest) = suffix(k.as_ref()) else {
+            continue;
+        };
+        if rest.is_empty() {
+            segments = vec![(0, true, v.as_ref())];
+            break;
+        }
+        let (index, encoded) = match rest.strip_suffix('*') {
+            Some(index) => (index, true),
+            None => (rest.as_str(), false),
+        };
+        if let Ok(index) = index.parse() {
+            segments.push((index, encoded, v.as_ref()));
+        }
+    }
+    segments.sort_by_key(|(index, _, _)| *index);
+    let mut charset = None;
+    let mut out = Vec::new();
+    for (i, (_, encoded, value)) in segments.into_iter().enumerate() {
+        if !encoded {
+            out.extend_from_slice(value);
+            continue;
+        }
+        let mut value = value;
+        if i == 0 {
+            let mut fields = value.splitn(3, |b| *b == b'\'');
+            if let (Some(declared), Some(_), Some(rest)) =
+                (fields.next(), fields.next(), fields.next())
+            {
+                charset = Charset::from_label(declared);
+                value = rest;
+            }
+        }
+        out.extend(percent_decode(value));
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(match charset {
+        Some(charset) => charset.decode(&out).into_owned().into_bytes(),
+        None => out,
+    })
+}
+
+fn percent_decode(value: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(value.len());
+    let mut i = 0;
+    while i < value.len() {
+        let hex = value
+            .get(i + 1..i + 3)
+            .and_then(|h| std::str::from_utf8(h).ok())
+            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (value[i], hex) {
+            (b'%', Some(byte)) => {
+                out.push(byte);
+                i += 3;
+            }
+            (b, _) => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 fn collect_parts(body: &BodyStructure<'_>, prefix: &str, out: &mut Vec<PartInfo>) {
     match body {
         BodyStructure::Single {
@@ -123,9 +203,12 @@ fn collect_parts(body: &BodyStructure<'_>, prefix: &str, out: &mut Vec<PartInfo>
                 .and_then(|e| e.tail.as_ref())
                 .and_then(|d| d.disposition.as_ref());
             let filename = disposition
-                .and_then(|(_, p)| param(p, "filename"))
-                .or_else(|| param(params, "name"))
-                .map(|v| v.as_ref().to_vec());
+                .and_then(|(_, p)| {
+                    extended_param(p, "filename")
+                        .or_else(|| param(p, "filename").map(|v| v.as_ref().to_vec()))
+                })
+                .or_else(|| extended_param(params, "name"))
+                .or_else(|| param(params, "name").map(|v| v.as_ref().to_vec()));
             out.push(PartInfo {
                 section,
                 mime_type,
@@ -395,6 +478,46 @@ mod tests {
             ("1.1", Some("utf-8"), "quoted-printable")
         );
         assert_eq!(body.parts[2].filename.as_deref(), Some(&b"a.pdf"[..]));
+
+        let extended = decode_fetch(
+            b"* 1 FETCH (UID 1 BODYSTRUCTURE ((\"application\" \"octet-stream\" (\"name*\" \"utf-8''Termin%20A.ics\") NIL NIL \"base64\" 10 NIL NIL NIL NIL)\
+              (\"application\" \"octet-stream\" NIL NIL NIL \"base64\" 10 NIL (\"attachment\" (\"filename*0*\" \"utf-8''Ter%C3%A9\" \"filename*1\" \"min.ics\")) NIL NIL) \
+              \"mixed\" (\"boundary\" \"x\") NIL NIL NIL))\r\n",
+        );
+        let names: Vec<_> = extended
+            .body
+            .unwrap()
+            .parts
+            .into_iter()
+            .map(|p| p.filename)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                Some(b"Termin A.ics".to_vec()),
+                Some("Terémin.ics".as_bytes().to_vec())
+            ]
+        );
+
+        let preferred = decode_fetch(
+            b"* 1 FETCH (UID 1 BODYSTRUCTURE ((\"application\" \"octet-stream\" (\"name\" \"plain.bin\" \"name*\" \"utf-8''real.ics\" \"name*0*\" \"utf-8''other\") NIL NIL \"base64\" 10 NIL NIL NIL NIL)\
+              (\"application\" \"octet-stream\" NIL NIL NIL \"base64\" 10 NIL (\"attachment\" (\"filename\" \"x.bin\" \"filename*\" \"iso-8859-1'fr'Caf%E9.ics\")) NIL NIL) \
+              \"mixed\" (\"boundary\" \"x\") NIL NIL NIL))\r\n",
+        );
+        let names: Vec<_> = preferred
+            .body
+            .unwrap()
+            .parts
+            .into_iter()
+            .map(|p| p.filename)
+            .collect();
+        assert_eq!(
+            names,
+            [
+                Some(b"real.ics".to_vec()),
+                Some("Café.ics".as_bytes().to_vec())
+            ]
+        );
 
         let single = decode_fetch(
             b"* 1 FETCH (BODYSTRUCTURE (\"text\" \"plain\" (\"charset\" \"us-ascii\") NIL NIL \"7bit\" 10 1 NIL NIL NIL NIL))\r\n",

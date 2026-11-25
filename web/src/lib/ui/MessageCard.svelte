@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { addressList, displayName, fileSize, fullDate, listDate } from '../format';
 	import { api, downloadUrl, type MessageDto, type ThreadMessageDto } from '../transport';
+	import InvitationCard from '../calendar/InvitationCard.svelte';
 	import { errorText } from './errors';
 	import Icon from './Icon.svelte';
 	import MessageFrame from './MessageFrame.svelte';
@@ -115,6 +116,7 @@
 				</div>
 			{/if}
 			{#if detail}
+				{#if detail.hasInvitation}<InvitationCard messageId={message.id} />{/if}
 				<MessageFrame
 					messageId={message.id}
 					images={showImages || detail.imagesAllowed}

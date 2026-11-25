@@ -9,6 +9,8 @@ use tagmail_imap::{Address, MessageMeta, PartInfo};
 
 /// Characters kept in `message.snippet`.
 pub const SNIPPET_CHARS: usize = 200;
+/// Keyword some servers set on messages with a calendar part.
+const HAS_CAL_KEYWORD: &str = "$has_cal";
 
 /// Flags and keywords of one location.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +43,8 @@ pub struct NewMessage {
     pub snippet: Option<String>,
     pub size: u32,
     pub has_attachment: bool,
+    /// From BODYSTRUCTURE, or the server's `$has_cal` hint.
+    pub has_calendar: bool,
 }
 
 impl NewMessage {
@@ -98,7 +102,14 @@ fn location_state(uid: u32, meta: &MessageMeta) -> LocationState {
 pub fn fetched(meta: &MessageMeta) -> Option<Fetched> {
     let uid = meta.uid?.0;
     let location = location_state(uid, meta);
-    let message = meta.envelope.as_ref().map(|_| new_message(meta));
+    let message = meta.envelope.as_ref().map(|_| {
+        let mut message = new_message(meta);
+        message.has_calendar |= location
+            .keywords
+            .iter()
+            .any(|k| k.as_str().eq_ignore_ascii_case(HAS_CAL_KEYWORD));
+        message
+    });
     Some(Fetched { location, message })
 }
 
@@ -288,6 +299,10 @@ fn new_message(meta: &MessageMeta) -> NewMessage {
         snippet,
         size: meta.size.unwrap_or(0),
         has_attachment: body.has_attachment(),
+        has_calendar: body.parts.iter().any(|p| {
+            let name = p.filename.as_deref().map(decode_text);
+            tagmail_api_core::mime::is_calendar(&p.mime_type, name.as_deref().map(str::as_bytes))
+        }),
     }
 }
 
@@ -490,5 +505,52 @@ mod tests {
         };
         let m = fetched(&with_server_id).unwrap().message.unwrap();
         assert_eq!(m.email_id.as_str(), "o:M1");
+        assert!(!m.has_calendar);
+    }
+
+    #[test]
+    fn calendar_parts_and_the_server_hint_mark_invitations() {
+        let meta = |parts: Vec<PartInfo>, flags: Vec<Flag>| MessageMeta {
+            uid: Some(Uid(1)),
+            flags: Some(flags),
+            envelope: Some(Envelope::default()),
+            body: Some(BodySummary { parts }),
+            ..MessageMeta::default()
+        };
+        let has_calendar = |m: MessageMeta| fetched(&m).unwrap().message.unwrap().has_calendar;
+        let named = |mime: &str, name: &[u8]| PartInfo {
+            filename: Some(name.to_vec()),
+            ..part(mime, "base64", None)
+        };
+        assert!(has_calendar(meta(
+            vec![
+                part("text/plain", "7bit", None),
+                part("text/calendar", "7bit", None)
+            ],
+            vec![],
+        )));
+        assert!(has_calendar(meta(
+            vec![part("application/ics", "base64", None)],
+            vec![]
+        )));
+        assert!(has_calendar(meta(
+            vec![named("application/octet-stream", b"Invite.ICS")],
+            vec![],
+        )));
+        assert!(has_calendar(meta(
+            vec![part("text/plain", "7bit", None)],
+            vec![Flag::Keyword("$HAS_CAL".into())],
+        )));
+        assert!(has_calendar(meta(
+            vec![named(
+                "application/octet-stream",
+                b"=?utf-8?q?Termin=2Eics?="
+            )],
+            vec![],
+        )));
+        assert!(!has_calendar(meta(
+            vec![named("application/pdf", b"ics.pdf")],
+            vec![],
+        )));
     }
 }

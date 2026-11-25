@@ -5,7 +5,7 @@
 
 use std::io::{self, BufRead};
 
-use mail_parser::{Encoding, MessageParser};
+use mail_parser::{Charset, Encoding, MessageParser};
 
 use super::BODY_TEXT_CAP;
 
@@ -316,6 +316,299 @@ fn splice(out: Vec<u8>, mut inserts: Inserts) -> Vec<u8> {
     spliced
 }
 
+/// Raw bytes kept of one calendar part.
+pub const CALENDAR_PART_CAP: usize = 1 << 20;
+/// Calendar parts kept per message; later ones are only counted.
+pub const CALENDAR_PARTS_MAX: usize = 8;
+/// Raw bytes kept of all calendar parts together.
+pub const CALENDAR_TOTAL_CAP: usize = 2 << 20;
+/// Longest piece read at once, so a body without line breaks never sits
+/// in memory whole.
+const CHUNK_CAP: usize = 64 << 10;
+const SENDER_FIELDS: [&[u8]; 3] = [b"from", b"sender", b"authentication-results"];
+
+/// An iCalendar part of a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalendarPart {
+    /// The part id, as in [`super::PartInfo::id`].
+    pub id: u32,
+    pub content_type: String,
+    pub name: Option<String>,
+    /// Transfer- and charset-decoded; empty when `too_large`.
+    pub text: String,
+    /// Over [`CALENDAR_PART_CAP`], past [`CALENDAR_TOTAL_CAP`] with the
+    /// parts before it, or cut off by the end of a truncated message.
+    pub too_large: bool,
+}
+
+/// What an invitation is read from: the top-level calendar parts and the
+/// sender fields of the message header.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CalendarParts {
+    /// The `From`, `Sender` and `Authentication-Results` fields of the
+    /// top-level header block as raw folded lines, in their order.
+    pub headers: Vec<u8>,
+    pub parts: Vec<CalendarPart>,
+    /// Calendar parts past [`CALENDAR_PARTS_MAX`].
+    pub omitted: usize,
+}
+
+impl CalendarParts {
+    pub fn truncated(&self) -> bool {
+        self.omitted > 0 || self.parts.iter().any(|p| p.too_large)
+    }
+}
+
+/// A calendar part body being collected.
+struct Collect {
+    part: CalendarPart,
+    encoding: Encoding,
+    charset: Option<String>,
+    raw: Vec<u8>,
+    last_eol: usize,
+}
+
+enum Calendar {
+    Headers(Vec<u8>),
+    Body(Collect),
+    /// A body that is not kept, a preamble or an epilogue.
+    Skip,
+}
+
+enum Block {
+    Multipart(String),
+    Message,
+    Leaf(Option<Collect>),
+}
+
+fn block(headers: &[u8], id: u32, deep: bool) -> Block {
+    let Some(message) = MessageParser::new().parse(headers) else {
+        return Block::Leaf(None);
+    };
+    let root = message.root().root_part();
+    let content_type = root.content_type();
+    let ctype = content_type
+        .as_ref()
+        .map_or("text", |ct| ct.ctype())
+        .to_ascii_lowercase();
+    let subtype = content_type
+        .as_ref()
+        .and_then(|ct| ct.subtype())
+        .map(str::to_ascii_lowercase);
+    if ctype == "multipart"
+        && let Some(boundary) = content_type
+            .as_ref()
+            .and_then(|ct| ct.attribute("boundary"))
+    {
+        return if deep {
+            Block::Leaf(None)
+        } else {
+            Block::Multipart(boundary.to_owned())
+        };
+    }
+    if ctype == "message" && matches!(subtype.as_deref(), Some("rfc822" | "global")) {
+        return if deep {
+            Block::Leaf(None)
+        } else {
+            Block::Message
+        };
+    }
+    let mime_type = super::content_type(&root);
+    let name = root.attachment_name();
+    if !super::is_calendar(&mime_type, name.map(str::as_bytes)) {
+        return Block::Leaf(None);
+    }
+    Block::Leaf(Some(Collect {
+        part: CalendarPart {
+            id,
+            content_type: mime_type,
+            name: name.map(str::to_owned),
+            text: String::new(),
+            too_large: false,
+        },
+        encoding: root.encoding(),
+        charset: content_type
+            .as_ref()
+            .and_then(|ct| ct.attribute("charset"))
+            .map(str::to_owned),
+        raw: Vec::new(),
+        last_eol: 0,
+    }))
+}
+
+impl Collect {
+    fn cut(&mut self) {
+        self.part.too_large = true;
+        self.raw = Vec::new();
+    }
+
+    fn push(&mut self, chunk: &[u8], room: usize) {
+        if self.part.too_large {
+            return;
+        }
+        if self.raw.len() + chunk.len() > room {
+            self.cut();
+            return;
+        }
+        self.last_eol = eol_len(chunk);
+        self.raw.extend_from_slice(chunk);
+    }
+
+    /// `delimited`: a delimiter ends the part, taking the last line break.
+    fn finish(mut self, delimited: bool) -> CalendarPart {
+        if self.part.too_large {
+            return self.part;
+        }
+        if delimited {
+            self.raw.truncate(self.raw.len() - self.last_eol);
+        }
+        let decoded = self.encoding.decode(&self.raw);
+        let charset = self
+            .charset
+            .as_deref()
+            .and_then(|c| Charset::from_label(c.as_bytes()))
+            .unwrap_or_default();
+        self.part.text = charset.decode(&decoded).into_owned();
+        self.part
+    }
+}
+
+/// The fields of `headers` named in [`SENDER_FIELDS`], with their folded
+/// continuation lines.
+fn sender_fields(headers: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut keep = false;
+    for line in headers.split_inclusive(|b| *b == b'\n') {
+        if !line.starts_with(b" ") && !line.starts_with(b"\t") {
+            let name = line.split(|b| *b == b':').next().unwrap_or_default();
+            keep = line.contains(&b':')
+                && SENDER_FIELDS
+                    .iter()
+                    .any(|f| name.trim_ascii().eq_ignore_ascii_case(f));
+        }
+        if keep {
+            out.extend_from_slice(line);
+        }
+    }
+    out
+}
+
+/// Reads up to a line break or [`CHUNK_CAP`] bytes into `chunk`.
+fn read_chunk(raw: &mut impl BufRead, chunk: &mut Vec<u8>) -> io::Result<usize> {
+    loop {
+        let available = match raw.fill_buf() {
+            Ok(available) => available,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        if available.is_empty() {
+            return Ok(chunk.len());
+        }
+        let room = CHUNK_CAP - chunk.len();
+        let (take, done) = match available.iter().take(room).position(|b| *b == b'\n') {
+            Some(i) => (i + 1, true),
+            None => (available.len().min(room), available.len() >= room),
+        };
+        chunk.extend_from_slice(&available[..take]);
+        raw.consume(take);
+        if done {
+            return Ok(chunk.len());
+        }
+    }
+}
+
+/// Reads `raw` as a stream and returns its top-level calendar parts and
+/// sender fields. Parts of attached messages are skipped: an invitation
+/// counts only from the message's own sender. Memory stays within the
+/// calendar and header caps, whatever the message size.
+pub fn calendar_parts(mut raw: impl BufRead) -> io::Result<CalendarParts> {
+    let mut out = CalendarParts::default();
+    let mut boundaries: Vec<String> = Vec::new();
+    let mut nested: Vec<usize> = Vec::new();
+    let mut state = Calendar::Headers(Vec::new());
+    let mut chunk = Vec::new();
+    let mut line_start = true;
+    let mut next_id = 0;
+    let mut header_bytes = 0;
+    let mut kept = 0;
+    loop {
+        chunk.clear();
+        if read_chunk(&mut raw, &mut chunk)? == 0 {
+            break;
+        }
+        let starts_line = line_start;
+        line_start = chunk.ends_with(b"\n");
+        let delimits = starts_line
+            .then(|| delimiter(&chunk, &boundaries))
+            .flatten();
+        if let Some((i, closing)) = delimits {
+            nested.retain(|depth| *depth <= i);
+            if let Calendar::Body(collect) = std::mem::replace(&mut state, Calendar::Skip) {
+                kept += collect.raw.len();
+                out.parts.push(collect.finish(true));
+            }
+            boundaries.truncate(i + 1);
+            if closing {
+                boundaries.pop();
+            } else {
+                state = Calendar::Headers(Vec::new());
+            }
+            continue;
+        }
+        match &mut state {
+            Calendar::Headers(headers) => {
+                if headers.len() + chunk.len() <= HEADER_BLOCK_CAP
+                    && header_bytes + chunk.len() <= HEADERS_CAP
+                {
+                    header_bytes += chunk.len();
+                    headers.extend_from_slice(&chunk);
+                }
+                if !(starts_line && is_blank(&chunk)) {
+                    continue;
+                }
+                let headers = std::mem::take(headers);
+                let id = next_id;
+                next_id += 1;
+                if id == 0 {
+                    out.headers = sender_fields(&headers);
+                }
+                let deep = boundaries.len() + nested.len() > MAX_DEPTH;
+                state = match block(&headers, id, deep) {
+                    Block::Multipart(boundary) => {
+                        boundaries.push(boundary);
+                        Calendar::Skip
+                    }
+                    Block::Message => {
+                        nested.push(boundaries.len());
+                        Calendar::Headers(Vec::new())
+                    }
+                    Block::Leaf(Some(collect)) if nested.is_empty() => {
+                        if out.parts.len() < CALENDAR_PARTS_MAX {
+                            Calendar::Body(collect)
+                        } else {
+                            out.omitted += 1;
+                            Calendar::Skip
+                        }
+                    }
+                    Block::Leaf(_) => Calendar::Skip,
+                };
+            }
+            Calendar::Body(collect) => {
+                let room = CALENDAR_PART_CAP.min(CALENDAR_TOTAL_CAP.saturating_sub(kept));
+                collect.push(&chunk, room);
+            }
+            Calendar::Skip => {}
+        }
+    }
+    if let Calendar::Body(mut collect) = state {
+        if !boundaries.is_empty() {
+            collect.cut();
+        }
+        out.parts.push(collect.finish(false));
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,5 +801,141 @@ mod tests {
         assert_eq!(size, Some((text.len() + 2).to_string().into_bytes()));
         let html = body(&message, &|_| unreachable!(), None).html;
         assert!(html.contains("Message too large to display fully"));
+    }
+
+    const INVITE: &str = "BEGIN:VCALENDAR\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\nUID:u1\r\nEND:VEVENT\r\nEND:VCALENDAR";
+
+    fn invite_message(attachment: &str) -> String {
+        format!(
+            concat!(
+                "Received: from mx\r\nAuthentication-Results: mx.example.net;\r\n",
+                " dmarc=pass header.from=example.com\r\n",
+                "From: Org <org@example.com>\r\nSubject: Meeting\r\nSender: s@example.com\r\n",
+                "Content-Type: multipart/mixed; boundary=\"m\"\r\n\r\n",
+                "--m\r\nContent-Type: multipart/alternative; boundary=\"a\"\r\n\r\n",
+                "--a\r\nContent-Type: text/plain\r\n\r\nYou are invited\r\n",
+                "--a\r\nContent-Type: text/calendar; method=REQUEST; charset=utf-8\r\n\r\n",
+                "{invite}\r\n",
+                "--a--\r\n",
+                "--m\r\nContent-Type: message/rfc822\r\n\r\n",
+                "From: other@example.org\r\nContent-Type: multipart/mixed; boundary=\"n\"\r\n\r\n",
+                "--n\r\nContent-Type: text/calendar\r\n\r\nBEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n",
+                "--n--\r\n",
+                "--m\r\nContent-Type: application/octet-stream; name=big.bin\r\n",
+                "Content-Transfer-Encoding: base64\r\n\r\n{attachment}",
+                "--m\r\nContent-Type: application/octet-stream; name=invite.ICS\r\n",
+                "Content-Transfer-Encoding: base64\r\n\r\n{encoded}\r\n",
+                "--m--\r\n",
+            ),
+            invite = INVITE,
+            attachment = attachment,
+            encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, INVITE),
+        )
+    }
+
+    #[test]
+    fn calendar_parts_keep_top_level_invites_and_sender_fields() {
+        let raw = invite_message(&base64_lines(1000));
+        let found = calendar_parts(raw.as_bytes()).unwrap();
+        assert_eq!(
+            found.headers,
+            b"Authentication-Results: mx.example.net;\r\n dmarc=pass header.from=example.com\r\n\
+              From: Org <org@example.com>\r\nSender: s@example.com\r\n"
+        );
+        let message = parse(raw.as_bytes()).unwrap();
+        let expected: Vec<(u32, String)> = message
+            .root()
+            .parts()
+            .filter(|p| {
+                crate::mime::is_calendar(
+                    &crate::mime::content_type(p),
+                    p.attachment_name().map(str::as_bytes),
+                )
+            })
+            .map(|p| (p.id(), String::from_utf8(p.decoded().into_owned()).unwrap()))
+            .collect();
+        let got: Vec<(u32, String)> = found.parts.iter().map(|p| (p.id, p.text.clone())).collect();
+        assert_eq!(got, expected);
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().all(|(_, text)| text == INVITE));
+        assert_eq!(found.parts[1].name.as_deref(), Some("invite.ICS"));
+        assert!(!found.truncated());
+    }
+
+    #[test]
+    fn an_invite_after_a_25_mb_attachment_is_found() {
+        let raw = invite_message(&base64_lines(25 << 20));
+        assert!(raw.len() > 25 << 20);
+        let found = calendar_parts(raw.as_bytes()).unwrap();
+        assert_eq!(found.parts.len(), 2);
+        assert_eq!(found.parts[1].text, INVITE);
+    }
+
+    #[test]
+    fn a_calendar_message_without_multipart_is_part_zero() {
+        let raw = format!("From: a@example.com\r\nContent-Type: text/calendar\r\n\r\n{INVITE}\r\n");
+        let found = calendar_parts(raw.as_bytes()).unwrap();
+        assert_eq!(found.parts.len(), 1);
+        assert_eq!(found.parts[0].id, 0);
+        assert_eq!(found.parts[0].text, format!("{INVITE}\r\n"));
+    }
+
+    fn calendar_multipart(sizes: &[usize]) -> String {
+        let mut raw = String::from("Content-Type: multipart/mixed; boundary=b\r\n\r\n");
+        for size in sizes {
+            raw.push_str("--b\r\nContent-Type: text/calendar\r\n\r\n");
+            raw.push_str(&"x".repeat(*size));
+            raw.push_str("\r\n");
+        }
+        raw.push_str("--b--\r\n");
+        raw
+    }
+
+    #[test]
+    fn a_part_over_its_cap_is_reported_too_large() {
+        let raw = calendar_multipart(&[CALENDAR_PART_CAP + 1, 10]);
+        let found = calendar_parts(raw.as_bytes()).unwrap();
+        assert!(found.parts[0].too_large);
+        assert!(found.parts[0].text.is_empty());
+        assert!(!found.parts[1].too_large);
+        assert!(found.truncated());
+    }
+
+    #[test]
+    fn parts_past_the_total_cap_are_reported_too_large() {
+        let size = CALENDAR_TOTAL_CAP / 3 + 1;
+        let raw = calendar_multipart(&[size, size, size]);
+        let found = calendar_parts(raw.as_bytes()).unwrap();
+        let too_large: Vec<bool> = found.parts.iter().map(|p| p.too_large).collect();
+        assert_eq!(too_large, [false, false, true]);
+    }
+
+    #[test]
+    fn calendar_parts_past_the_maximum_are_counted() {
+        let raw = calendar_multipart(&[10; CALENDAR_PARTS_MAX + 2]);
+        let found = calendar_parts(raw.as_bytes()).unwrap();
+        assert_eq!(found.parts.len(), CALENDAR_PARTS_MAX);
+        assert_eq!(found.omitted, 2);
+        assert!(found.truncated());
+    }
+
+    #[test]
+    fn a_line_longer_than_a_chunk_does_not_end_the_part() {
+        let long = format!("{}--b--", "x".repeat(CHUNK_CAP));
+        let raw = calendar_multipart(&[0]).replace("\r\n--b--", &format!("{long}\r\n--b--"));
+        let found = calendar_parts(raw.as_bytes()).unwrap();
+        assert_eq!(found.parts.len(), 1);
+        assert_eq!(found.parts[0].text, long);
+    }
+
+    #[test]
+    fn a_part_cut_off_by_the_end_of_the_message_is_too_large() {
+        let raw = calendar_multipart(&[10]);
+        let cut = &raw[..raw.len() - "\r\n--b--\r\n".len()];
+        let found = calendar_parts(cut.as_bytes()).unwrap();
+        assert!(found.parts[0].too_large);
+        let single = format!("Content-Type: text/calendar\r\n\r\n{INVITE}");
+        let found = calendar_parts(single.as_bytes()).unwrap();
+        assert!(!found.parts[0].too_large, "a single-part message just ends");
     }
 }

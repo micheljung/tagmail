@@ -14,6 +14,7 @@ import type {
 	DeviceDto,
 	DevicesDto,
 	ImageSendersDto,
+	InvitationDto,
 	LabelDto,
 	MailboxDto,
 	MessageDto,
@@ -162,6 +163,10 @@ export class Api {
 
 	message(id: number, signal?: AbortSignal): Promise<MessageDto> {
 		return this.#json<MessageDto>(`/api/messages/${id}`, { signal });
+	}
+
+	invitation(id: number, signal?: AbortSignal): Promise<InvitationDto> {
+		return this.#json<InvitationDto>(`/api/messages/${id}/invitation`, { signal });
 	}
 
 	/** Always (or no longer) load remote images from `address`. */

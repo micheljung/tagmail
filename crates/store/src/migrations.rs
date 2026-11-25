@@ -17,6 +17,7 @@ pub(crate) const CACHE: &[&str] = &[
     include_str!("../migrations/cache/V2__pending_text_index.sql"),
     include_str!("../migrations/cache/V3__op_overlay.sql"),
     include_str!("../migrations/cache/V4__hide_has_cal.sql"),
+    include_str!("../migrations/cache/V5__has_calendar.sql"),
 ];
 
 /// `user_version` of an up-to-date `config.db`.
@@ -42,4 +43,41 @@ pub(crate) fn apply(conn: &mut Connection, migrations: &[&str]) -> Result<()> {
         tx.commit()?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `user_version` is the list position, so each file's `V<n>` must be
+    /// its position plus one.
+    fn assert_numbered(dir: &str, migrations: &[&str]) {
+        let path = format!("{}/migrations/{dir}", env!("CARGO_MANIFEST_DIR"));
+        let mut files: Vec<(u32, String)> = std::fs::read_dir(&path)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .map(|name| {
+                let n = name
+                    .strip_prefix('V')
+                    .and_then(|rest| rest.split_once("__"))
+                    .and_then(|(n, _)| n.parse().ok())
+                    .unwrap_or_else(|| panic!("{dir}/{name} is not V<n>__<name>.sql"));
+                (n, name)
+            })
+            .collect();
+        files.sort();
+        let numbers: Vec<u32> = files.iter().map(|(n, _)| *n).collect();
+        let expected: Vec<u32> = (1..).take(migrations.len()).collect();
+        assert_eq!(numbers, expected, "{dir}: {files:?}");
+        for ((_, name), sql) in files.iter().zip(migrations) {
+            let file = std::fs::read_to_string(format!("{path}/{name}")).unwrap();
+            assert_eq!(&file, sql, "{dir}/{name} is not at its position");
+        }
+    }
+
+    #[test]
+    fn migration_numbers_match_their_positions() {
+        assert_numbered("config", CONFIG);
+        assert_numbered("cache", CACHE);
+    }
 }

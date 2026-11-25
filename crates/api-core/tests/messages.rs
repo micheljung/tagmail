@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use tagmail_api_core::dto::{AccountDto, AddressDto, LabelDto, MailboxDto, ThreadRowDto};
 use tagmail_api_core::messages::{PART_CSP, RENDER_CSP};
 use tagmail_api_core::mime::BLOCKED_IMAGE;
+use tagmail_api_core::mime::reduce::{CalendarParts, calendar_parts};
 use tagmail_api_core::signing::{self, Capability, TOKEN_TTL_SECS, UrlKeys};
 use tagmail_api_core::{
     AccountPatch, AccountRegistry, AccountSummary, Api, BoxFuture, ChangePage, FetchRawError,
@@ -89,11 +90,14 @@ fn record(id: i64, from: &str) -> MessageRecord {
         unread: id == 1,
         starred: false,
         has_attachment: true,
+        has_calendar: false,
     }
 }
 
 struct Mail {
     records: Vec<MessageRecord>,
+    /// Messages outside the thread, by id.
+    others: HashMap<i64, MessageRecord>,
     cached: Arc<Mutex<HashMap<i64, Vec<u8>>>>,
     /// What the IMAP server has.
     server: HashMap<i64, Vec<u8>>,
@@ -105,6 +109,7 @@ impl Mail {
     fn new() -> Mail {
         Mail {
             records: vec![record(1, "ann@example.com"), record(2, "bob@example.com")],
+            others: HashMap::new(),
             cached: Arc::default(),
             server: HashMap::from([
                 (1, raw_html().into_bytes()),
@@ -119,6 +124,15 @@ impl Mail {
                 previous: None,
             },
         }
+    }
+
+    /// Adds message `id` with `raw` on the server and `has_calendar` set.
+    fn with_invite(mut self, id: i64, from: &str, raw: Vec<u8>) -> Mail {
+        let mut record = record(id, from);
+        record.has_calendar = true;
+        self.others.insert(id, record);
+        self.server.insert(id, raw);
+        self
     }
 }
 
@@ -190,7 +204,12 @@ impl Store for Mail {
         if id.0 == HUGE {
             return Ok(Some(record(HUGE, "x@example.com")));
         }
-        Ok(self.records.iter().find(|r| r.id == id).cloned())
+        Ok(self
+            .records
+            .iter()
+            .find(|r| r.id == id)
+            .or_else(|| self.others.get(&id.0))
+            .cloned())
     }
 
     async fn thread_detail(&self, id: ThreadId) -> StoreResult<Option<ThreadDetail>> {
@@ -217,6 +236,13 @@ impl Store for Mail {
 
     async fn raw_message(&self, id: MessageRowId) -> StoreResult<Option<Vec<u8>>> {
         Ok(self.cached.lock().unwrap().get(&id.0).cloned())
+    }
+
+    async fn calendar_source(&self, id: MessageRowId) -> StoreResult<Option<CalendarParts>> {
+        let cached = self.cached.lock().unwrap().get(&id.0).cloned();
+        Ok(cached
+            .map(|raw| calendar_parts(raw.as_slice()))
+            .transpose()?)
     }
 
     async fn url_keys(&self) -> StoreResult<UrlKeys> {
@@ -288,7 +314,11 @@ struct Fixture {
 }
 
 fn fixture() -> Fixture {
-    let mail = Arc::new(Mail::new());
+    fixture_with(Mail::new())
+}
+
+fn fixture_with(mail: Mail) -> Fixture {
+    let mail = Arc::new(mail);
     let engine = Arc::new(Engine {
         cached: mail.cached.clone(),
         server: mail.server.clone(),
@@ -451,6 +481,7 @@ async fn message_detail_lists_parts_with_signed_urls() {
     assert_eq!(body["body"], "html");
     assert_eq!(body["remoteImages"], 1);
     assert_eq!(body["imagesAllowed"], false);
+    assert_eq!(body["hasInvitation"], false);
     assert_eq!(body["messageId"], "m1@example.com");
     assert_eq!(
         body["replyTo"],
@@ -630,4 +661,302 @@ async fn thread_detail_lists_messages_oldest_first() {
     assert_eq!(body["messages"][1]["hasRemoteImages"], false);
     assert_eq!(get(&f.api, "/api/threads/8").await.status, 404);
     assert_eq!(get(&f.api, "/api/threads/x").await.status, 404);
+}
+
+fn calendar_fixture(name: &str) -> Vec<u8> {
+    let path = format!(
+        "{}/../calendar/tests/fixtures/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"))
+}
+
+fn base64_body(data: &[u8]) -> String {
+    use base64::Engine as _;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+    encoded
+        .as_bytes()
+        .chunks(76)
+        .map(|l| std::str::from_utf8(l).unwrap())
+        .collect::<Vec<_>>()
+        .join("\r\n")
+}
+
+/// A mail with `from_fields` as its sender header fields, `inline` as the
+/// inline calendar and `attached` as an `.ics` attachment.
+fn calendar_mail(from_fields: &str, inline: &[u8], attached: &[u8]) -> Vec<u8> {
+    format!(
+        concat!(
+            "{from_fields}Subject: Invitation\r\n",
+            "Content-Type: multipart/mixed; boundary=\"m\"\r\n\r\n",
+            "--m\r\nContent-Type: multipart/alternative; boundary=\"a\"\r\n\r\n",
+            "--a\r\nContent-Type: text/plain\r\n\r\nYou are invited\r\n",
+            "--a\r\nContent-Type: text/calendar; charset=UTF-8; method=REQUEST\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\n{inline}\r\n",
+            "--a--\r\n",
+            "--m\r\nContent-Type: application/ics; name=\"invite.ics\"\r\n",
+            "Content-Disposition: attachment; filename=\"invite.ics\"\r\n",
+            "Content-Transfer-Encoding: base64\r\n\r\n{attached}\r\n",
+            "--m--\r\n",
+        ),
+        from_fields = from_fields,
+        inline = base64_body(inline),
+        attached = base64_body(attached),
+    )
+    .into_bytes()
+}
+
+/// An invitation mail as Google and Outlook send it: a text body, the
+/// calendar inline and the same calendar again as an `.ics` attachment.
+fn invite_mail(from: &str, ics: &[u8]) -> Vec<u8> {
+    let domain = from.split('@').nth(1).unwrap_or_default();
+    calendar_mail(
+        &format!(
+            "Authentication-Results: mx.example.net; dmarc=pass header.from={domain}\r\n\
+             From: <{from}>\r\n"
+        ),
+        ics,
+        ics,
+    )
+}
+
+#[cfg(not(feature = "calendar"))]
+#[tokio::test]
+async fn invitations_need_the_calendar_feature() {
+    let f = fixture_with(Mail::new().with_invite(
+        10,
+        "alice@example.com",
+        invite_mail("alice@example.com", &calendar_fixture("google_request.ics")),
+    ));
+    let resp = get(&f.api, "/api/messages/10/invitation").await;
+    assert_eq!(resp.status, 404);
+    assert_eq!(json(&resp)["error"], "feature_disabled");
+    assert_eq!(f.engine.fetches.load(Ordering::SeqCst), 0);
+}
+
+#[cfg(feature = "calendar")]
+mod invitation {
+    use super::*;
+
+    /// Fixture, sender address.
+    const GOLDEN: &[(&str, &str)] = &[
+        ("google_request", "alice@example.com"),
+        ("google_cancel", "alice@example.com"),
+        ("spoofed_organizer", "payroll@bank-example.test"),
+        ("apple_all_day", "grace@icloud.example"),
+        ("apple_recurring", "hank@example.com"),
+        ("outlook_teams", "dana.sample@contoso.example"),
+        ("outlook_custom_tz", "frank.demo@fabrikam.example"),
+        ("publish_multi", "calendar@example.org"),
+        ("publish_partially_bad", "calendar@example.org"),
+        ("spoofed_organizer_email_param", "x@evil.example"),
+        ("spoofed_schemeless_email_param", "x@evil.example"),
+    ];
+    /// Set to rewrite the golden files from the current output.
+    const BLESS: &str = "TAGMAIL_BLESS";
+
+    fn golden_path(name: &str) -> String {
+        format!(
+            "{}/tests/golden/invitation/{name}.json",
+            env!("CARGO_MANIFEST_DIR")
+        )
+    }
+
+    #[tokio::test]
+    async fn invitation_cards_match_their_golden_files() {
+        let mut mail = Mail::new();
+        for (i, (name, from)) in (10..).zip(GOLDEN) {
+            let ics = calendar_fixture(&format!("{name}.ics"));
+            mail = mail.with_invite(i, from, invite_mail(from, &ics));
+        }
+        let f = fixture_with(mail);
+        for (i, (name, _)) in (10..).zip(GOLDEN) {
+            let resp = get(&f.api, &format!("/api/messages/{i}/invitation")).await;
+            assert_eq!(resp.status, 200, "{name}: {}", text(&resp));
+            let got = json(&resp);
+            let path = golden_path(name);
+            if std::env::var_os(BLESS).is_some() {
+                let pretty = serde_json::to_string_pretty(&got).unwrap() + "\n";
+                std::fs::write(&path, pretty).unwrap();
+                continue;
+            }
+            let expected: Value = serde_json::from_str(
+                &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path}: {e}")),
+            )
+            .unwrap();
+            assert_eq!(got, expected, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_sender_check_reports_mismatch_without_auto_apply() {
+        let ics = calendar_fixture("google_request.ics");
+        let f = fixture_with(
+            Mail::new()
+                .with_invite(
+                    10,
+                    "alice@example.com",
+                    invite_mail("alice@example.com", &ics),
+                )
+                .with_invite(
+                    11,
+                    "mallory@example.com",
+                    invite_mail("mallory@example.com", &ics),
+                ),
+        );
+        let matching = json(&get(&f.api, "/api/messages/10/invitation").await);
+        assert_eq!(matching["senderAuth"], "untrusted_config");
+        assert_eq!(matching["autoApply"], "none");
+        assert_eq!(
+            matching["events"].as_array().unwrap().len(),
+            1,
+            "deduplicated"
+        );
+        let forged = json(&get(&f.api, "/api/messages/11/invitation").await);
+        assert_eq!(forged["senderAuth"], "address_mismatch");
+        assert_eq!(forged["autoApply"], "none");
+    }
+
+    #[tokio::test]
+    async fn the_raw_is_fetched_on_open_once() {
+        let ics = calendar_fixture("google_request.ics");
+        let f = fixture_with(Mail::new().with_invite(
+            10,
+            "alice@example.com",
+            invite_mail("alice@example.com", &ics),
+        ));
+        assert_eq!(get(&f.api, "/api/messages/10/invitation").await.status, 200);
+        assert_eq!(get(&f.api, "/api/messages/10/invitation").await.status, 200);
+        assert_eq!(f.engine.fetches.load(Ordering::SeqCst), 1);
+        let message = json(&get(&f.api, "/api/messages/10").await);
+        assert_eq!(message["hasInvitation"], true);
+    }
+
+    #[tokio::test]
+    async fn messages_without_a_usable_invitation_are_refused() {
+        let f = fixture_with(
+            Mail::new()
+                .with_invite(
+                    10,
+                    "a@example.com",
+                    invite_mail("a@example.com", &calendar_fixture("malformed_not_ical.ics")),
+                )
+                .with_invite(
+                    11,
+                    "a@example.com",
+                    b"Subject: no parts\r\n\r\nhi\r\n".to_vec(),
+                )
+                .with_invite(
+                    12,
+                    "a@example.com",
+                    invite_mail(
+                        "a@example.com",
+                        &calendar_fixture("malformed_truncated.ics"),
+                    ),
+                ),
+        );
+        for id in [10, 12] {
+            let resp = get(&f.api, &format!("/api/messages/{id}/invitation")).await;
+            assert_eq!(resp.status, 422, "{id}");
+            assert_eq!(json(&resp)["error"], "unparsable");
+        }
+        let resp = get(&f.api, "/api/messages/11/invitation").await;
+        assert_eq!(resp.status, 404);
+        assert_eq!(json(&resp)["error"], "no_invitation");
+        let resp = get(&f.api, "/api/messages/1/invitation").await;
+        assert_eq!(resp.status, 404);
+        assert_eq!(json(&resp)["error"], "no_invitation");
+        assert_eq!(
+            f.engine.fetches.load(Ordering::SeqCst),
+            3,
+            "no fetch without has_calendar"
+        );
+        assert_eq!(get(&f.api, "/api/messages/77/invitation").await.status, 404);
+    }
+
+    #[tokio::test]
+    async fn an_oversized_invitation_is_reported_not_parsed() {
+        let big = format!(
+            "From: a@example.com\r\nContent-Type: text/calendar\r\n\r\n{}\r\n",
+            "x".repeat(tagmail_api_core::mime::reduce::CALENDAR_PART_CAP + 1)
+        );
+        let f = fixture_with(Mail::new().with_invite(10, "a@example.com", big.into_bytes()));
+        let resp = get(&f.api, "/api/messages/10/invitation").await;
+        assert_eq!(resp.status, 200, "{}", text(&resp));
+        let body = json(&resp);
+        assert_eq!(body["tooLarge"], true);
+        assert_eq!(body["events"], json!([]));
+    }
+
+    #[tokio::test]
+    async fn only_a_single_from_mailbox_can_match() {
+        let ics = calendar_fixture("google_request.ics");
+        let f = fixture_with(
+            Mail::new()
+                .with_invite(
+                    10,
+                    "alice@example.com",
+                    calendar_mail(
+                        "From: alice@example.com\r\nFrom: mallory@example.com\r\n",
+                        &ics,
+                        &ics,
+                    ),
+                )
+                .with_invite(
+                    11,
+                    "alice@example.com",
+                    calendar_mail(
+                        "From: alice@example.com, mallory@example.com\r\n",
+                        &ics,
+                        &ics,
+                    ),
+                )
+                .with_invite(
+                    12,
+                    "alice@example.com",
+                    calendar_mail("Sender: alice@example.com\r\n", &ics, &ics),
+                ),
+        );
+        for id in [10, 11, 12] {
+            let card = json(&get(&f.api, &format!("/api/messages/{id}/invitation")).await);
+            assert_eq!(card["senderAuth"], "address_mismatch", "{id}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_newest_copy_of_an_event_wins_and_methods_stay_per_part() {
+        let request = calendar_fixture("google_request.ics");
+        let updated = calendar_fixture("google_request_updated.ics");
+        let cancel = calendar_fixture("google_cancel.ics");
+        let from = "From: alice@example.com\r\n";
+        let f = fixture_with(
+            Mail::new()
+                .with_invite(
+                    10,
+                    "alice@example.com",
+                    calendar_mail(from, &request, &updated),
+                )
+                .with_invite(
+                    11,
+                    "alice@example.com",
+                    calendar_mail(from, &updated, &request),
+                )
+                .with_invite(
+                    12,
+                    "alice@example.com",
+                    calendar_mail(from, &cancel, &request),
+                ),
+        );
+        let first = json(&get(&f.api, "/api/messages/10/invitation").await);
+        let second = json(&get(&f.api, "/api/messages/11/invitation").await);
+        assert_eq!(first["method"], "request");
+        assert_eq!(first["events"].as_array().unwrap().len(), 1);
+        assert_eq!(first, second, "SEQUENCE 1 wins in either order");
+        let mixed = json(&get(&f.api, "/api/messages/12/invitation").await);
+        assert_eq!(mixed["method"], "other");
+        assert_eq!(
+            mixed["events"][0]["cancelled"], true,
+            "CANCEL has SEQUENCE 2"
+        );
+    }
 }

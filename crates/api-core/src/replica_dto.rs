@@ -412,7 +412,13 @@ mod tests {
             api: API_VERSION,
             min_client: MIN_CLIENT,
             server: "0.1.0".into(),
+            features: vec!["calendar".into()],
         });
+        let old_server: VersionDto = serde_json::from_str(
+            r#"{"api":{"major":1,"minor":3},"minClient":{"major":1,"minor":0},"server":"0.1.1"}"#,
+        )
+        .unwrap();
+        assert!(old_server.features.is_empty());
         let change = |entity, op| ChangeDto {
             seq: 4,
             entity,

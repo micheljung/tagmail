@@ -79,7 +79,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy -p tagmail-api-server --no-default-features --all-targets -- -D warnings
       - run: cargo test --workspace
+      - run: cargo test -p tagmail-api-core --features sqlite
+      - run: cargo test -p tagmail-api-server --no-default-features
+      - run: "! cargo tree -p tagmail-api-server --no-default-features -i calcard"
       - run: cargo xtask gen-ts-types --check
       - uses: EmbarkStudios/cargo-deny-action@v2
 

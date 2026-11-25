@@ -15,6 +15,7 @@ use crate::dto::{
     AccountDto, AccountStateDto, AccountTestDto, AddressDto, ChangeDto, LabelDto, MailboxDto,
     TestStepDto, ThreadRowDto, TlsMode,
 };
+use crate::mime::reduce::CalendarParts;
 use crate::signing::UrlKeys;
 
 pub type StoreError = Box<dyn std::error::Error + Send + Sync>;
@@ -197,6 +198,8 @@ pub struct MessageRecord {
     pub unread: bool,
     pub starred: bool,
     pub has_attachment: bool,
+    /// An iCalendar part was seen at sync.
+    pub has_calendar: bool,
 }
 
 /// A thread with its live messages, oldest first.
@@ -348,6 +351,14 @@ pub trait Store: Send + Sync + 'static {
             })
         }
     }
+
+    /// The cached message's invitation input:
+    /// [`crate::mime::reduce::calendar_parts`] of the raw message, read as
+    /// a stream so the raw message is never held whole.
+    fn calendar_source(
+        &self,
+        id: MessageRowId,
+    ) -> impl Future<Output = StoreResult<Option<CalendarParts>>> + Send;
 
     /// Keys for signed part and proxy URLs, created on first use and
     /// rotated by the store when due.

@@ -21,6 +21,7 @@ import {
 	type Row
 } from './fixture.ts';
 import { desktopApi, desktopHeaders, desktopMock, resetDesktop } from './desktop.ts';
+import { calendarApi, hasInvitation } from './calendar.ts';
 import { pushApi, pushMock, resetPush } from './push.ts';
 import { encodeIdIndex } from './idIndex.ts';
 import { RENDER_CSP, WEB_APP_CSP, renderMessage } from './render.ts';
@@ -282,6 +283,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
 	}
 	if (await accountsApi(req, res, url, writeContext)) return;
 	if (await pushApi(req, res, url, writeContext)) return;
+	if (calendarApi(req, res, url, writeContext)) return;
 	if (await writeApi(req, res, url, writeContext)) return;
 	if (path === '/api/mailboxes') return send(res, 200, mailboxes());
 	if (path === '/api/labels') return send(res, 200, currentLabels());
@@ -370,6 +372,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
 			body: 'html',
 			remoteImages: remoteImages(r, msg),
 			imagesAllowed: !!msg.from && imageSenders.has(msg.from.email.toLowerCase()),
+			hasInvitation: hasInvitation(msg.id),
 			parts: partsOf(msg)
 		});
 	}

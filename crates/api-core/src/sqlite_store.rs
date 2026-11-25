@@ -9,6 +9,7 @@ use crate::dto::{
     AccountDto, AccountStateDto, AddressDto, ChangeDto, ChangeOpDto, EntityDto, LabelDto,
     MailboxDto, SpecialUseDto, ThreadRowDto, TlsMode,
 };
+use crate::mime::reduce::CalendarParts;
 use crate::signing::{KEY_LEN, UrlKeys};
 use crate::{
     AccountPatch, AccountSummary, ChangeFeed, ChangePage, MarkDeleting, MessageRecord, NewAccount,
@@ -311,7 +312,7 @@ fn now_secs() -> i64 {
 
 /// Columns of [`message_record`], over `message m`.
 const MESSAGE_COLUMNS: &str = "m.id, m.account_id, coalesce(m.thread_id, 0), m.date, m.subject, \
-     m.snippet, m.from_json, m.to_json, m.cc_json, m.has_attachment, \
+     m.snippet, m.from_json, m.to_json, m.cc_json, m.has_attachment, m.has_calendar, \
      EXISTS (SELECT 1 FROM location l WHERE l.message_id = m.id AND (l.flags & :seen) = 0), \
      EXISTS (SELECT 1 FROM location l WHERE l.message_id = m.id AND (l.flags & :flagged) != 0)";
 
@@ -331,8 +332,9 @@ fn message_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRecord> {
         to: addresses(7)?,
         cc: addresses(8)?,
         has_attachment: r.get(9)?,
-        unread: r.get(10)?,
-        starred: r.get(11)?,
+        has_calendar: r.get(10)?,
+        unread: r.get(11)?,
+        starred: r.get(12)?,
     })
 }
 
@@ -521,6 +523,27 @@ impl SqliteStore {
             .into_iter()
             .filter_map(|(from, to)| Some((key(&from)?, to.as_deref().and_then(key))))
             .collect())
+    }
+
+    /// The blob key of message `id`'s raw message; `None` if no such row.
+    async fn raw_key(&self, id: MessageRowId) -> StoreResult<Option<BlobKey>> {
+        let identity: Option<(i64, String)> = self
+            .cache
+            .read(move |conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT account_id, email_id FROM message WHERE id = ?1",
+                        [id.0],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?)
+            })
+            .await?;
+        let Some((account, email_id)) = identity else {
+            return Ok(None);
+        };
+        let email_id = EmailId::parse(&email_id)?;
+        Ok(Some(BlobKey::for_message(AccountId(account), &email_id)))
     }
 }
 
@@ -863,23 +886,9 @@ impl Store for SqliteStore {
     }
 
     async fn raw_message(&self, id: MessageRowId) -> StoreResult<Option<Vec<u8>>> {
-        let identity: Option<(i64, String)> = self
-            .cache
-            .read(move |conn| {
-                Ok(conn
-                    .query_row(
-                        "SELECT account_id, email_id FROM message WHERE id = ?1",
-                        [id.0],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )
-                    .optional()?)
-            })
-            .await?;
-        let Some((account, email_id)) = identity else {
+        let Some(key) = self.raw_key(id).await? else {
             return Ok(None);
         };
-        let email_id = EmailId::parse(&email_id)?;
-        let key = BlobKey::for_message(AccountId(account), &email_id);
         let blobs = self.blobs.clone();
         let raw = tokio::task::spawn_blocking(move || {
             let Some(reader) = blobs.open_raw(&key)? else {
@@ -899,23 +908,9 @@ impl Store for SqliteStore {
     }
 
     async fn render_source(&self, id: MessageRowId) -> StoreResult<Option<Vec<u8>>> {
-        let identity: Option<(i64, String)> = self
-            .cache
-            .read(move |conn| {
-                Ok(conn
-                    .query_row(
-                        "SELECT account_id, email_id FROM message WHERE id = ?1",
-                        [id.0],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
-                    )
-                    .optional()?)
-            })
-            .await?;
-        let Some((account, email_id)) = identity else {
+        let Some(key) = self.raw_key(id).await? else {
             return Ok(None);
         };
-        let email_id = EmailId::parse(&email_id)?;
-        let key = BlobKey::for_message(AccountId(account), &email_id);
         let blobs = self.blobs.clone();
         Ok(tokio::task::spawn_blocking(move || {
             let Some(reader) = blobs.open_raw(&key)? else {
@@ -924,6 +919,22 @@ impl Store for SqliteStore {
             let reduced =
                 crate::mime::reduce::reduce(BufReader::new(reader.take(DEFAULT_RAW_CAP)))?;
             Ok::<_, tagmail_store::Error>(Some(reduced))
+        })
+        .await??)
+    }
+
+    async fn calendar_source(&self, id: MessageRowId) -> StoreResult<Option<CalendarParts>> {
+        let Some(key) = self.raw_key(id).await? else {
+            return Ok(None);
+        };
+        let blobs = self.blobs.clone();
+        Ok(tokio::task::spawn_blocking(move || {
+            let Some(reader) = blobs.open_raw(&key)? else {
+                return Ok(None);
+            };
+            let parts =
+                crate::mime::reduce::calendar_parts(BufReader::new(reader.take(DEFAULT_RAW_CAP)))?;
+            Ok::<_, tagmail_store::Error>(Some(parts))
         })
         .await??)
     }

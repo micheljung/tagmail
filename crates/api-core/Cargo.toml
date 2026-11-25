@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [features]
+calendar = ["dep:tagmail-calendar", "dep:time"]
 # The `Store` over the server's databases; the desktop replica reads
 # through it too.
 sqlite = ["dep:hex", "dep:tagmail-store"]
@@ -26,9 +27,11 @@ percent-encoding.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tagmail-calendar = { workspace = true, optional = true }
 tagmail-core.workspace = true
 tagmail-store = { workspace = true, optional = true }
 thiserror.workspace = true
+time = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing.workspace = true
 ts-rs.workspace = true

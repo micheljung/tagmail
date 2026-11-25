@@ -41,7 +41,7 @@ fn not_found(what: &str) -> Response {
     Response::error(404, "not_found", format!("no such {what}"))
 }
 
-fn evicted() -> Response {
+pub(crate) fn evicted() -> Response {
     let error = FetchRawError::Unavailable("evicted right after the fetch".to_owned());
     tracing::warn!(error = %error, "fetching raw message on open");
     Response::error(503, "body_unavailable", error.to_string())
@@ -194,7 +194,10 @@ impl<S: Store> Api<S> {
     }
 
     /// Fetches the raw message into the store's cache.
-    async fn fetch(&self, record: &MessageRecord) -> Result<Result<(), Response>, StoreError> {
+    pub(crate) async fn fetch(
+        &self,
+        record: &MessageRecord,
+    ) -> Result<Result<(), Response>, StoreError> {
         let Some(registry) = &self.registry else {
             return Ok(Err(Response::error(
                 503,
@@ -289,6 +292,7 @@ impl<S: Store> Api<S> {
                 remote_images: rendered.body.stats.remote_images,
                 images_allowed,
                 parts,
+                has_invitation: record.has_calendar,
             },
         ))
     }

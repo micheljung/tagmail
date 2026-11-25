@@ -1,0 +1,29 @@
+{
+  "autoApply": "none",
+  "events": [
+    {
+      "allDay": false,
+      "attendees": [],
+      "cancelled": false,
+      "description": null,
+      "end": "2027-01-22T20:00:00Z",
+      "location": null,
+      "organizer": null,
+      "recurrence": null,
+      "recurrenceId": null,
+      "start": "2027-01-22T18:00:00Z",
+      "summary": "Home match",
+      "tzid": null,
+      "uid": "match-002@club.example",
+      "url": null
+    }
+  ],
+  "method": "publish",
+  "outdated": false,
+  "scheduling": null,
+  "senderAuth": "untrusted_config",
+  "stored": null,
+  "target": null,
+  "tooLarge": false,
+  "truncated": false
+}

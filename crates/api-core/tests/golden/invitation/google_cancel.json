@@ -1,0 +1,49 @@
+{
+  "autoApply": "none",
+  "events": [
+    {
+      "allDay": false,
+      "attendees": [
+        {
+          "email": "bob@example.org",
+          "name": "bob@example.org",
+          "partstat": "needs_action"
+        },
+        {
+          "email": "alice@example.com",
+          "name": "Alice Example",
+          "partstat": "accepted"
+        },
+        {
+          "email": "carol@example.net",
+          "name": "Carol Example",
+          "partstat": "tentative"
+        }
+      ],
+      "cancelled": true,
+      "description": "Quarterly planning, bring your numbers.\n\nJoin with Google Meet: https://meet.google.com/abc-defg-hij\n\n-::~:~::~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~:~::~:~::-",
+      "end": "2026-12-08T10:00:00Z",
+      "location": "Meeting room 3, Example HQ",
+      "organizer": {
+        "altEmail": null,
+        "email": "alice@example.com",
+        "name": "Alice Example"
+      },
+      "recurrence": null,
+      "recurrenceId": null,
+      "start": "2026-12-08T09:00:00Z",
+      "summary": "Canceled event: Quarterly planning",
+      "tzid": "Europe/Zurich",
+      "uid": "7kq3hb2v0c8n1m5p4r6s9t0u2w@google.com",
+      "url": null
+    }
+  ],
+  "method": "cancel",
+  "outdated": false,
+  "scheduling": null,
+  "senderAuth": "untrusted_config",
+  "stored": null,
+  "target": null,
+  "tooLarge": false,
+  "truncated": false
+}

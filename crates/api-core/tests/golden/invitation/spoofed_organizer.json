@@ -1,0 +1,39 @@
+{
+  "autoApply": "none",
+  "events": [
+    {
+      "allDay": false,
+      "attendees": [
+        {
+          "email": "bob@example.org",
+          "name": "Bob Tester",
+          "partstat": "needs_action"
+        }
+      ],
+      "cancelled": false,
+      "description": "Please confirm your salary account at https://bank-example.invalid/verify",
+      "end": "2026-12-02T13:30:00Z",
+      "location": null,
+      "organizer": {
+        "altEmail": null,
+        "email": "Payroll@Bank.Example",
+        "name": "Payroll Department"
+      },
+      "recurrence": null,
+      "recurrenceId": null,
+      "start": "2026-12-02T13:00:00Z",
+      "summary": "Urgent: salary account verification",
+      "tzid": null,
+      "uid": "spoof-5c1e0d9a@bank.example",
+      "url": null
+    }
+  ],
+  "method": "request",
+  "outdated": false,
+  "scheduling": null,
+  "senderAuth": "address_mismatch",
+  "stored": null,
+  "target": null,
+  "tooLarge": false,
+  "truncated": false
+}

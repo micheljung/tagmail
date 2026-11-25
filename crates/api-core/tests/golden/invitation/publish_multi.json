@@ -1,0 +1,61 @@
+{
+  "autoApply": "none",
+  "events": [
+    {
+      "allDay": false,
+      "attendees": [],
+      "cancelled": false,
+      "description": null,
+      "end": "2027-03-10T08:45:00Z",
+      "location": "Main stage",
+      "organizer": null,
+      "recurrence": null,
+      "recurrenceId": null,
+      "start": "2027-03-10T08:00:00Z",
+      "summary": "Opening keynote",
+      "tzid": null,
+      "uid": "talk-001@conf.example",
+      "url": "https://conf.example/talks/001"
+    },
+    {
+      "allDay": false,
+      "attendees": [],
+      "cancelled": false,
+      "description": null,
+      "end": "2027-03-10T09:30:00Z",
+      "location": "Room A",
+      "organizer": null,
+      "recurrence": null,
+      "recurrenceId": null,
+      "start": "2027-03-10T09:00:00Z",
+      "summary": "Lightning talks",
+      "tzid": null,
+      "uid": "talk-002@conf.example",
+      "url": null
+    },
+    {
+      "allDay": true,
+      "attendees": [],
+      "cancelled": false,
+      "description": null,
+      "end": "2027-03-12",
+      "location": null,
+      "organizer": null,
+      "recurrence": null,
+      "recurrenceId": null,
+      "start": "2027-03-11",
+      "summary": "Community day",
+      "tzid": null,
+      "uid": "social-001@conf.example",
+      "url": null
+    }
+  ],
+  "method": "publish",
+  "outdated": false,
+  "scheduling": null,
+  "senderAuth": "untrusted_config",
+  "stored": null,
+  "target": null,
+  "tooLarge": false,
+  "truncated": false
+}

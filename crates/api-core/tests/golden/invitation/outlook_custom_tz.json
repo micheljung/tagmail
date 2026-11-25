@@ -1,0 +1,55 @@
+{
+  "autoApply": "none",
+  "events": [
+    {
+      "allDay": false,
+      "attendees": [
+        {
+          "email": "bob@example.org",
+          "name": "Bob Tester",
+          "partstat": "needs_action"
+        }
+      ],
+      "cancelled": false,
+      "description": "Budget review for the next fiscal year.\n",
+      "end": "2026-10-20T15:00:00Z",
+      "location": "Conference room B",
+      "organizer": {
+        "altEmail": null,
+        "email": "frank.demo@fabrikam.example",
+        "name": "Frank Demo"
+      },
+      "recurrence": {
+        "byDay": [
+          {
+            "ordinal": null,
+            "weekday": "tu"
+          }
+        ],
+        "byMonth": [],
+        "byMonthDay": [],
+        "count": null,
+        "exdates": [
+          "2026-11-03T15:00:00Z"
+        ],
+        "frequency": "weekly",
+        "interval": 1,
+        "until": "2026-11-17T15:00:00Z"
+      },
+      "recurrenceId": null,
+      "start": "2026-10-20T14:00:00Z",
+      "summary": "Budget review",
+      "tzid": "Customized Time Zone",
+      "uid": "040000008200E00074C5B7101A82E00800000000C2D3E4F5A6B7DB0100000000000000001000000011223344556677889900AABBCCDDEEFF",
+      "url": null
+    }
+  ],
+  "method": "request",
+  "outdated": false,
+  "scheduling": null,
+  "senderAuth": "untrusted_config",
+  "stored": null,
+  "target": null,
+  "tooLarge": false,
+  "truncated": false
+}
