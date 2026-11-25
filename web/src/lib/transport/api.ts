@@ -6,6 +6,13 @@ import type {
 	AccountTestDto,
 	ApiErrorDto,
 	ApiTransport,
+	CaldavDiscoveryDto,
+	CaldavSettingsDto,
+	CaldavSettingsInputDto,
+	ConfirmHostDto,
+	CalendarDto,
+	CalendarPatchDto,
+	CalendarsDto,
 	CurrentAuthDto,
 	DesktopPairDto,
 	DesktopSettingsDto,
@@ -372,6 +379,32 @@ export class Api {
 
 	deleteAccount(id: number): Promise<void> {
 		return this.#empty(`/api/accounts/${id}`, 'DELETE');
+	}
+
+	caldavSettings(accountId: number): Promise<CaldavSettingsDto> {
+		return this.#json<CaldavSettingsDto>(`/api/accounts/${accountId}/caldav`);
+	}
+
+	saveCaldavSettings(accountId: number, input: CaldavSettingsInputDto): Promise<CaldavSettingsDto> {
+		return this.#post<CaldavSettingsDto>(`/api/accounts/${accountId}/caldav`, input, 'PUT');
+	}
+
+	discoverCaldav(accountId: number): Promise<CaldavDiscoveryDto> {
+		return this.#post<CaldavDiscoveryDto>(`/api/accounts/${accountId}/caldav/discover`);
+	}
+
+	confirmCaldavHost(accountId: number, host: string): Promise<CaldavDiscoveryDto> {
+		return this.#post<CaldavDiscoveryDto>(`/api/accounts/${accountId}/caldav/confirm-host`, {
+			host
+		} satisfies ConfirmHostDto);
+	}
+
+	async calendars(): Promise<CalendarDto[]> {
+		return (await this.#json<CalendarsDto>('/api/calendars')).calendars;
+	}
+
+	updateCalendar(change: CalendarPatchDto): Promise<CalendarDto> {
+		return this.#post<CalendarDto>('/api/calendars', change, 'PATCH');
 	}
 
 	exportLabels(): Promise<LabelExportDto> {

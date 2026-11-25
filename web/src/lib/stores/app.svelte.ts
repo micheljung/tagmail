@@ -3,6 +3,7 @@ import { api } from '../transport';
 import { errorText } from '../ui/errors';
 import { accountParam, viewScope } from '../views';
 import { AccountsStore } from './accounts.svelte';
+import { CalendarsStore } from './calendars.svelte';
 import { EventHub } from './events.svelte';
 import { NavStore } from './nav.svelte';
 import { ThreadList, ThreadLists } from './threadList.svelte';
@@ -11,6 +12,7 @@ import { Toasts } from './toasts.svelte';
 export const hub = new EventHub(api.transport);
 export const nav = new NavStore(api);
 export const accounts = new AccountsStore(api);
+export const calendars = new CalendarsStore(api);
 export const lists = new ThreadLists((view) => new ThreadList(view, api, hub, nav));
 export const toasts = new Toasts();
 export const ops = new OpsStore({
