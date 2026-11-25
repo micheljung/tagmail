@@ -215,7 +215,10 @@ test('changing the server needs the password again; with it, test and save work'
 	await expect(testButton).toBeDisabled();
 	await expect(save).toBeDisabled();
 
-	await page.getByLabel('Password').fill('hunter2hunter2');
+	await page
+		.getByRole('region', { name: 'Connection' })
+		.getByLabel('Password')
+		.fill('hunter2hunter2');
 	await expect(testButton).toBeEnabled();
 	await testButton.click();
 	await expect(page.getByRole('list', { name: 'Connection test' })).toContainText('Connected in');

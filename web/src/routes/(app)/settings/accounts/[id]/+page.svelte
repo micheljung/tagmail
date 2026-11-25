@@ -17,6 +17,7 @@
 	import { degradedText, phaseText } from '#lib/ui/accountStatus.ts';
 	import { errorText } from '#lib/ui/errors.ts';
 	import Icon from '#lib/ui/Icon.svelte';
+	import CaldavSettings from '#lib/ui/CaldavSettings.svelte';
 	import IdentityEditor, { type IdentityInput } from '#lib/ui/IdentityEditor.svelte';
 	import { onMount } from 'svelte';
 
@@ -272,6 +273,8 @@
 				</form>
 			</section>
 		{/if}
+
+		<CaldavSettings accountId={account.id} />
 
 		<section aria-labelledby="status-title">
 			<h2 id="status-title">Sync</h2>

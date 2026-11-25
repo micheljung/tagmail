@@ -1,5 +1,6 @@
 export {
 	accounts,
+	calendars,
 	currentAccount,
 	hub,
 	lists,
