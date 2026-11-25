@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<multistatus xmlns="DAV:">
+ <response>
+  <href>/1234567890/calendars/</href>
+  <propstat><prop><resourcetype><collection/></resourcetype></prop><status>HTTP/1.1 200 OK</status></propstat>
+ </response>
+ <response>
+  <href>/1234567890/calendars/home/</href>
+  <propstat>
+   <prop>
+    <resourcetype><collection/><calendar xmlns="urn:ietf:params:xml:ns:caldav"/></resourcetype>
+    <displayname>Home</displayname>
+    <calendar-color xmlns="http://apple.com/ns/ical/" symbolic-color="blue">#1BADF8FF</calendar-color>
+    <getctag xmlns="http://calendarserver.org/ns/">HwoQEgwAAA</getctag>
+    <sync-token>HwoQEgwAAAh4</sync-token>
+    <supported-report-set>
+     <supported-report><report><sync-collection/></report></supported-report>
+     <supported-report><report><calendar-multiget xmlns="urn:ietf:params:xml:ns:caldav"/></report></supported-report>
+    </supported-report-set>
+    <supported-calendar-component-set xmlns="urn:ietf:params:xml:ns:caldav"><comp name="VEVENT"/></supported-calendar-component-set>
+   </prop>
+   <status>HTTP/1.1 200 OK</status>
+  </propstat>
+ </response>
+ <response>
+  <href>/1234567890/calendars/inbox/</href>
+  <propstat><prop><resourcetype><collection/><schedule-inbox xmlns="urn:ietf:params:xml:ns:caldav"/></resourcetype></prop><status>HTTP/1.1 200 OK</status></propstat>
+ </response>
+</multistatus>

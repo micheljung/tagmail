@@ -151,6 +151,8 @@ impl Server {
                 });
                 let engine = Arc::new(Engine::with_smtp(stores, factory, *engine_config, smtp));
                 let started = engine.start_all().await?;
+                #[cfg(feature = "calendar")]
+                engine.start_calendar()?;
                 tracing::info!(accounts = started, "sync engine started");
                 (
                     Some(engine.clone() as Arc<dyn AccountRegistry>),
@@ -185,6 +187,11 @@ impl Server {
         if let Some(engine) = &engine {
             api = api.with_compose(engine.clone() as Arc<dyn Compose>);
             api = api.with_writes(engine.clone() as Arc<dyn WriteService>);
+            #[cfg(feature = "calendar")]
+            {
+                api =
+                    api.with_calendar(engine.clone() as Arc<dyn tagmail_api_core::CalendarService>);
+            }
         }
         let state = http::AppState {
             api: Arc::new(api),

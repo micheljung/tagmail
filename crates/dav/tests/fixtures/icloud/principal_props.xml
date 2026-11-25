@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<multistatus xmlns="DAV:">
+ <response>
+  <href>/1234567890/principal/</href>
+  <propstat>
+   <prop>
+    <calendar-home-set xmlns="urn:ietf:params:xml:ns:caldav"><href xmlns="DAV:">http://p07-caldav.icloud.com/1234567890/calendars/</href></calendar-home-set>
+    <schedule-inbox-URL xmlns="urn:ietf:params:xml:ns:caldav"><href xmlns="DAV:">http://p07-caldav.icloud.com/1234567890/calendars/inbox/</href></schedule-inbox-URL>
+    <schedule-outbox-URL xmlns="urn:ietf:params:xml:ns:caldav"><href xmlns="DAV:">http://p07-caldav.icloud.com/1234567890/calendars/outbox/</href></schedule-outbox-URL>
+   </prop>
+   <status>HTTP/1.1 200 OK</status>
+  </propstat>
+ </response>
+</multistatus>

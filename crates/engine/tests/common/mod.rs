@@ -3,6 +3,9 @@
 //! client for external changes.
 #![allow(dead_code)]
 
+pub mod cal_fixture;
+pub mod cal_users;
+
 use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

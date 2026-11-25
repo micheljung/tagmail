@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns" xmlns:cal="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/">
+ <d:response>
+  <d:href>/rpc/calendars/petition@micheljung.ch/calendar~XxTGk_wzksKr_bm2FWE92Mq/</d:href>
+  <d:propstat>
+   <d:prop><d:resourcetype><d:collection/><cal:calendar/></d:resourcetype></d:prop>
+   <d:status>HTTP/1.1 200 OK</d:status>
+  </d:propstat>
+  <d:propstat>
+   <d:prop><d:getetag/></d:prop>
+   <d:status>HTTP/1.1 404 Not Found</d:status>
+  </d:propstat>
+ </d:response>
+ <d:response>
+  <d:href>/rpc/calendars/petition@micheljung.ch/calendar~XxTGk_wzksKr_bm2FWE92Mq/20261201T090000Z-1a2b@micheljung.ch.ics</d:href>
+  <d:propstat>
+   <d:prop><d:getetag>"9f1c2e"</d:getetag><d:resourcetype/></d:prop>
+   <d:status>HTTP/1.1 200 OK</d:status>
+  </d:propstat>
+ </d:response>
+ <d:response>
+  <d:href>/rpc/calendars/petition@micheljung.ch/calendar~XxTGk_wzksKr_bm2FWE92Mq/0f3d7e90-5b1a-4c2e.ics</d:href>
+  <d:propstat>
+   <d:prop><d:getetag>"77aa01"</d:getetag><d:resourcetype/></d:prop>
+   <d:status>HTTP/1.1 200 OK</d:status>
+  </d:propstat>
+ </d:response>
+</d:multistatus>

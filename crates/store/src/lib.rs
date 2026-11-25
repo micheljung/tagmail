@@ -3,6 +3,7 @@
 //! full-text search, the message blob store and credential encryption.
 
 pub mod blobs;
+pub mod calendar;
 pub mod changes;
 pub mod credentials;
 mod db;

@@ -74,6 +74,23 @@ async fn server_only_routes_pass_through() {
 }
 
 #[tokio::test]
+async fn calendar_routes_pass_through() {
+    let stack = Stack::start().await;
+    let router = Router::new(stack.replica().await);
+    let settings = get(&router, &format!("/api/accounts/{}/caldav", stack.account)).await;
+    assert_eq!(
+        settings.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&settings.body)
+    );
+    assert_eq!(json(&settings)["status"], "unconfigured");
+    let calendars = get(&router, "/api/calendars").await;
+    assert_eq!(calendars.status, 200);
+    assert_eq!(json(&calendars)["calendars"], serde_json::json!([]));
+}
+
+#[tokio::test]
 async fn an_upload_is_kept_locally() {
     let stack = Stack::start().await;
     let replica = stack.replica().await;

@@ -7,11 +7,7 @@ use crate::store::{Store, StoreError};
 impl<S: Store> Api<S> {
     #[cfg(not(feature = "calendar"))]
     pub(crate) async fn invitation(&self, _id: &str) -> Result<Response, StoreError> {
-        Ok(Response::error(
-            404,
-            "feature_disabled",
-            "calendar support is not built in",
-        ))
+        Ok(crate::caldav::feature_disabled())
     }
 
     #[cfg(feature = "calendar")]
@@ -36,10 +32,18 @@ impl<S: Store> Api<S> {
             }
         };
         let card = crate::messages::blocking(move || card::invitation(&source)).await?;
-        Ok(match card {
-            Ok(dto) => Response::json(200, &dto),
-            Err(resp) => resp,
-        })
+        let (mut dto, versions) = match card {
+            Ok(card) => card,
+            Err(resp) => return Ok(resp),
+        };
+        let mut uids: Vec<String> = versions.iter().map(|v| v.uid.clone()).collect();
+        uids.dedup();
+        let context = self
+            .store
+            .invitation_context(record.account_id, uids)
+            .await?;
+        card::apply_context(&mut dto, &versions, context);
+        Ok(Response::json(200, &dto))
     }
 }
 
@@ -60,6 +64,7 @@ pub(crate) mod card {
         WeekdayDto, WeekdayNumDto,
     };
     use crate::mime::reduce::CalendarParts;
+    use crate::store::{InvitationContext, StoredCopy};
 
     const FROM: &[u8] = b"from";
 
@@ -79,9 +84,22 @@ pub(crate) mod card {
         }
     }
 
-    /// The card of `source`; until CalDAV is set up nothing is stored or
-    /// applied, so only the sender check varies.
-    pub(crate) fn invitation(source: &CalendarParts) -> Result<InvitationDto, Response> {
+    /// One VEVENT's place in its series' history.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct Version {
+        pub uid: String,
+        /// Not an override (no RECURRENCE-ID).
+        pub master: bool,
+        pub sequence: u32,
+        /// Unix seconds.
+        pub dtstamp: Option<i64>,
+    }
+
+    /// The card of `source` with each event's version; what is stored
+    /// comes from [`apply_context`].
+    pub(crate) fn invitation(
+        source: &CalendarParts,
+    ) -> Result<(InvitationDto, Vec<Version>), Response> {
         if source.parts.is_empty() {
             return Err(no_invitation());
         }
@@ -133,7 +151,16 @@ pub(crate) mod card {
             Some(_) => InvitationMethodDto::Other,
             None => InvitationMethodDto::None,
         };
-        Ok(InvitationDto {
+        let versions = events
+            .iter()
+            .map(|s| Version {
+                uid: s.event.uid.clone(),
+                master: s.event.recurrence_id.is_none(),
+                sequence: s.event.sequence,
+                dtstamp: s.event.dtstamp.map(OffsetDateTime::unix_timestamp),
+            })
+            .collect();
+        let dto = InvitationDto {
             method,
             sender_auth: sender_auth(&events, &source.headers),
             events: events.iter().map(event_dto).collect(),
@@ -144,7 +171,55 @@ pub(crate) mod card {
             target: None,
             scheduling: None,
             auto_apply: AutoApplyDto::None,
-        })
+        };
+        Ok((dto, versions))
+    }
+
+    /// Fills in the stored copy (in the target calendar when it has one)
+    /// and whether the invitation is older than it.
+    pub(crate) fn apply_context(
+        dto: &mut InvitationDto,
+        versions: &[Version],
+        context: InvitationContext,
+    ) {
+        let in_target = |copy: &&StoredCopy| {
+            context.target.as_ref().is_some_and(|t| {
+                t.account_id == copy.stored.account_id
+                    && t.calendar_href == copy.stored.calendar_href
+            })
+        };
+        let stored_of = |uid: &str| {
+            let of_uid = || context.stored.iter().filter(move |c| c.uid == uid);
+            of_uid().find(in_target).or_else(|| of_uid().next())
+        };
+        let stored = versions.first().and_then(|v| stored_of(&v.uid));
+        dto.outdated = versions
+            .iter()
+            .filter(|v| v.master)
+            .filter(|v| {
+                !versions.iter().any(|other| {
+                    other.master
+                        && other.uid == v.uid
+                        && (other.sequence, other.dtstamp) > (v.sequence, v.dtstamp)
+                })
+            })
+            .any(|newest| stored_of(&newest.uid).is_some_and(|copy| older(newest, copy)));
+        dto.stored = stored.map(|c| c.stored.clone());
+        dto.target = context.target;
+        dto.scheduling = context.scheduling;
+    }
+
+    /// The incoming master is older than the stored one: a lower SEQUENCE,
+    /// or the same with an older DTSTAMP.
+    fn older(incoming: &Version, stored: &StoredCopy) -> bool {
+        match incoming.sequence.cmp(&stored.stored.sequence) {
+            std::cmp::Ordering::Less => true,
+            std::cmp::Ordering::Equal => incoming
+                .dtstamp
+                .zip(stored.dtstamp)
+                .is_some_and(|(incoming, stored)| incoming < stored),
+            std::cmp::Ordering::Greater => false,
+        }
     }
 
     /// The single `From` mailbox; `None` for no `From`, several `From`

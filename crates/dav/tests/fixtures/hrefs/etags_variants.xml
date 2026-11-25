@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<d:multistatus xmlns:d="DAV:">
+ <d:response>
+  <d:href>http://dav.tagmail.test/cal/user%40tagmail.test/work</d:href>
+  <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+ </d:response>
+ <d:response>
+  <d:href>/cal/user@tagmail.test/work/space%20here.ics</d:href>
+  <d:propstat><d:prop><d:getetag>"1"</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+ </d:response>
+ <d:response>
+  <d:href>http://DAV.tagmail.test/cal/user%40tagmail.test/work/caf%c3%a9~x.ics</d:href>
+  <d:propstat><d:prop><d:getetag>"2"</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+ </d:response>
+ <d:response>
+  <d:href>rel%2Fslash.ics</d:href>
+  <d:propstat><d:prop><d:getetag>"3"</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+ </d:response>
+ <d:response>
+  <d:href>/cal/user@tagmail.test/work/sub/</d:href>
+  <d:propstat><d:prop><d:resourcetype><d:collection/></d:resourcetype></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+ </d:response>
+</d:multistatus>

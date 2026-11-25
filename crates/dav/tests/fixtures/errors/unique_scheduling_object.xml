@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<error xmlns="DAV:">
+ <unique-scheduling-object-resource xmlns="urn:ietf:params:xml:ns:caldav"><href xmlns="DAV:">http://dav.tagmail.test/cal/home/inv.ics</href></unique-scheduling-object-resource>
+</error>

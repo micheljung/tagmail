@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<d:multistatus xmlns:d="DAV:">
+ <d:response>
+  <d:href>/cal/work/b.ics</d:href>
+  <d:propstat><d:prop><d:getetag>"b1"</d:getetag></d:prop><d:status>HTTP/1.1 200 OK</d:status></d:propstat>
+ </d:response>
+ <d:response>
+  <d:href>/cal/work/</d:href>
+  <d:status>HTTP/1.1 507 Insufficient Storage</d:status>
+  <d:error><d:number-of-matches-within-limits/></d:error>
+ </d:response>
+ <d:sync-token>http://dav.tagmail.test/sync/13</d:sync-token>
+</d:multistatus>

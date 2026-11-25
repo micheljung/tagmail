@@ -38,8 +38,11 @@ jobs:
               - 'crates/store/**'
               - 'crates/core/**'
               - 'crates/api-core/**'
+              - 'crates/dav/**'
+              - 'crates/calendar/**'
               - 'test/dovecot/**'
               - 'test/stalwart/**'
+              - 'test/radicale/**'
               - 'test/compose.yml'
               - 'xtask/**'
               - '.cargo/**'
@@ -100,9 +103,54 @@ jobs:
         if: failure()
         run: docker compose -f test/compose.yml logs ${{ matrix.services }}
 
+  caldav:
+    needs: changes
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || needs.changes.outputs.run == 'true') }}
+    name: caldav-${{ matrix.server }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - server: radicale
+            up: cargo xtask dovecot up && cargo xtask radicale up
+            caldav: 127.0.0.1:10232
+            engine_tests: --test calendar
+            services: dovecot radicale
+          - server: stalwart
+            up: cargo xtask stalwart up
+            caldav: 127.0.0.1:10080
+            engine_tests: ''
+            services: stalwart
+    env:
+      TAGMAIL_CALDAV_ADDR: ${{ matrix.caldav }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100"
+      - uses: Swatinem/rust-cache@v2
+      - name: Calendar users are up to date
+        run: cargo xtask gen-cal-users --check
+      - name: Start ${{ matrix.server }}
+        run: ${{ matrix.up }}
+      - name: CalDAV client suite
+        env:
+          TAGMAIL_IMAP_SERVER: ${{ matrix.server == 'stalwart' && 'stalwart' || '' }}
+        run: cargo test -p tagmail-dav --features caldav-tests
+      - name: Engine calendar suite
+        if: matrix.engine_tests != ''
+        env:
+          TAGMAIL_IMAP_SERVER: ${{ matrix.server == 'stalwart' && 'stalwart' || '' }}
+          TAGMAIL_IMAP_ADDR: ${{ matrix.server == 'stalwart' && '127.0.0.1:10145' || '127.0.0.1:10143' }}
+        run: cargo test -p tagmail-engine --features caldav-tests,mailpit-tests ${{ matrix.engine_tests }}
+      - name: Server logs
+        if: failure()
+        run: docker compose -f test/compose.yml logs ${{ matrix.services }}
+
   result:
     name: servers-result
-    needs: [changes, server]
+    needs: [changes, server, caldav]
     if: always()
     runs-on: ubuntu-latest
     steps:

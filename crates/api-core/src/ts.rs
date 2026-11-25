@@ -138,7 +138,15 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<OpStatusDto>(&cfg, &mut files)?;
     file::<OpsDto>(&cfg, &mut files)?;
     file::<AutoApplyDto>(&cfg, &mut files)?;
+    file::<CaldavDiscoveryDto>(&cfg, &mut files)?;
+    file::<CaldavSettingsDto>(&cfg, &mut files)?;
+    file::<CaldavSettingsInputDto>(&cfg, &mut files)?;
+    file::<CaldavStatusDto>(&cfg, &mut files)?;
+    file::<CalendarDto>(&cfg, &mut files)?;
+    file::<CalendarPatchDto>(&cfg, &mut files)?;
+    file::<CalendarsDto>(&cfg, &mut files)?;
     file::<CalendarTargetDto>(&cfg, &mut files)?;
+    file::<ConfirmHostDto>(&cfg, &mut files)?;
     file::<EventStatusDto>(&cfg, &mut files)?;
     file::<FrequencyDto>(&cfg, &mut files)?;
     file::<InvitationAttendeeDto>(&cfg, &mut files)?;
@@ -149,6 +157,7 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<PartstatDto>(&cfg, &mut files)?;
     file::<RecurrenceDto>(&cfg, &mut files)?;
     file::<SchedulingDto>(&cfg, &mut files)?;
+    file::<SchedulingOverrideDto>(&cfg, &mut files)?;
     file::<SenderAuthDto>(&cfg, &mut files)?;
     file::<StoredEventDto>(&cfg, &mut files)?;
     file::<WeekdayDto>(&cfg, &mut files)?;

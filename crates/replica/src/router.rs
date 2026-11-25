@@ -57,6 +57,12 @@ fn server_only(route: RouteId) -> bool {
             | RouteId::LabelJobs
             | RouteId::ExportLabels
             | RouteId::ImportLabels
+            | RouteId::CaldavSettings
+            | RouteId::UpdateCaldavSettings
+            | RouteId::DiscoverCaldav
+            | RouteId::ConfirmCaldavHost
+            | RouteId::Calendars
+            | RouteId::UpdateCalendar
     )
 }
 

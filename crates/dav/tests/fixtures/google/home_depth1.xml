@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<D:multistatus xmlns:D="DAV:" xmlns:caldav="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/" xmlns:ical="http://apple.com/ns/ical/">
+ <D:response>
+  <D:href>/caldav/v2/jane.doe%40gmail.com/</D:href>
+  <D:propstat><D:status>HTTP/1.1 200 OK</D:status><D:prop><D:resourcetype><D:collection/></D:resourcetype></D:prop></D:propstat>
+ </D:response>
+ <D:response>
+  <D:href>/caldav/v2/jane.doe%40gmail.com/events/</D:href>
+  <D:propstat>
+   <D:status>HTTP/1.1 200 OK</D:status>
+   <D:prop>
+    <D:resourcetype><D:collection/><caldav:calendar/></D:resourcetype>
+    <D:displayname>jane.doe@gmail.com</D:displayname>
+    <ical:calendar-color>#9FE1E7FF</ical:calendar-color>
+    <cs:getctag>63901234567</cs:getctag>
+    <D:sync-token>https://www.google.com/calendar/dav/sync/CPDAlvWDx4IDEPDAlvWDx4IDGAEgv_Cv5gI=</D:sync-token>
+    <D:supported-report-set>
+     <D:supported-report><D:report><caldav:calendar-query/></D:report></D:supported-report>
+     <D:supported-report><D:report><caldav:calendar-multiget/></D:report></D:supported-report>
+     <D:supported-report><D:report><D:sync-collection/></D:report></D:supported-report>
+    </D:supported-report-set>
+   </D:prop>
+  </D:propstat>
+ </D:response>
+</D:multistatus>

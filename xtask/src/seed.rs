@@ -114,10 +114,10 @@ struct Plan {
 }
 
 /// SplitMix64: tiny, fast and stable across platforms and releases.
-struct Rng(u64);
+pub(crate) struct Rng(u64);
 
 impl Rng {
-    fn new(seed: u64) -> Self {
+    pub(crate) fn new(seed: u64) -> Self {
         Self(seed)
     }
 
@@ -129,7 +129,7 @@ impl Rng {
         z ^ (z >> 31)
     }
 
-    fn below(&mut self, n: u64) -> u64 {
+    pub(crate) fn below(&mut self, n: u64) -> u64 {
         self.next_u64() % n
     }
 
@@ -137,11 +137,11 @@ impl Rng {
         lo + self.below(hi - lo + 1)
     }
 
-    fn percent(&mut self, p: u64) -> bool {
+    pub(crate) fn percent(&mut self, p: u64) -> bool {
         self.below(100) < p
     }
 
-    fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
+    pub(crate) fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
         &items[self.below(items.len() as u64) as usize]
     }
 

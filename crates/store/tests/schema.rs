@@ -57,6 +57,12 @@ async fn config_migrations_apply_to_fresh_db_and_reopen() {
         tables(&db).await,
         [
             "account",
+            "alarm_ack",
+            "alarm_sent",
+            "cal_op",
+            "caldav",
+            "caldav_trust",
+            "calendar_pref",
             "device",
             "draft",
             "draft_purge",
@@ -94,6 +100,12 @@ async fn cache_migrations_apply_to_fresh_db_and_reopen() {
     assert_eq!(
         tables(&db).await,
         [
+            "cal_alarm",
+            "cal_event",
+            "cal_inbox",
+            "cal_instance",
+            "cal_skip",
+            "calendar",
             "change_log",
             "label",
             "location",
@@ -148,6 +160,97 @@ async fn upgraded_cache_marks_old_messages_without_calendar() {
         .await;
     assert!(rejected.is_err(), "has_calendar is a boolean");
     integrity(&db).await;
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn upgraded_config_marks_seen_ops_as_mail() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("config.db");
+    let conn = Connection::open(&path).unwrap();
+    for sql in [
+        include_str!("../migrations/config/V1__init.sql"),
+        include_str!("../migrations/config/V2__image_sender.sql"),
+        include_str!("../migrations/config/V3__compose.sql"),
+        include_str!("../migrations/config/V4__outbox_file.sql"),
+        include_str!("../migrations/config/V5__multi_account.sql"),
+        include_str!("../migrations/config/V6__default_identity.sql"),
+        include_str!("../migrations/config/V7__draft_client_id.sql"),
+        include_str!("../migrations/config/V8__push_subscription.sql"),
+    ] {
+        conn.execute_batch(sql).unwrap();
+    }
+    conn.pragma_update(None, "user_version", 8).unwrap();
+    conn.execute(
+        "INSERT INTO op_seen (op_id, account_id) VALUES ('op-1', 1)",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let db = ConfigDb::open(&path).unwrap();
+    assert_eq!(user_version(&db).await, CONFIG_SCHEMA);
+    let kind: String = db
+        .read(|c| Ok(c.query_row("SELECT kind FROM op_seen", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(kind, "mail");
+    let rejected = db
+        .write(|tx| Ok(tx.execute("UPDATE op_seen SET kind = 'other'", [])?))
+        .await;
+    assert!(rejected.is_err(), "kind is mail or cal");
+    integrity(&db).await;
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn calendar_config_rows_go_with_their_account() {
+    let dir = TempDir::new().unwrap();
+    let db = ConfigDb::open(&dir.path().join("config.db")).unwrap();
+    let left = db
+        .write(|tx| {
+            for id in [1, 2] {
+                tx.execute(
+                    "INSERT INTO account (id, name, imap_host, imap_port, imap_tls, smtp_host, \
+                     smtp_port, smtp_tls, username, secret_ct, secret_nonce) \
+                     VALUES (?1, 'a', 'h', 993, 'tls', 'h', 465, 'tls', 'u', x'00', x'00')",
+                    [id],
+                )?;
+            }
+            tx.execute_batch(
+                "INSERT INTO caldav (account_id) VALUES (1);
+                 INSERT INTO caldav (account_id, fallback_account_id) VALUES (2, 1);
+                 INSERT INTO calendar_pref (account_id, href) VALUES (1, '/c/');
+                 INSERT INTO caldav_trust (account_id) VALUES (1);
+                 INSERT INTO cal_op (op_id, account_id, target_account_id, uid, kind) \
+                     VALUES ('a', 2, 1, 'u', 'apply');
+                 INSERT INTO alarm_ack (alarm_key, account_id, fire_at) VALUES ('k', 1, 0);
+                 INSERT INTO alarm_sent (alarm_key, target, account_id, fire_at) \
+                     VALUES ('k', 'device:1', 1, 0);
+                 DELETE FROM account WHERE id = 1;",
+            )?;
+            let mut counts = Vec::new();
+            for table in [
+                "caldav",
+                "calendar_pref",
+                "caldav_trust",
+                "cal_op",
+                "alarm_ack",
+                "alarm_sent",
+            ] {
+                counts.push(
+                    tx.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| {
+                        r.get::<_, i64>(0)
+                    })?,
+                );
+            }
+            let fallback: Option<i64> =
+                tx.query_row("SELECT fallback_account_id FROM caldav", [], |r| r.get(0))?;
+            Ok((counts, fallback))
+        })
+        .await
+        .unwrap();
+    assert_eq!(left, (vec![1, 0, 0, 0, 0, 0], None));
     db.close().await.unwrap();
 }
 
@@ -259,6 +362,11 @@ fn cache_references(conn: &Connection) -> rusqlite::Result<Vec<String>> {
         "reply_to_email_id",
         "draft_id",
         "client_id",
+        "fallback_account_id",
+        "target_account_id",
+        "recurrence_id",
+        "reply_op_id",
+        "authserv_id",
     ];
     let mut found = Vec::new();
     for table in table_names(conn)? {
@@ -523,7 +631,7 @@ async fn config_v5_gives_identityless_accounts_a_default() {
 
 #[test]
 fn schema_constants_count_the_migrations() {
-    assert_eq!((CONFIG_SCHEMA, CACHE_SCHEMA), (8, 5));
+    assert_eq!((CONFIG_SCHEMA, CACHE_SCHEMA), (9, 6));
 }
 
 #[tokio::test]

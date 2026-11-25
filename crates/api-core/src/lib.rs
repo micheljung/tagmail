@@ -4,6 +4,7 @@
 
 pub mod api;
 pub mod auth_dto;
+pub mod caldav;
 pub mod calendar_dto;
 pub mod compose;
 pub mod compose_dto;
@@ -21,16 +22,20 @@ pub mod replica_dto;
 pub mod routes;
 pub mod signing;
 #[cfg(feature = "sqlite")]
+mod sqlite_calendar;
+#[cfg(feature = "sqlite")]
 pub mod sqlite_store;
 pub mod store;
 pub mod ts;
 pub mod writes;
 
 pub use api::{API_VERSION, Api, Method, PARTIAL_HEADER, Request, Response, offline_error};
+pub use caldav::{CalendarError, CalendarService};
 pub use events::{Arrival, ChangeFeed, Event, EventSession, EventSource, OpenError};
 pub use store::{
-    AccountPatch, AccountRegistry, AccountSummary, BoxFuture, ChangePage, FetchRawError,
-    ImageProxy, MarkDeleting, MessageRecord, NewAccount, ProxiedImage, ProxyError, RuntimeStatus,
-    Secret, Store, StoreError, StoreResult, ThreadDetail, ThreadRows, View, ViewError, ViewIndex,
+    AccountPatch, AccountRegistry, AccountSummary, BoxFuture, CaldavSettingsUpdate, CalendarPatch,
+    ChangePage, FeatureDisabled, FetchRawError, ImageProxy, InvitationContext, MarkDeleting,
+    MessageRecord, NewAccount, ProxiedImage, ProxyError, RuntimeStatus, Secret, Store, StoreError,
+    StoreResult, StoredCopy, ThreadDetail, ThreadRows, View, ViewError, ViewIndex,
 };
 pub use writes::{OpMailbox, OpRequest, Submitted, WriteError, WriteResult, WriteService};

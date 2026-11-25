@@ -5,15 +5,18 @@ use std::io::{BufReader, Read};
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::calendar_dto::{CaldavSettingsDto, CalendarDto};
 use crate::dto::{
     AccountDto, AccountStateDto, AddressDto, ChangeDto, ChangeOpDto, EntityDto, LabelDto,
     MailboxDto, SpecialUseDto, ThreadRowDto, TlsMode,
 };
 use crate::mime::reduce::CalendarParts;
 use crate::signing::{KEY_LEN, UrlKeys};
+use crate::sqlite_calendar;
 use crate::{
-    AccountPatch, AccountSummary, ChangeFeed, ChangePage, MarkDeleting, MessageRecord, NewAccount,
-    Secret, Store, StoreResult, ThreadDetail, ThreadRows, View, ViewIndex,
+    AccountPatch, AccountSummary, CaldavSettingsUpdate, CalendarPatch, ChangeFeed, ChangePage,
+    InvitationContext, MarkDeleting, MessageRecord, NewAccount, Secret, Store, StoreResult,
+    ThreadDetail, ThreadRows, View, ViewIndex,
 };
 use tagmail_core::query::{Query, Term};
 use tagmail_core::{
@@ -1139,6 +1142,95 @@ impl Store for SqliteStore {
         Ok(account)
     }
 
+    async fn caldav_settings(&self, id: AccountId) -> StoreResult<Option<CaldavSettingsDto>> {
+        let config = self
+            .config
+            .read(move |conn| sqlite_calendar::settings(conn, id))
+            .await?;
+        Ok(config.as_ref().map(sqlite_calendar::settings_dto))
+    }
+
+    async fn save_caldav_settings(
+        &self,
+        id: AccountId,
+        update: CaldavSettingsUpdate,
+    ) -> StoreResult<Option<CaldavSettingsDto>> {
+        let sealed = match (&update.username, &update.password) {
+            (Some(_), Some(password)) => Some(self.vault.seal_caldav(id, password.expose())?),
+            _ => None,
+        };
+        let config = self
+            .config
+            .write(move |tx| sqlite_calendar::save_settings(tx, id, update, sealed))
+            .await?;
+        Ok(config.as_ref().map(sqlite_calendar::settings_dto))
+    }
+
+    async fn calendars(&self) -> StoreResult<Vec<CalendarDto>> {
+        let rows = self
+            .cache
+            .read(|conn| tagmail_store::calendar::calendars(conn, None))
+            .await?;
+        let (prefs, defaults) = self
+            .config
+            .read(|conn| {
+                Ok((
+                    tagmail_store::calendar::calendar_prefs(conn)?,
+                    sqlite_calendar::default_hrefs(conn)?,
+                ))
+            })
+            .await?;
+        Ok(rows
+            .iter()
+            .map(|row| {
+                sqlite_calendar::calendar_dto(
+                    row,
+                    prefs.get(&(row.account, row.href.clone())),
+                    defaults.get(&row.account),
+                )
+            })
+            .collect())
+    }
+
+    async fn update_calendar(&self, patch: CalendarPatch) -> StoreResult<Option<CalendarDto>> {
+        let (account, href) = (patch.account, patch.href.clone());
+        let row = self
+            .cache
+            .read(move |conn| {
+                Ok(tagmail_store::calendar::calendars(conn, Some(account))?
+                    .into_iter()
+                    .find(|c| c.href == href))
+            })
+            .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let (pref, default) = self
+            .config
+            .write(move |tx| sqlite_calendar::patch_pref(tx, &patch))
+            .await?;
+        Ok(Some(sqlite_calendar::calendar_dto(
+            &row,
+            Some(&pref),
+            default.as_ref(),
+        )))
+    }
+
+    async fn invitation_context(
+        &self,
+        account: AccountId,
+        uids: Vec<String>,
+    ) -> StoreResult<InvitationContext> {
+        let mapped = self
+            .config
+            .read(move |conn| sqlite_calendar::mapped_accounts(conn, account))
+            .await?;
+        Ok(self
+            .cache
+            .read(move |conn| sqlite_calendar::invitation_context(conn, &mapped, &uids))
+            .await?)
+    }
+
     async fn mark_deleting(&self, id: AccountId) -> StoreResult<MarkDeleting> {
         let (marked, account) = self
             .config
@@ -1147,6 +1239,11 @@ impl Store for SqliteStore {
                     "UPDATE account SET status = ?2, secret_ct = x'', secret_nonce = x'' \
                      WHERE id = ?1 AND status != ?2",
                     params![id.0, AccountStateDto::Deleting.as_str()],
+                )?;
+                tx.execute(
+                    "UPDATE caldav SET username = NULL, secret_ct = NULL, secret_nonce = NULL \
+                     WHERE account_id = ?1",
+                    [id.0],
                 )?;
                 Ok((marked > 0, read_account(tx, id)?))
             })

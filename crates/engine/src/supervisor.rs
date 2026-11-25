@@ -413,6 +413,8 @@ pub(crate) struct Inner<F: ConnectorFactory> {
     removing: Mutex<HashSet<AccountId>>,
     /// Blob writes of each account; its stop waits for them to finish.
     blob_writes: Mutex<HashMap<AccountId, Arc<Semaphore>>>,
+    #[cfg(feature = "calendar")]
+    pub(crate) calendar: crate::calendar::State,
     #[cfg(test)]
     pub(crate) loop_turns: std::sync::atomic::AtomicUsize,
 }
@@ -486,6 +488,8 @@ impl<F: ConnectorFactory> Engine<F> {
                 lifecycle: Mutex::new(HashMap::new()),
                 removing: Mutex::new(HashSet::new()),
                 blob_writes: Mutex::new(HashMap::new()),
+                #[cfg(feature = "calendar")]
+                calendar: crate::calendar::State::default(),
                 #[cfg(test)]
                 loop_turns: std::sync::atomic::AtomicUsize::new(0),
                 config,
@@ -686,6 +690,8 @@ impl<F: ConnectorFactory> Engine<F> {
 
     /// Stops all accounts and waits for their tasks.
     pub async fn shutdown(&self) {
+        #[cfg(feature = "calendar")]
+        self.inner.calendar.shutdown().await;
         let runner = self
             .inner
             .runner
@@ -865,6 +871,8 @@ impl<F: ConnectorFactory> Engine<F> {
             .unwrap_or_else(PoisonError::into_inner)
             .insert(id);
         self.stop_unlocked(id).await;
+        #[cfg(feature = "calendar")]
+        self.inner.calendar.removing(id);
         self.inner.overlays.remove_account(id);
         self.inner
             .labels_dropped
@@ -879,6 +887,11 @@ impl<F: ConnectorFactory> Engine<F> {
                 break;
             }
         }
+        self.inner
+            .stores
+            .cache
+            .write(move |tx| tagmail_store::calendar::purge_account(tx, id))
+            .await?;
         self.inner
             .stores
             .config
@@ -1072,6 +1085,8 @@ impl<F: ConnectorFactory> WriteService for Engine<F> {
 
 impl<F: ConnectorFactory> AccountRegistry for Engine<F> {
     fn account_added(&self, id: AccountId) {
+        #[cfg(feature = "calendar")]
+        self.inner.calendar.added(id);
         self.start(id);
     }
 
@@ -1158,7 +1173,7 @@ fn random_fraction() -> f64 {
 }
 
 /// `base` scaled by a random factor in [0.5, 1.5).
-fn jitter(base: Duration) -> Duration {
+pub(crate) fn jitter(base: Duration) -> Duration {
     base.mul_f64(0.5 + random_fraction())
 }
 

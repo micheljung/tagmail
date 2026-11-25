@@ -51,6 +51,12 @@ pub enum RouteId {
     LabelJobs,
     ExportLabels,
     ImportLabels,
+    CaldavSettings,
+    UpdateCaldavSettings,
+    DiscoverCaldav,
+    ConfirmCaldavHost,
+    Calendars,
+    UpdateCalendar,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -136,6 +142,28 @@ pub const ROUTES: &[Route] = &[
     route(Method::Get, "/api/label-jobs", RouteId::LabelJobs),
     route(Method::Get, "/api/labels/export", RouteId::ExportLabels),
     route(Method::Post, "/api/labels/import", RouteId::ImportLabels),
+    route(
+        Method::Get,
+        "/api/accounts/{id}/caldav",
+        RouteId::CaldavSettings,
+    ),
+    route(
+        Method::Put,
+        "/api/accounts/{id}/caldav",
+        RouteId::UpdateCaldavSettings,
+    ),
+    route(
+        Method::Post,
+        "/api/accounts/{id}/caldav/discover",
+        RouteId::DiscoverCaldav,
+    ),
+    route(
+        Method::Post,
+        "/api/accounts/{id}/caldav/confirm-host",
+        RouteId::ConfirmCaldavHost,
+    ),
+    route(Method::Get, "/api/calendars", RouteId::Calendars),
+    route(Method::Patch, "/api/calendars", RouteId::UpdateCalendar),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

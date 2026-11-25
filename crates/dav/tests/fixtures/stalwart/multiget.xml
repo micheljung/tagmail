@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?><D:multistatus xmlns:D="DAV:" xmlns:A="urn:ietf:params:xml:ns:caldav"><D:response><D:href>/dav/cal/user1/dav-etag_listing/missing.ics</D:href><D:status>HTTP/1.1 404 Not Found</D:status></D:response><D:response><D:href>/dav/cal/user1/dav-etag_listing/multi-0%40x.ics</D:href><D:propstat><D:prop><D:getetag>&quot;2799786385&quot;</D:getetag><A:calendar-data><![CDATA[BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//tagmail//dav tests//EN
+BEGIN:VEVENT
+UID:multi-0@tagmail.test
+DTSTAMP:20261125T100000Z
+DTSTART:20261201T090000Z
+DTEND:20261201T100000Z
+SUMMARY:Event 0
+END:VEVENT
+END:VCALENDAR
+]]></A:calendar-data></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>
