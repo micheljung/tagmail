@@ -1,0 +1,44 @@
+{
+  "autoApply": "none",
+  "events": [
+    {
+      "allDay": true,
+      "attendees": [
+        {
+          "email": "2_GE4DCMZQGM2TAMBQ@imip.me.com",
+          "name": "Grace Placeholder",
+          "partstat": "accepted"
+        },
+        {
+          "email": "bob@example.org",
+          "name": "Bob Tester",
+          "partstat": "needs_action"
+        }
+      ],
+      "cancelled": false,
+      "description": null,
+      "end": "2026-12-27",
+      "location": "Example Street 1\n8000 Zurich\nSwitzerland",
+      "organizer": {
+        "altEmail": "grace@icloud.example",
+        "email": "2_GE4DCMZQGM2TAMBQ@imip.me.com",
+        "name": "Grace Placeholder"
+      },
+      "recurrence": null,
+      "recurrenceId": null,
+      "start": "2026-12-24",
+      "summary": "Family visit",
+      "tzid": null,
+      "uid": "4F2A9C1E-7B3D-4E8A-9C6F-1D2E3F4A5B6C",
+      "url": "https://example.com/family-visit"
+    }
+  ],
+  "method": "request",
+  "outdated": false,
+  "scheduling": null,
+  "senderAuth": "untrusted_config",
+  "stored": null,
+  "target": null,
+  "tooLarge": false,
+  "truncated": false
+}

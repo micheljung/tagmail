@@ -43,6 +43,19 @@ pub fn sniff_image(bytes: &[u8]) -> Option<&'static str> {
     None
 }
 
+const CALENDAR_TYPES: [&str; 2] = ["text/calendar", "application/ics"];
+const CALENDAR_EXTENSION: &[u8] = b".ics";
+
+/// Whether a part carries iCalendar data, by lowercase `type/subtype` or
+/// file name; sync and the invitation extractor agree through this.
+pub fn is_calendar(content_type: &str, name: Option<&[u8]>) -> bool {
+    CALENDAR_TYPES.contains(&content_type)
+        || name.is_some_and(|n| {
+            n.len() >= CALENDAR_EXTENSION.len()
+                && n[n.len() - CALENDAR_EXTENSION.len()..].eq_ignore_ascii_case(CALENDAR_EXTENSION)
+        })
+}
+
 /// `type/subtype` of a part, lowercased; `text/plain` when absent.
 pub fn content_type(part: &MessagePart<'_>) -> String {
     part.content_type().map_or_else(

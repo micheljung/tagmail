@@ -1,0 +1,17 @@
+BEGIN:VCALENDAR
+PRODID:-//Example Corp//Scheduler 1.0//EN
+VERSION:2.0
+METHOD:REQUEST
+BEGIN:VEVENT
+UID:spoof-schemeless-3a9e@corp.example
+DTSTAMP:20261125T070000Z
+DTSTART:20261204T090000Z
+DTEND:20261204T093000Z
+ORGANIZER;CN=Chief Executive;EMAIL=x@evil.example:ceo@corp.example
+ATTENDEE;CN=Finance;EMAIL=x@evil.example;PARTSTAT=ACCEPTED:finance@corp.exam
+ ple
+ATTENDEE;CN=Bob Tester;EMAIL=x@evil.example;RSVP=TRUE:MAILTO:Bob@Example.org
+SUMMARY:Payment approval
+SEQUENCE:0
+END:VEVENT
+END:VCALENDAR

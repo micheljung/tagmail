@@ -1,0 +1,44 @@
+{
+  "autoApply": "none",
+  "events": [
+    {
+      "allDay": false,
+      "attendees": [
+        {
+          "email": "bob@example.org",
+          "name": "Bob Tester",
+          "partstat": "needs_action"
+        },
+        {
+          "email": "urn:uuid:6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b",
+          "name": "Board Room",
+          "partstat": "needs_action"
+        }
+      ],
+      "cancelled": false,
+      "description": null,
+      "end": "2026-12-03T09:30:00Z",
+      "location": null,
+      "organizer": {
+        "altEmail": "x@evil.example",
+        "email": "ceo@corp.example",
+        "name": "Chief Executive"
+      },
+      "recurrence": null,
+      "recurrenceId": null,
+      "start": "2026-12-03T09:00:00Z",
+      "summary": "Board briefing",
+      "tzid": null,
+      "uid": "spoof-email-param-7d2c@corp.example",
+      "url": null
+    }
+  ],
+  "method": "request",
+  "outdated": false,
+  "scheduling": null,
+  "senderAuth": "address_mismatch",
+  "stored": null,
+  "target": null,
+  "tooLarge": false,
+  "truncated": false
+}

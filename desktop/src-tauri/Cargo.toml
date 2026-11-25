@@ -19,6 +19,8 @@ path = "src/main.rs"
 required-features = ["app"]
 
 [features]
+default = ["calendar"]
+calendar = ["tagmail-replica/calendar"]
 # The Tauri shell needs WebKitGTK dev libs on Linux; the lib does not, so the
 # main CI job builds and tests it without them.
 app = [
@@ -48,7 +50,7 @@ serde.workspace = true
 serde_json.workspace = true
 tagmail-api-core = { workspace = true, features = ["sqlite"] }
 tagmail-core.workspace = true
-tagmail-replica = { path = "../../crates/replica" }
+tagmail-replica = { path = "../../crates/replica", default-features = false }
 tagmail-store.workspace = true
 tauri = { version = "2.12", optional = true, features = ["image-png", "tray-icon"] }
 tauri-plugin-autostart = { version = "2.7", optional = true }

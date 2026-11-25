@@ -1,0 +1,18 @@
+BEGIN:VCALENDAR
+PRODID:-//Google Inc//Google Calendar 70.9054//EN
+VERSION:2.0
+METHOD:REQUEST
+BEGIN:VEVENT
+DTSTART:20261202T130000Z
+DTEND:20261202T133000Z
+DTSTAMP:20261125T070000Z
+ORGANIZER;CN=Payroll Department:mailto:Payroll@Bank.Example
+UID:spoof-5c1e0d9a@bank.example
+ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE;CN=Bob Tester
+ :mailto:bob@example.org
+DESCRIPTION:Please confirm your salary account at https://bank-example.invalid/verify
+SEQUENCE:0
+STATUS:CONFIRMED
+SUMMARY:Urgent: salary account verification
+END:VEVENT
+END:VCALENDAR

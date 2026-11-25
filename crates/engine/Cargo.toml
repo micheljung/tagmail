@@ -8,6 +8,7 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
+calendar = []
 # Integration tests against the Dovecot test server (test/compose.yml).
 dovecot-tests = []
 # Send tests against Dovecot and Mailpit (test/compose.yml).

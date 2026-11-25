@@ -24,4 +24,9 @@ remoteImages: number,
 /**
  * A sender is on the "always show images" list.
  */
-imagesAllowed: boolean, parts: Array<PartDto>, };
+imagesAllowed: boolean, parts: Array<PartDto>, 
+/**
+ * An iCalendar part was seen at sync; `GET /api/messages/{id}/invitation`
+ * reads it.
+ */
+hasInvitation: boolean, };

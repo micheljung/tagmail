@@ -8,6 +8,7 @@ use std::sync::Arc;
 use reqwest::Method;
 use rusqlite::{OptionalExtension, params};
 use tagmail_api_core::dto::{AccountDto, LabelDto, MailboxDto};
+use tagmail_api_core::mime::reduce::CalendarParts;
 use tagmail_api_core::replica_dto::ReplicaImageDto;
 use tagmail_api_core::signing::UrlKeys;
 use tagmail_api_core::sqlite_store::SqliteStore;
@@ -158,6 +159,13 @@ impl Store for ReplicaStore {
         id: MessageRowId,
     ) -> impl Future<Output = StoreResult<Option<Vec<u8>>>> + Send {
         self.inner.raw_message(id)
+    }
+
+    fn calendar_source(
+        &self,
+        id: MessageRowId,
+    ) -> impl Future<Output = StoreResult<Option<CalendarParts>>> + Send {
+        self.inner.calendar_source(id)
     }
 
     async fn render_source(&self, id: MessageRowId) -> StoreResult<Option<Vec<u8>>> {

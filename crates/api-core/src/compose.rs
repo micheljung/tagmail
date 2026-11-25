@@ -819,6 +819,7 @@ mod tests {
                 unread: false,
                 starred: false,
                 has_attachment: false,
+                has_calendar: false,
             },
             headers: ReplyHeaders::default(),
             reply_to: Vec::new(),

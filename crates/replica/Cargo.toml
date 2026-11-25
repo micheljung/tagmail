@@ -10,6 +10,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["calendar"]
+calendar = ["tagmail-api-core/calendar"]
+
 [dependencies]
 base64.workspace = true
 futures-util.workspace = true

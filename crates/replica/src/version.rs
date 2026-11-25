@@ -55,6 +55,7 @@ mod tests {
             api,
             min_client,
             server: "test".into(),
+            features: Vec::new(),
         }
     }
 

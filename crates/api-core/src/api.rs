@@ -24,6 +24,11 @@ use crate::writes::WriteService;
 
 pub const API_VERSION: ApiVersion = ApiVersion { major: 1, minor: 3 };
 pub const MIN_CLIENT: ApiVersion = ApiVersion { major: 1, minor: 0 };
+/// Optional features of this build, as `VersionDto.features` reports them.
+pub const FEATURES: &[&str] = &[
+    #[cfg(feature = "calendar")]
+    "calendar",
+];
 
 /// Thread rows per `/api/threads` request (plan §3.11 pages of 100).
 pub const MAX_THREAD_IDS: usize = 100;
@@ -255,6 +260,7 @@ impl<S: Store> Api<S> {
                 RouteId::Thread => self.thread(params[0]).await,
                 RouteId::Message => self.message(params[0]).await,
                 RouteId::RenderMessage => self.render_message(params[0], req.query).await,
+                RouteId::Invitation => self.invitation(params[0]).await,
                 RouteId::Part => self.part(params[0], req.query).await,
                 RouteId::ProxyImage => self.proxy_image(params[0]).await,
                 RouteId::ImageSenders => self.image_senders().await,
@@ -297,6 +303,7 @@ impl<S: Store> Api<S> {
                 api: API_VERSION,
                 min_client: MIN_CLIENT,
                 server: env!("CARGO_PKG_VERSION").to_owned(),
+                features: FEATURES.iter().map(|f| (*f).to_owned()).collect(),
             },
         )
     }

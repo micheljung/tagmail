@@ -161,6 +161,7 @@ impl Msg {
                 snippet: None,
                 size: 100,
                 has_attachment: false,
+                has_calendar: false,
             }),
         }
     }

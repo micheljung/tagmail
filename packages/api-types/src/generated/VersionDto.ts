@@ -5,4 +5,9 @@ import type { ApiVersion } from "./ApiVersion";
  * `GET /api/version`. A client whose own API version is older than
  * `minClient` must update before it syncs.
  */
-export type VersionDto = { api: ApiVersion, minClient: ApiVersion, server: string, };
+export type VersionDto = { api: ApiVersion, minClient: ApiVersion, server: string, 
+/**
+ * Optional features this server was built with, e.g. `calendar`;
+ * absent from older servers.
+ */
+features: Array<string>, };

@@ -14,6 +14,10 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+default = ["calendar"]
+calendar = ["tagmail-api-core/calendar", "tagmail-engine/calendar"]
+
 [dependencies]
 aes-gcm.workspace = true
 anyhow.workspace = true

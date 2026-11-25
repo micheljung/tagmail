@@ -1,0 +1,79 @@
+BEGIN:VCALENDAR
+METHOD:REQUEST
+PRODID:Microsoft Exchange Server 2010
+VERSION:2.0
+BEGIN:VTIMEZONE
+TZID:W. Europe Standard Time
+BEGIN:STANDARD
+DTSTART:16010101T030000
+TZOFFSETFROM:+0200
+TZOFFSETTO:+0100
+RRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=-1SU;BYMONTH=10
+END:STANDARD
+BEGIN:DAYLIGHT
+DTSTART:16010101T020000
+TZOFFSETFROM:+0100
+TZOFFSETTO:+0200
+RRULE:FREQ=YEARLY;INTERVAL=1;BYDAY=-1SU;BYMONTH=3
+END:DAYLIGHT
+END:VTIMEZONE
+BEGIN:VEVENT
+ORGANIZER;CN=Dana Sample:mailto:dana.sample@contoso.example
+ATTENDEE;ROLE=REQ-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE;CN=Bob Tester
+ :mailto:bob@example.org
+ATTENDEE;ROLE=OPT-PARTICIPANT;PARTSTAT=NEEDS-ACTION;RSVP=TRUE;CN=Erin Placeh
+ older:mailto:erin@contoso.example
+ATTENDEE;CUTYPE=RESOURCE;ROLE=NON-PARTICIPANT;PARTSTAT=ACCEPTED;CN=Room Zug
+ 4.02:mailto:room-zug-402@contoso.example
+DESCRIPTION;LANGUAGE=en-US:Weekly sync on the migration.\n______________
+ __________________________________________________________________\nMicro
+ soft Teams meeting\nJoin on your computer\, mobile app or room device\nCli
+ ck here to join the meeting<https://teams.microsoft.com/l/meetup-join/19%3
+ ameeting_EXAMPLE%40thread.v2/0>\nMeeting ID: 123 456 789 012\nPasscode: ab
+ C1dE\n______________________________________________________________________
+ __________\n
+UID:040000008200E00074C5B7101A82E00800000000B0C1D2E3F4A5DB01000000000000000
+ 010000000A1B2C3D4E5F60718293A4B5C6D7E8F90
+SUMMARY;LANGUAGE=en-US:Migration sync
+DTSTART;TZID=W. Europe Standard Time:20261215T143000
+DTEND;TZID=W. Europe Standard Time:20261215T151500
+CLASS:PUBLIC
+PRIORITY:5
+DTSTAMP:20261125T091530Z
+TRANSP:OPAQUE
+STATUS:CONFIRMED
+SEQUENCE:0
+LOCATION;LANGUAGE=en-US:Microsoft Teams Meeting
+X-MICROSOFT-CDO-APPT-SEQUENCE:0
+X-MICROSOFT-CDO-OWNERAPPTID:2123456789
+X-MICROSOFT-CDO-BUSYSTATUS:TENTATIVE
+X-MICROSOFT-CDO-INTENDEDSTATUS:BUSY
+X-MICROSOFT-CDO-ALLDAYEVENT:FALSE
+X-MICROSOFT-CDO-IMPORTANCE:1
+X-MICROSOFT-CDO-INSTTYPE:0
+X-MICROSOFT-SKYPETEAMSMEETINGURL:https://teams.microsoft.com/l/meetup-join/
+ 19%3ameeting_EXAMPLE%40thread.v2/0
+X-MICROSOFT-SCHEDULINGSERVICEUPDATEURL:https://api.scheduler.teams.microsof
+ t.com/teams/example/0
+X-MICROSOFT-SKYPETEAMSPROPERTIES:{"cid":"19:meeting_EXAMPLE@thread.v2"\,"pr
+ ivate":true\,"type":0\,"mid":0\,"rid":0\,"uid":null}
+X-MICROSOFT-ONLINEMEETINGCONFLINK:conf:sip:dana.sample@contoso.example\;gru
+ u\;opaque=app:conf:focus:id:EXAMPLE
+X-MICROSOFT-DONOTFORWARDMEETING:FALSE
+X-MICROSOFT-DISALLOW-COUNTER:FALSE
+X-MICROSOFT-REQUESTEDATTENDANCEMODE:DEFAULT
+X-MICROSOFT-ISRESPONSEREQUESTED:TRUE
+X-MICROSOFT-LOCATIONS:[{"DisplayName":"Microsoft Teams Meeting"\,"LocationA
+ nnotation":""\,"LocationSource":0\,"Unresolved":false\,"LocationUri":""}]
+X-ALT-DESC;FMTTYPE=text/html:<html><head><meta http-equiv="Content-Type" co
+ ntent="text/html\; charset=utf-8"></head><body><p>Weekly sync on the migrat
+ ion.</p><div><a href="https://teams.microsoft.com/l/meetup-join/19%3ameetin
+ g_EXAMPLE%40thread.v2/0">Click here to join the meeting</a></div></body></h
+ tml>
+BEGIN:VALARM
+DESCRIPTION:REMINDER
+TRIGGER;RELATED=START:-PT15M
+ACTION:DISPLAY
+END:VALARM
+END:VEVENT
+END:VCALENDAR

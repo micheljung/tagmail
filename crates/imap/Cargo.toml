@@ -14,6 +14,7 @@ dovecot-tests = []
 [dependencies]
 imap-codec = { version = "=2.0.0-alpha.10", features = ["ext_condstore_qresync", "ext_metadata", "starttls"] }
 imap-next = { version = "=0.3.4", default-features = false, features = ["ext_condstore_qresync", "ext_metadata", "starttls"] }
+mail-parser = { workspace = true, features = ["full_encoding"] }
 rustls.workspace = true
 tagmail-core.workspace = true
 thiserror.workspace = true

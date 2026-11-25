@@ -1,0 +1,44 @@
+{
+  "autoApply": "none",
+  "events": [
+    {
+      "allDay": false,
+      "attendees": [
+        {
+          "email": "finance@corp.example",
+          "name": "Finance",
+          "partstat": "accepted"
+        },
+        {
+          "email": "Bob@Example.org",
+          "name": "Bob Tester",
+          "partstat": "needs_action"
+        }
+      ],
+      "cancelled": false,
+      "description": null,
+      "end": "2026-12-04T09:30:00Z",
+      "location": null,
+      "organizer": {
+        "altEmail": "x@evil.example",
+        "email": "ceo@corp.example",
+        "name": "Chief Executive"
+      },
+      "recurrence": null,
+      "recurrenceId": null,
+      "start": "2026-12-04T09:00:00Z",
+      "summary": "Payment approval",
+      "tzid": null,
+      "uid": "spoof-schemeless-3a9e@corp.example",
+      "url": null
+    }
+  ],
+  "method": "request",
+  "outdated": false,
+  "scheduling": null,
+  "senderAuth": "address_mismatch",
+  "stored": null,
+  "target": null,
+  "tooLarge": false,
+  "truncated": false
+}

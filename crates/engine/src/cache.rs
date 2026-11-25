@@ -868,8 +868,8 @@ pub fn parse_addresses(json: Option<&str>) -> Vec<AddressDto> {
 fn insert_message(w: &mut W<'_>, m: &NewMessage) -> Result<i64> {
     w.conn.execute(
         "INSERT INTO message (account_id, email_id, msgid_hdr, in_reply_to, date, subject_norm, \
-         from_json, to_json, cc_json, subject, snippet, size, has_attachment) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+         from_json, to_json, cc_json, subject, snippet, size, has_attachment, has_calendar) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             w.account,
             m.email_id.as_str(),
@@ -884,6 +884,7 @@ fn insert_message(w: &mut W<'_>, m: &NewMessage) -> Result<i64> {
             m.snippet,
             m.size,
             m.has_attachment,
+            m.has_calendar,
         ],
     )?;
     let id = w.conn.last_insert_rowid();
@@ -941,6 +942,12 @@ pub fn add_messages(w: &mut W<'_>, mailbox: i64, fetched: &[Fetched]) -> Result<
                     w.conn.execute(
                         "UPDATE message SET snippet = ?2 WHERE id = ?1",
                         params![id, m.snippet],
+                    )?;
+                }
+                if m.has_calendar {
+                    w.conn.execute(
+                        "UPDATE message SET has_calendar = 1 WHERE id = ?1 AND has_calendar = 0",
+                        [id],
                     )?;
                 }
                 if unseen_recent
@@ -1519,5 +1526,25 @@ mod tests {
         assert_eq!(candidates.ids.len(), 2);
         candidates.apply(CandidateChanges::default(), (NOW + 2) * MS_PER_SEC);
         assert_eq!(candidates.ids.keys().collect::<Vec<_>>(), [&2]);
+    }
+
+    #[tokio::test]
+    async fn has_calendar_is_stored_and_set_by_a_later_copy() {
+        let t = crate::testutil::open();
+        let mbs = t.mailboxes(&["INBOX", "Archive"]).await;
+        let invite = |uid, has_calendar| {
+            let mut f = crate::testutil::msg("c1", "Invite", "a@x", "b@x", 0).fetched(uid);
+            if let Some(m) = &mut f.message {
+                m.has_calendar = has_calendar;
+            }
+            f
+        };
+        let stored = || t.query("SELECT has_calendar FROM message", |r| r.get::<_, bool>(0));
+        t.add(mbs[0], vec![invite(1, false)]).await;
+        assert_eq!(stored().await, [false]);
+        t.add(mbs[1], vec![invite(1, true)]).await;
+        assert_eq!(stored().await, [true]);
+        t.add(mbs[0], vec![invite(2, false)]).await;
+        assert_eq!(stored().await, [true], "never cleared");
     }
 }

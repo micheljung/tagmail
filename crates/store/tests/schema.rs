@@ -116,6 +116,42 @@ async fn cache_migrations_apply_to_fresh_db_and_reopen() {
 }
 
 #[tokio::test]
+async fn upgraded_cache_marks_old_messages_without_calendar() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("cache.db");
+    let conn = Connection::open(&path).unwrap();
+    for sql in [
+        include_str!("../migrations/cache/V1__init.sql"),
+        include_str!("../migrations/cache/V2__pending_text_index.sql"),
+        include_str!("../migrations/cache/V3__op_overlay.sql"),
+        include_str!("../migrations/cache/V4__hide_has_cal.sql"),
+    ] {
+        conn.execute_batch(sql).unwrap();
+    }
+    conn.pragma_update(None, "user_version", 4).unwrap();
+    conn.execute(
+        "INSERT INTO message (account_id, email_id, date) VALUES (1, 'e1', 0)",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let db = CacheDb::open(&path).unwrap();
+    assert_eq!(user_version(&db).await, CACHE_SCHEMA);
+    let has_calendar: i64 = db
+        .read(|c| Ok(c.query_row("SELECT has_calendar FROM message", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(has_calendar, 0);
+    let rejected = db
+        .write(|tx| Ok(tx.execute("UPDATE message SET has_calendar = 2", [])?))
+        .await;
+    assert!(rejected.is_err(), "has_calendar is a boolean");
+    integrity(&db).await;
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn newer_schema_is_refused() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("config.db");
@@ -487,7 +523,7 @@ async fn config_v5_gives_identityless_accounts_a_default() {
 
 #[test]
 fn schema_constants_count_the_migrations() {
-    assert_eq!((CONFIG_SCHEMA, CACHE_SCHEMA), (8, 4));
+    assert_eq!((CONFIG_SCHEMA, CACHE_SCHEMA), (8, 5));
 }
 
 #[tokio::test]
