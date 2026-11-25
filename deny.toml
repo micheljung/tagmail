@@ -8,6 +8,8 @@ ignore = [
   # rsa via webauthn-rs only verifies RS256 assertions with public keys;
   # the Marvin timing attack needs private-key decryption or signing.
   { id = "RUSTSEC-2023-0071", reason = "webauthn-rs uses RSA for public-key signature verification only" },
+  # imap-types and calcard both require chrono and offer no alternative yet.
+  { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained, not vulnerable; required by imap-types and calcard" },
 ]
 
 [licenses]
