@@ -22,7 +22,7 @@ pub const TEXT_CAP: usize = 64 * 1024;
 /// Raw message size beyond which a fetch is abandoned (plan §3.4 step 6).
 pub const DEFAULT_RAW_CAP: u64 = 50 * 1024 * 1024;
 
-const ZSTD_LEVEL: i32 = 3;
+pub(crate) const ZSTD_LEVEL: i32 = 3;
 /// The window [`ZSTD_LEVEL`] declares when the input size is not known up
 /// front, as in [`BlobStore::put_text`].
 const TEXT_WINDOW_LOG: u32 = 21;

@@ -84,6 +84,14 @@ fn account_aad(account: AccountId) -> [u8; 8] {
     account.0.to_le_bytes()
 }
 
+const CALDAV_AAD_PREFIX: &[u8] = b"caldav";
+
+/// Distinct from [`account_aad`], so a CalDAV secret cannot be opened as
+/// the IMAP password or the other way round.
+fn caldav_aad(account: AccountId) -> Vec<u8> {
+    [CALDAV_AAD_PREFIX, &account_aad(account)].concat()
+}
+
 impl Vault {
     /// Unwraps the data key in `config`, creating and storing one on first
     /// use.
@@ -175,7 +183,24 @@ impl Vault {
         account: AccountId,
         sealed: &Sealed,
     ) -> Result<Zeroizing<String>, CredentialError> {
-        let plain = self.open_bytes(&account_aad(account), sealed)?;
+        self.open_text(&account_aad(account), sealed)
+    }
+
+    /// Seals a CalDAV password override (`caldav.secret_ct`).
+    pub fn seal_caldav(&self, account: AccountId, secret: &str) -> Result<Sealed, CredentialError> {
+        self.seal_bytes(&caldav_aad(account), secret.as_bytes())
+    }
+
+    pub fn open_caldav(
+        &self,
+        account: AccountId,
+        sealed: &Sealed,
+    ) -> Result<Zeroizing<String>, CredentialError> {
+        self.open_text(&caldav_aad(account), sealed)
+    }
+
+    fn open_text(&self, aad: &[u8], sealed: &Sealed) -> Result<Zeroizing<String>, CredentialError> {
+        let plain = self.open_bytes(aad, sealed)?;
         let text = std::str::from_utf8(&plain).map_err(|_| CredentialError::Crypto)?;
         Ok(Zeroizing::new(text.to_owned()))
     }
@@ -274,6 +299,17 @@ mod tests {
             Some(CredentialError::Crypto)
         );
         assert!(vault.open(AccountId(1), &sealed).is_err());
+    }
+
+    #[test]
+    fn caldav_secrets_do_not_open_as_imap_passwords() {
+        let (vault, _) = Vault::create(&key(1)).unwrap();
+        let sealed = vault.seal_caldav(AccountId(1), SECRET).unwrap();
+        assert_eq!(*vault.open_caldav(AccountId(1), &sealed).unwrap(), SECRET);
+        assert!(vault.open(AccountId(1), &sealed).is_err());
+        assert!(vault.open_caldav(AccountId(2), &sealed).is_err());
+        let imap = vault.seal(AccountId(1), SECRET).unwrap();
+        assert!(vault.open_caldav(AccountId(1), &imap).is_err());
     }
 
     #[test]

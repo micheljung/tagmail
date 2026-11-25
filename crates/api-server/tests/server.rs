@@ -951,3 +951,142 @@ async fn engine_syncs_added_accounts_and_reports_errors() {
         .unwrap();
     restarted.shutdown().await.unwrap();
 }
+
+async fn server_with_account(dirs: &Dirs) -> Server {
+    let server = Server::start(&dirs.config(&dirs.key()), None)
+        .await
+        .unwrap();
+    server
+        .store()
+        .config()
+        .write(|tx| {
+            tx.execute_batch(
+                "INSERT INTO account (id, name, imap_host, imap_port, imap_tls, smtp_host, smtp_port,
+                     smtp_tls, username, secret_ct, secret_nonce) VALUES
+                     (1, 'a', 'h', 993, 'tls', 'h', 465, 'tls', 'u', x'00', x'00');",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    server
+}
+
+#[cfg(feature = "calendar")]
+#[tokio::test]
+async fn caldav_settings_are_validated_and_never_return_the_password() {
+    let dirs = Dirs::new();
+    let server = server_with_account(&dirs).await;
+    let client = owner(&server).await;
+    let settings = url(&server, "/api/accounts/1/caldav");
+    let put = |body: Value| client.put(&settings).json(&body).send();
+
+    let resp = client.get(&settings).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let got: Value = resp.json().await.unwrap();
+    assert_eq!(got["status"], "unconfigured");
+    assert_eq!(got["scheduling"], "auto");
+    assert_eq!(got["authservId"], Value::Null);
+
+    let resp = put(json!({ "url": "http://dav.example.com/" }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 422);
+    assert_eq!(resp.json::<Value>().await.unwrap()["field"], "url");
+    let resp = put(json!({ "url": "https://dav.example.com/", "username": "dav" }))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 422);
+    assert_eq!(resp.json::<Value>().await.unwrap()["field"], "password");
+    let resp = put(json!({ "fallbackAccountId": 1 })).await.unwrap();
+    assert_eq!(resp.status(), 422);
+
+    let resp = put(json!({
+        "url": "http://127.0.0.1:10232/",
+        "allowInsecure": true,
+        "username": "dav",
+        "password": "hunter2",
+        "scheduling": "client",
+        "authservId": "mx.example.com",
+    }))
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(!body.contains("hunter2"));
+    let saved: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(saved["hasPassword"], true);
+    assert_eq!(saved["scheduling"], "client");
+    assert_eq!(saved["authservId"], "mx.example.com");
+
+    let resp = put(json!({
+        "url": "http://127.0.0.1:10232/",
+        "allowInsecure": true,
+        "username": "dav",
+    }))
+    .await
+    .unwrap();
+    assert_eq!(resp.status(), 200, "an unchanged login keeps its password");
+    let kept: Value = resp.json().await.unwrap();
+    assert_eq!(kept["hasPassword"], true);
+    assert_eq!(kept["authservId"], "mx.example.com", "absent keeps it");
+    let resp = put(json!({
+        "url": "http://127.0.0.1:10232/",
+        "allowInsecure": true,
+        "authservId": null,
+    }))
+    .await
+    .unwrap();
+    assert_eq!(
+        resp.json::<Value>().await.unwrap()["authservId"],
+        Value::Null
+    );
+
+    let resp = client
+        .post(url(&server, "/api/accounts/1/caldav/discover"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 503, "no engine runs in this test");
+    let resp = client
+        .get(url(&server, "/api/accounts/7/caldav"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+
+    let resp = client
+        .get(url(&server, "/api/calendars"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.json::<Value>().await.unwrap(),
+        json!({ "calendars": [] })
+    );
+    let resp = client
+        .patch(url(&server, "/api/calendars"))
+        .json(&json!({ "accountId": 1, "href": "/nope/", "visible": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    server.shutdown().await.unwrap();
+}
+
+#[cfg(not(feature = "calendar"))]
+#[tokio::test]
+async fn caldav_routes_need_the_calendar_feature() {
+    let dirs = Dirs::new();
+    let server = server_with_account(&dirs).await;
+    let client = owner(&server).await;
+    for path in ["/api/accounts/1/caldav", "/api/calendars"] {
+        let resp = client.get(url(&server, path)).send().await.unwrap();
+        assert_eq!(resp.status(), 404, "{path}");
+        assert_eq!(
+            resp.json::<Value>().await.unwrap()["error"],
+            "feature_disabled"
+        );
+    }
+    server.shutdown().await.unwrap();
+}

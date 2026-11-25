@@ -3,6 +3,8 @@
 //! change feed.
 
 mod cache;
+#[cfg(feature = "calendar")]
+mod calendar;
 mod compose;
 #[cfg(test)]
 mod compose_tests;

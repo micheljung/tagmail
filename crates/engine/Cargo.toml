@@ -8,7 +8,16 @@ repository.workspace = true
 publish.workspace = true
 
 [features]
-calendar = []
+calendar = [
+    "dep:rustls",
+    "dep:tagmail-calendar",
+    "dep:tagmail-dav",
+    "dep:time",
+    "dep:url",
+    "dep:zeroize",
+]
+# CalDAV integration tests against Radicale and Stalwart (test/compose.yml).
+caldav-tests = ["calendar", "tagmail-dav/caldav-tests"]
 # Integration tests against the Dovecot test server (test/compose.yml).
 dovecot-tests = []
 # Send tests against Dovecot and Mailpit (test/compose.yml).
@@ -24,18 +33,25 @@ getrandom.workspace = true
 lettre.workspace = true
 mail-builder.workspace = true
 mail-parser = { workspace = true, features = ["full_encoding"] }
+rustls = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 tagmail-api-core.workspace = true
+tagmail-calendar = { workspace = true, optional = true }
 tagmail-core.workspace = true
+tagmail-dav = { workspace = true, optional = true }
 tagmail-imap.workspace = true
 tagmail-store.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt", "sync", "time"] }
 tracing.workspace = true
+time = { workspace = true, optional = true }
+url = { workspace = true, optional = true }
+zeroize = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
+time = { workspace = true, features = ["macros"] }
 zeroize.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }

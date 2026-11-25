@@ -16,6 +16,12 @@ protocol = "http"
 [imap.auth]
 allow-plain-text = true
 
+[calendar.scheduling]
+enable = true
+
+[calendar.scheduling.inbound]
+auto-add = true
+
 [storage]
 data = "rocksdb"
 fts = "rocksdb"
@@ -120,6 +126,42 @@ name = "ops4"
 class = "individual"
 secret = "engine"
 email = ["ops4@tagmail.test"]
+
+[[directory.memory.principals]]
+name = "cal1"
+class = "individual"
+secret = "engine"
+email = ["cal1@tagmail.test"]
+
+[[directory.memory.principals]]
+name = "cal2"
+class = "individual"
+secret = "engine"
+email = ["cal2@tagmail.test"]
+
+[[directory.memory.principals]]
+name = "cal3"
+class = "individual"
+secret = "engine"
+email = ["cal3@tagmail.test"]
+
+[[directory.memory.principals]]
+name = "cal4"
+class = "individual"
+secret = "engine"
+email = ["cal4@tagmail.test"]
+
+[[directory.memory.principals]]
+name = "cal5"
+class = "individual"
+secret = "engine"
+email = ["cal5@tagmail.test"]
+
+[[directory.memory.principals]]
+name = "cal6"
+class = "individual"
+secret = "engine"
+email = ["cal6@tagmail.test"]
 
 [tracer.stdout]
 type = "stdout"

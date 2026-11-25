@@ -29,6 +29,18 @@ services:
       timeout: 5s
       retries: 30
 
+  radicale:
+    build: radicale
+    ports:
+      - "10232:5232"
+    volumes:
+      - /data/collections
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,urllib.error\ntry: urllib.request.urlopen('http://127.0.0.1:5232/')\nexcept urllib.error.HTTPError: pass"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
   mailpit:
     image: axllent/mailpit:v1.27
     environment:

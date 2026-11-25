@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns" xmlns:cal="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/">
+ <d:response>
+  <d:href>/rpc/calendars/petition@micheljung.ch/calendar~XxTGk_wzksKr_bm2FWE92Mq/20261201T090000Z-1a2b@micheljung.ch.ics</d:href>
+  <d:propstat>
+   <d:prop>
+    <d:getetag>"9f1c2e"</d:getetag>
+    <cal:calendar-data>BEGIN:VCALENDAR&#13;
+VERSION:2.0&#13;
+PRODID:-//The Horde Project//Horde iCalendar Library//EN&#13;
+BEGIN:VEVENT&#13;
+UID:20261201T090000Z-1a2b@micheljung.ch&#13;
+DTSTAMP:20261125T100000Z&#13;
+DTSTART:20261201T090000Z&#13;
+DTEND:20261201T100000Z&#13;
+SUMMARY:Standup &amp; review&#13;
+END:VEVENT&#13;
+END:VCALENDAR&#13;
+</cal:calendar-data>
+   </d:prop>
+   <d:status>HTTP/1.1 200 OK</d:status>
+  </d:propstat>
+ </d:response>
+ <d:response>
+  <d:href>/rpc/calendars/petition@micheljung.ch/calendar~XxTGk_wzksKr_bm2FWE92Mq/0f3d7e90-5b1a-4c2e.ics</d:href>
+  <d:propstat>
+   <d:prop><d:getetag/><cal:calendar-data/></d:prop>
+   <d:status>HTTP/1.1 404 Not Found</d:status>
+  </d:propstat>
+ </d:response>
+</d:multistatus>

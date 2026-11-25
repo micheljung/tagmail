@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<d:error xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns">
+  <s:exception>Sabre\DAV\Exception\NotAuthenticated</s:exception>
+  <s:message>No basic authentication headers were found</s:message>
+  <s:sabredav-version>1.8.12</s:sabredav-version>
+</d:error>

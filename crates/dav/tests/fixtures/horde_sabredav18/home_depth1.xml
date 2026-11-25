@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<d:multistatus xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns" xmlns:cal="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/">
+ <d:response>
+  <d:href>/rpc/calendars/petition@micheljung.ch/</d:href>
+  <d:propstat>
+   <d:prop>
+    <d:resourcetype><d:collection/></d:resourcetype>
+    <d:supported-report-set>
+     <d:supported-report><d:report><d:expand-property/></d:report></d:supported-report>
+     <d:supported-report><d:report><d:principal-property-search/></d:report></d:supported-report>
+     <d:supported-report><d:report><d:principal-search-property-set/></d:report></d:supported-report>
+    </d:supported-report-set>
+   </d:prop>
+   <d:status>HTTP/1.1 200 OK</d:status>
+  </d:propstat>
+  <d:propstat>
+   <d:prop>
+    <d:displayname/><x1:calendar-color xmlns:x1="http://apple.com/ns/ical/"/><cs:getctag/><d:sync-token/><cal:supported-calendar-component-set/>
+   </d:prop>
+   <d:status>HTTP/1.1 404 Not Found</d:status>
+  </d:propstat>
+ </d:response>
+ <d:response>
+  <d:href>/rpc/calendars/petition@micheljung.ch/calendar~XxTGk_wzksKr_bm2FWE92Mq/</d:href>
+  <d:propstat>
+   <d:prop>
+    <d:resourcetype><d:collection/><cal:calendar/></d:resourcetype>
+    <d:displayname>Calendar of petition@micheljung.ch</d:displayname>
+    <x1:calendar-color xmlns:x1="http://apple.com/ns/ical/">#0d5c9dff</x1:calendar-color>
+    <d:supported-report-set>
+     <d:supported-report><d:report><cal:calendar-multiget/></d:report></d:supported-report>
+     <d:supported-report><d:report><cal:calendar-query/></d:report></d:supported-report>
+     <d:supported-report><d:report><cal:free-busy-query/></d:report></d:supported-report>
+     <d:supported-report><d:report><d:expand-property/></d:report></d:supported-report>
+     <d:supported-report><d:report><d:principal-property-search/></d:report></d:supported-report>
+     <d:supported-report><d:report><d:principal-search-property-set/></d:report></d:supported-report>
+    </d:supported-report-set>
+    <cal:supported-calendar-component-set><cal:comp name="VEVENT"/></cal:supported-calendar-component-set>
+   </d:prop>
+   <d:status>HTTP/1.1 200 OK</d:status>
+  </d:propstat>
+  <d:propstat>
+   <d:prop><cs:getctag/><d:sync-token/></d:prop>
+   <d:status>HTTP/1.1 404 Not Found</d:status>
+  </d:propstat>
+ </d:response>
+ <d:response>
+  <d:href>/rpc/calendars/petition@micheljung.ch/tasks~aof4jHo7Ws1QZFkxko-2rCM/</d:href>
+  <d:propstat>
+   <d:prop>
+    <d:resourcetype><d:collection/><cal:calendar/></d:resourcetype>
+    <d:displayname>Task list of petition@micheljung.ch</d:displayname>
+    <d:supported-report-set>
+     <d:supported-report><d:report><cal:calendar-multiget/></d:report></d:supported-report>
+     <d:supported-report><d:report><cal:calendar-query/></d:report></d:supported-report>
+    </d:supported-report-set>
+    <cal:supported-calendar-component-set><cal:comp name="VTODO"/></cal:supported-calendar-component-set>
+   </d:prop>
+   <d:status>HTTP/1.1 200 OK</d:status>
+  </d:propstat>
+  <d:propstat>
+   <d:prop><x1:calendar-color xmlns:x1="http://apple.com/ns/ical/"/><cs:getctag/><d:sync-token/></d:prop>
+   <d:status>HTTP/1.1 404 Not Found</d:status>
+  </d:propstat>
+ </d:response>
+ <d:response>
+  <d:href>/rpc/calendars/petition@micheljung.ch/outbox/</d:href>
+  <d:propstat>
+   <d:prop>
+    <d:resourcetype><d:collection/><cal:schedule-outbox/></d:resourcetype>
+   </d:prop>
+   <d:status>HTTP/1.1 200 OK</d:status>
+  </d:propstat>
+  <d:propstat>
+   <d:prop><d:displayname/><cs:getctag/><d:sync-token/><cal:supported-calendar-component-set/></d:prop>
+   <d:status>HTTP/1.1 404 Not Found</d:status>
+  </d:propstat>
+ </d:response>
+</d:multistatus>

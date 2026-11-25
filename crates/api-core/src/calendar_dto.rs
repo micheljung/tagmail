@@ -1,7 +1,7 @@
 //! Calendar DTOs (plan §3.5). They exist in every build, so the generated
 //! TypeScript types do not depend on the `calendar` feature.
 
-use serde::Serialize;
+use serde::{Deserialize, Deserializer, Serialize};
 use ts_rs::TS;
 
 /// `GET /api/messages/{id}/invitation`: the invitation card and what
@@ -63,11 +63,168 @@ pub enum AutoApplyDto {
     None,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum SchedulingDto {
     Server,
     Client,
+}
+
+/// The owner's scheduling choice (plan §3.3); `auto` follows what
+/// discovery detected.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum SchedulingOverrideDto {
+    #[default]
+    Auto,
+    Server,
+    Client,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CaldavStatusDto {
+    /// Not discovered yet.
+    Unconfigured,
+    /// The server is under another registrable domain than the IMAP
+    /// host; `POST .../confirm-host` before anything is sent to it.
+    NeedsConfirmation,
+    Ok,
+    Error,
+}
+
+/// `GET|PUT /api/accounts/{id}/caldav`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CaldavSettingsDto {
+    /// `null`: discovered from the account's addresses.
+    pub url: Option<String>,
+    /// A login other than the IMAP one; `null` reuses the IMAP login.
+    pub username: Option<String>,
+    /// A password is stored for `username`; never returned itself.
+    pub has_password: bool,
+    /// Allows `http` URLs, like the IMAP plain-security setting.
+    pub allow_insecure: bool,
+    pub scheduling: SchedulingOverrideDto,
+    /// What discovery detected; `null` before discovery.
+    pub scheduling_detected: Option<SchedulingDto>,
+    /// Invitations of an account without calendars go to this account's.
+    pub fallback_account_id: Option<i64>,
+    pub default_calendar_href: Option<String>,
+    /// The owner-confirmed `Authentication-Results` id; `null` = never
+    /// applied automatically.
+    pub authserv_id: Option<String>,
+    /// A proposal for `authservId`, read only.
+    pub authserv_id_suggestion: Option<String>,
+    pub confirmed_host: Option<String>,
+    pub status: CaldavStatusDto,
+    pub last_error: Option<String>,
+}
+
+/// `PUT /api/accounts/{id}/caldav` body; it replaces every setting but
+/// two: `password` absent keeps the stored one for an unchanged `username`,
+/// and `authservId` absent keeps the stored one (`null` clears it).
+#[derive(Clone, Default, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields, default)]
+#[ts(optional_fields = nullable)]
+pub struct CaldavSettingsInputDto {
+    pub url: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    #[ts(optional = false)]
+    pub allow_insecure: bool,
+    #[ts(optional = false)]
+    pub scheduling: SchedulingOverrideDto,
+    pub fallback_account_id: Option<i64>,
+    pub default_calendar_href: Option<String>,
+    #[serde(deserialize_with = "present")]
+    #[ts(type = "string | null", optional)]
+    pub authserv_id: Option<Option<String>>,
+}
+
+impl std::fmt::Debug for CaldavSettingsInputDto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CaldavSettingsInputDto")
+            .field("url", &self.url)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "<redacted>"))
+            .field("allow_insecure", &self.allow_insecure)
+            .field("scheduling", &self.scheduling)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `POST /api/accounts/{id}/caldav/discover` and `.../confirm-host`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CaldavDiscoveryDto {
+    pub status: CaldavStatusDto,
+    /// The host to confirm (`needs_confirmation`) or the confirmed one.
+    pub host: Option<String>,
+    pub url: Option<String>,
+    pub scheduling_detected: Option<SchedulingDto>,
+    pub calendars: Vec<CalendarDto>,
+    pub error: Option<String>,
+}
+
+/// `POST /api/accounts/{id}/caldav/confirm-host` body.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ConfirmHostDto {
+    pub host: String,
+}
+
+/// A calendar collection, keyed by (`accountId`, `href`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarDto {
+    pub account_id: i64,
+    pub href: String,
+    pub display_name: Option<String>,
+    /// The owner's color, else the server's.
+    pub color: Option<String>,
+    pub visible: bool,
+    pub sort: Option<i64>,
+    pub writable: bool,
+    /// Invitations of the account go here.
+    pub is_default: bool,
+}
+
+/// `GET /api/calendars`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarsDto {
+    pub calendars: Vec<CalendarDto>,
+}
+
+/// `PATCH /api/calendars` body. `color: null` and `sort: null` reset to
+/// the default; absent fields stay.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CalendarPatchDto {
+    pub account_id: i64,
+    pub href: String,
+    #[serde(default, deserialize_with = "present")]
+    #[ts(optional)]
+    pub color: Option<Option<String>>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub visible: Option<bool>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub default: Option<bool>,
+    #[serde(default, deserialize_with = "present")]
+    #[ts(optional)]
+    pub sort: Option<Option<i64>>,
+}
+
+/// Tells a field that is `null` (`Some(None)`) from one that is absent.
+fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]

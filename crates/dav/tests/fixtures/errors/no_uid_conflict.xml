@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<d:error xmlns:d="DAV:" xmlns:cal="urn:ietf:params:xml:ns:caldav">
+ <cal:no-uid-conflict><d:href>/cal/work/existing%40copy.ics</d:href></cal:no-uid-conflict>
+</d:error>

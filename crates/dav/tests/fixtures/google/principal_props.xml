@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<D:multistatus xmlns:D="DAV:" xmlns:caldav="urn:ietf:params:xml:ns:caldav" xmlns:cs="http://calendarserver.org/ns/">
+ <D:response>
+  <D:href>/caldav/v2/jane.doe%40gmail.com/user</D:href>
+  <D:propstat>
+   <D:status>HTTP/1.1 200 OK</D:status>
+   <D:prop><caldav:calendar-home-set><D:href>/caldav/v2/jane.doe%40gmail.com/</D:href></caldav:calendar-home-set></D:prop>
+  </D:propstat>
+  <D:propstat>
+   <D:status>HTTP/1.1 404 Not Found</D:status>
+   <D:prop><caldav:schedule-inbox-URL/><caldav:schedule-outbox-URL/></D:prop>
+  </D:propstat>
+ </D:response>
+</D:multistatus>

@@ -9,6 +9,7 @@ mod parse;
 mod tz;
 
 pub use error::{EventError, ParseError};
+pub use expand::Expansion;
 pub use model::{
     Attendee, Calendar, Event, EventStatus, EventTime, Frequency, Method, Occurrence, Organizer,
     ParticipationRole, ParticipationStatus, Recurrence, WeekdayNum,

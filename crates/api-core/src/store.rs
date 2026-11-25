@@ -11,6 +11,9 @@ use tagmail_core::query::{self, Query, QueryError};
 use tagmail_core::{AccountId, ChangeCursor, LabelKey, MailboxRowId, MessageRowId, ThreadId};
 use zeroize::Zeroizing;
 
+use crate::calendar_dto::{
+    CaldavSettingsDto, CalendarDto, CalendarTargetDto, SchedulingDto, StoredEventDto,
+};
 use crate::dto::{
     AccountDto, AccountStateDto, AccountTestDto, AddressDto, ChangeDto, LabelDto, MailboxDto,
     TestStepDto, ThreadRowDto, TlsMode,
@@ -256,6 +259,68 @@ pub trait ImageProxy: Send + Sync + 'static {
     fn fetch(&self, url: String) -> BoxFuture<Result<ProxiedImage, ProxyError>>;
 }
 
+/// What a store without calendar data answers to calendar calls; the API
+/// maps it to `404 feature_disabled`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FeatureDisabled;
+
+impl fmt::Display for FeatureDisabled {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("calendar support is not available here")
+    }
+}
+
+impl std::error::Error for FeatureDisabled {}
+
+fn feature_disabled<T: Send + 'static>() -> impl Future<Output = StoreResult<T>> + Send {
+    std::future::ready(Err(Box::new(FeatureDisabled) as StoreError))
+}
+
+/// A validated `PUT /api/accounts/{id}/caldav`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CaldavSettingsUpdate {
+    pub url: Option<String>,
+    pub username: Option<String>,
+    /// `None` keeps the stored password; ignored without `username`.
+    pub password: Option<Secret>,
+    pub allow_insecure: bool,
+    /// `None` follows the detected mode.
+    pub scheduling: Option<SchedulingDto>,
+    pub fallback_account: Option<AccountId>,
+    pub default_calendar_href: Option<String>,
+    /// `None` keeps the stored value; `Some(None)` clears it.
+    pub authserv_id: Option<Option<String>>,
+}
+
+/// A validated `PATCH /api/calendars`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalendarPatch {
+    pub account: AccountId,
+    pub href: String,
+    pub color: Option<Option<String>>,
+    pub visible: Option<bool>,
+    pub default: Option<bool>,
+    pub sort: Option<Option<i64>>,
+}
+
+/// A stored copy of an invitation's event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredCopy {
+    pub uid: String,
+    /// The stored master's DTSTAMP, Unix seconds.
+    pub dtstamp: Option<i64>,
+    pub stored: StoredEventDto,
+}
+
+/// What `/invitation` reports besides the card: the stored copies, where
+/// an apply would write and how the target schedules.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct InvitationContext {
+    pub stored: Vec<StoredCopy>,
+    pub target: Option<CalendarTargetDto>,
+    pub scheduling: Option<SchedulingDto>,
+}
+
 /// Read access to mail data and the change log, plus account persistence.
 pub trait Store: Send + Sync + 'static {
     /// Cursor of the newest change.
@@ -373,6 +438,52 @@ pub trait Store: Send + Sync + 'static {
         address: String,
         allow: bool,
     ) -> impl Future<Output = StoreResult<()>> + Send;
+
+    /// `None` if the account does not exist.
+    fn caldav_settings(
+        &self,
+        id: AccountId,
+    ) -> impl Future<Output = StoreResult<Option<CaldavSettingsDto>>> + Send {
+        let _ = id;
+        feature_disabled()
+    }
+
+    /// Replaces the settings, sealing a new password. A changed URL drops
+    /// what discovery found. `None` if the account does not exist or is
+    /// being deleted.
+    fn save_caldav_settings(
+        &self,
+        id: AccountId,
+        update: CaldavSettingsUpdate,
+    ) -> impl Future<Output = StoreResult<Option<CaldavSettingsDto>>> + Send {
+        let _ = (id, update);
+        feature_disabled()
+    }
+
+    /// Every account's calendars with the owner's preferences.
+    fn calendars(&self) -> impl Future<Output = StoreResult<Vec<CalendarDto>>> + Send {
+        feature_disabled()
+    }
+
+    /// `None` if the calendar is not known.
+    fn update_calendar(
+        &self,
+        patch: CalendarPatch,
+    ) -> impl Future<Output = StoreResult<Option<CalendarDto>>> + Send {
+        let _ = patch;
+        feature_disabled()
+    }
+
+    /// The stored copies of `uids` in the calendars an invitation to
+    /// `account` maps to. Stores without calendar data know none.
+    fn invitation_context(
+        &self,
+        account: AccountId,
+        uids: Vec<String>,
+    ) -> impl Future<Output = StoreResult<InvitationContext>> + Send {
+        let _ = (account, uids);
+        std::future::ready(Ok(InvitationContext::default()))
+    }
 }
 
 /// Engine state that only lives in memory.

@@ -1,6 +1,7 @@
 mod bench_replica;
 mod bench_rss;
 mod bench_search;
+mod caldav;
 mod harness;
 mod probe_server;
 mod proc_tree;
@@ -49,6 +50,32 @@ enum Command {
     Stalwart {
         #[command(subcommand)]
         action: ServerAction,
+    },
+    /// Manage the Radicale CalDAV test server (test/radicale)
+    Radicale {
+        #[command(subcommand)]
+        action: RadicaleAction,
+    },
+    /// Generate a deterministic Radicale calendar tree (outside the repo)
+    SeedCal {
+        #[arg(long, default_value_t = 2)]
+        calendars: u32,
+        #[arg(long, default_value_t = 5_000)]
+        events: u32,
+        /// Share of events with an RRULE
+        #[arg(long, default_value_t = 10)]
+        recurring_pct: u64,
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// Output directory; must not exist or be empty
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Regenerate the calN users in test/dovecot/users and test/radicale/users
+    GenCalUsers {
+        /// Fail if the committed files are stale instead of writing
+        #[arg(long)]
+        check: bool,
     },
     /// Idle RSS gate (AC 9): sync the seeded accounts with tagmail-server,
     /// connect an event stream, search, render the `--huge-mb` message,
@@ -171,6 +198,21 @@ enum DovecotAction {
 }
 
 #[derive(Subcommand)]
+enum RadicaleAction {
+    /// Start Radicale and the Mailpit SMTP sink
+    Up,
+    /// Stop Radicale and delete its calendars
+    Down,
+    /// Copy a seeded calendar tree into a test user's collections
+    Load {
+        #[arg(long)]
+        from: PathBuf,
+        #[arg(long, default_value = "user1")]
+        user: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum ServerAction {
     /// Start the server and the Mailpit SMTP sink
     Up,
@@ -225,6 +267,25 @@ fn main() -> Result<()> {
             ServerAction::Up => harness::up(&[harness::STALWART])?,
             ServerAction::Down => harness::down(&[harness::STALWART])?,
         },
+        Command::Radicale { action } => match action {
+            RadicaleAction::Up => harness::up(&[harness::RADICALE])?,
+            RadicaleAction::Down => harness::down(&[harness::RADICALE])?,
+            RadicaleAction::Load { from, user } => harness::load_calendars(&from, &user)?,
+        },
+        Command::SeedCal {
+            calendars,
+            events,
+            recurring_pct,
+            seed,
+            out,
+        } => caldav::seed_cal(&caldav::SeedCal {
+            out,
+            calendars,
+            events,
+            recurring_pct,
+            seed,
+        })?,
+        Command::GenCalUsers { check } => caldav::gen_cal_users(check)?,
         Command::BenchRss {
             server,
             imap,

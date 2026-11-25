@@ -156,7 +156,7 @@ pub(crate) fn change_page_dto(
     }
 }
 
-fn invalid(field: &str, message: impl Into<String>) -> Response {
+pub(crate) fn invalid(field: &str, message: impl Into<String>) -> Response {
     Response::json(
         422,
         &ApiErrorDto {
@@ -182,6 +182,7 @@ pub struct Api<S> {
     pub(crate) proxy: Option<Arc<dyn ImageProxy>>,
     pub(crate) compose: Option<Arc<dyn crate::compose::Compose>>,
     pub(crate) writes: Option<Arc<dyn WriteService>>,
+    pub(crate) calendar: Option<Arc<dyn crate::caldav::CalendarService>>,
     /// URL signing keys and when they were read.
     pub(crate) keys: tokio::sync::Mutex<Option<(std::time::Instant, UrlKeys)>>,
 }
@@ -196,6 +197,7 @@ impl<S: Store> Api<S> {
             proxy: None,
             compose: None,
             writes: None,
+            calendar: None,
             keys: tokio::sync::Mutex::new(None),
         }
     }
@@ -285,6 +287,12 @@ impl<S: Store> Api<S> {
                 RouteId::UpdateLabel => self.update_label(params[0], req.body).await,
                 RouteId::DeleteLabel => self.delete_label(params[0]).await,
                 RouteId::LabelJobs => self.label_jobs().await,
+                RouteId::CaldavSettings
+                | RouteId::UpdateCaldavSettings
+                | RouteId::DiscoverCaldav
+                | RouteId::ConfirmCaldavHost
+                | RouteId::Calendars
+                | RouteId::UpdateCalendar => self.calendar_route(id, &params, req.body).await,
             },
             Err(Miss::MethodNotAllowed) => Ok(Response::error(
                 405,
@@ -555,7 +563,7 @@ impl<S: Store> Api<S> {
     }
 }
 
-fn no_account() -> Response {
+pub(crate) fn no_account() -> Response {
     Response::error(404, "not_found", "no such account")
 }
 
@@ -594,7 +602,7 @@ pub(crate) fn query_param(query: &str, name: &str) -> Option<String> {
         .map(|(_, v)| v.into_owned())
 }
 
-fn valid_host(host: &str) -> bool {
+pub(crate) fn valid_host(host: &str) -> bool {
     if host.parse::<IpAddr>().is_ok() {
         return true;
     }
@@ -612,7 +620,7 @@ fn valid_host(host: &str) -> bool {
         })
 }
 
-type Checked<T> = Result<T, Response>;
+pub(crate) type Checked<T> = Result<T, Response>;
 
 fn check_name(name: &str) -> Checked<String> {
     let name = name.trim();
@@ -641,7 +649,7 @@ fn check_port(field: &str, port: u16) -> Checked<u16> {
     Ok(port)
 }
 
-fn check_username(username: String) -> Checked<String> {
+pub(crate) fn check_username(username: String) -> Checked<String> {
     if username.is_empty()
         || username.len() > MAX_USERNAME_LEN
         || username.chars().any(char::is_control)
@@ -654,7 +662,7 @@ fn check_username(username: String) -> Checked<String> {
     Ok(username)
 }
 
-fn check_password(password: String) -> Checked<Secret> {
+pub(crate) fn check_password(password: String) -> Checked<Secret> {
     let password = Secret::new(password);
     if password.expose().is_empty() || password.expose().len() > MAX_PASSWORD_LEN {
         return Err(invalid(
