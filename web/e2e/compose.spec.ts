@@ -72,7 +72,7 @@ test('c composes, autosaves, sends and reports the outbox status', async ({ page
 			return (
 				drafts.length === 1 &&
 				drafts[0]?.to.length === 1 &&
-				drafts[0]?.html.includes('<b> Really.</b>')
+				drafts[0]?.html?.includes('<b> Really.</b>')
 			);
 		})
 		.toBe(true);
