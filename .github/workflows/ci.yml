@@ -68,7 +68,7 @@ jobs:
             README.md CONTRIBUTING.md SECURITY.md 'docs/**/*.md' 'deploy/**/*.md'
           jobSummary: false
 
-  rust:
+  rust-lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -77,15 +77,41 @@ jobs:
           toolchain: "1.100"
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo clippy -p tagmail-api-server --no-default-features --all-targets -- -D warnings
-      - run: cargo test --workspace
-      - run: cargo test -p tagmail-api-core --features sqlite
-      - run: cargo test -p tagmail-api-server --no-default-features
       - run: "! cargo tree -p tagmail-api-server --no-default-features -i calcard"
       - run: cargo xtask gen-ts-types --check
+
+  deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # Keeps the name `rust` for branch protection; the lint steps moved to
+  # `rust-lint` and `deny` so the three run in parallel.
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.100"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: nextest
+      # nextest runs every test binary's tests in one parallel pool and does
+      # not run doctests.
+      - run: cargo nextest run --workspace
+      - run: cargo test --workspace --doc
+      - run: cargo nextest run -p tagmail-api-core --features sqlite
+      - run: cargo nextest run -p tagmail-api-server --no-default-features
 
   web:
     runs-on: ubuntu-latest
