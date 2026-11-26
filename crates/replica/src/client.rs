@@ -125,6 +125,9 @@ impl ServerClient {
                 .connect_timeout(REQUEST_TIMEOUT)
                 .read_timeout(idle)
                 .tcp_keepalive(TCP_KEEPALIVE)
+                // The API never redirects; following one would hide a proxy
+                // login page behind a 200 and a confusing decode error.
+                .redirect(reqwest::redirect::Policy::none())
                 .user_agent(concat!("tagmail-desktop/", env!("CARGO_PKG_VERSION")))
                 .build()
                 .map_err(|e| ClientError::Decode(format!("client: {e}")))
@@ -357,6 +360,22 @@ pub(crate) mod tests {
         let head = heads.recv().await.unwrap().to_ascii_lowercase();
         assert!(head.starts_with("get /api/version "), "{head}");
         assert!(head.contains("authorization: bearer tok"), "{head}");
+    }
+
+    #[tokio::test]
+    async fn a_redirect_is_an_error_not_followed() {
+        let (url, _) = canned(vec![(302, "")]).await;
+        let client = ServerClient::new(&url, None).unwrap();
+        let builder = client
+            .request(Method::POST, "api/pairing/exchange")
+            .unwrap();
+
+        let err = client.send(builder).await.unwrap_err();
+
+        assert!(
+            matches!(err, ClientError::Status { status: 302 }),
+            "{err:?}"
+        );
     }
 
     #[tokio::test]

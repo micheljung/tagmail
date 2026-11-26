@@ -104,6 +104,9 @@ proxy with a certificate in front, pass its address with
 - Allow request bodies of at least 26 MB: one attachment upload may be up
   to 25 MiB. A message may carry 35 MiB of attachments in total, uploaded
   one by one.
+- Do not put another login (an OAuth proxy, basic auth) in front of `/api`:
+  the desktop app pairs and syncs there with its own device token and
+  cannot follow a redirect to a login page.
 - Serve Tagmail at the root of its own host name, not under a path.
 
 ### Caddy
