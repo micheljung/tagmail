@@ -11,6 +11,7 @@
 		lists,
 		nav,
 		ops,
+		prefs,
 		resetAppState
 	} from '#lib/stores/index.ts';
 	import { api } from '#lib/transport/index.ts';
@@ -24,9 +25,12 @@
 	import UnsyncedPanel from '#lib/ui/UnsyncedPanel.svelte';
 	import Logo from '#lib/ui/Logo.svelte';
 	import NavRail from '#lib/ui/NavRail.svelte';
+	import QuickSettings from '#lib/ui/QuickSettings.svelte';
+	import { navigate } from '#lib/ui/navigate.ts';
 	import OfflineBanner from '#lib/pwa/OfflineBanner.svelte';
 	import { connectivity } from '#lib/pwa/connectivity.svelte.ts';
 	import { withAccount } from '#lib/views.ts';
+	import { NAV_WIDTH_DEFAULT, NAV_WIDTH_MAX, NAV_WIDTH_MIN, clampNavWidth } from '#lib/prefs.ts';
 	import SearchBar from '#lib/ui/SearchBar.svelte';
 	import { onMount, tick } from 'svelte';
 	import type { LayoutProps } from './$types';
@@ -50,6 +54,38 @@
 	let entered = false;
 
 	const PHONE_QUERY = '(max-width: 720px)';
+	const NAV_STEP = 8;
+	/** The width while the handle is dragged; stored on release. */
+	let dragWidth: number | null = $state(null);
+	let dragFrom = { x: 0, width: 0 };
+	const navWidth = $derived(dragWidth ?? prefs.navWidth);
+
+	function resizeStart(e: PointerEvent) {
+		if (e.button !== 0) return;
+		e.preventDefault();
+		(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+		dragFrom = { x: e.clientX, width: prefs.navWidth };
+		dragWidth = prefs.navWidth;
+	}
+
+	function resizeMove(e: PointerEvent) {
+		if (dragWidth === null) return;
+		dragWidth = clampNavWidth(dragFrom.width + e.clientX - dragFrom.x);
+	}
+
+	function resizeEnd() {
+		if (dragWidth === null) return;
+		prefs.setNavWidth(dragWidth);
+		dragWidth = null;
+	}
+
+	function resizeKey(e: KeyboardEvent) {
+		const step = { ArrowLeft: -NAV_STEP, ArrowRight: NAV_STEP }[e.key];
+		if (step === undefined) return;
+		e.preventDefault();
+		e.stopPropagation();
+		prefs.setNavWidth(prefs.navWidth + step);
+	}
 	const onThread = $derived(page.url.pathname.startsWith('/thread/'));
 	let unsyncedOpen = $state(false);
 
@@ -88,7 +124,7 @@
 
 	function back() {
 		if (appIndex > 0) history.back();
-		else void goto('/inbox');
+		else void navigate('/inbox');
 	}
 
 	function openDrawer() {
@@ -119,8 +155,10 @@
 	onMount(() => {
 		const mq = matchMedia(PHONE_QUERY);
 		compact = mq.matches;
+		prefs.phone = mq.matches;
 		const onChange = () => {
 			compact = mq.matches;
+			prefs.phone = mq.matches;
 			drawerOpen = false;
 		};
 		mq.addEventListener('change', onChange);
@@ -156,7 +194,7 @@
 					return true;
 				case 'back':
 					if (page.url.pathname.startsWith('/thread/')) {
-						void goto(lists.currentPath);
+						void navigate(lists.currentPath);
 						return true;
 					}
 					return false;
@@ -207,7 +245,7 @@
 />
 
 <a class="skip" href="#main">Skip to conversations</a>
-<div class="shell" class:drawer={drawerOpen}>
+<div class="shell" class:drawer={drawerOpen} style:--nav-w="{navWidth}px">
 	<header class="top" inert={compact && drawerOpen}>
 		{#if compact && onThread}
 			<button class="menu" aria-label="Back" onclick={back}>
@@ -246,6 +284,7 @@
 		>
 			<span class="sr-only">{hub.connected ? 'Live updates on' : 'Live updates paused'}</span>
 		</span>
+		<QuickSettings />
 	</header>
 	<div
 		class="side"
@@ -266,6 +305,27 @@
 			onhelp={() => (helpOpen = true)}
 			onlogout={logout}
 		/>
+		<!-- A focusable separator is a widget (WAI-ARIA window splitter); Svelte lists it as static. -->
+		<!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
+		<div
+			class="resize"
+			role="separator"
+			aria-label="Resize navigation"
+			aria-orientation="vertical"
+			aria-controls="nav"
+			aria-valuenow={navWidth}
+			aria-valuemin={NAV_WIDTH_MIN}
+			aria-valuemax={NAV_WIDTH_MAX}
+			aria-valuetext="{navWidth} pixels"
+			tabindex="0"
+			title="Drag to resize, double-click to reset"
+			onpointerdown={resizeStart}
+			onpointermove={resizeMove}
+			onpointerup={resizeEnd}
+			onpointercancel={resizeEnd}
+			onkeydown={resizeKey}
+			ondblclick={() => prefs.setNavWidth(NAV_WIDTH_DEFAULT)}
+		></div>
 	</div>
 	<button class="scrim" tabindex="-1" aria-label="Close menu" onclick={() => void closeDrawer()}
 	></button>
@@ -394,7 +454,25 @@
 	}
 
 	.side {
+		position: relative;
 		min-height: 0;
+	}
+
+	/* z-index: main's children are layers (will-change), which would cover the handle. */
+	.resize {
+		position: absolute;
+		inset-block: 0;
+		inset-inline-end: -4px;
+		z-index: 1;
+		width: 8px;
+		cursor: col-resize;
+		touch-action: none;
+	}
+
+	.resize:hover,
+	.resize:focus-visible {
+		outline: none;
+		background: linear-gradient(var(--accent), var(--accent)) center / 2px 100% no-repeat;
 	}
 
 	.scrim {
@@ -469,6 +547,10 @@
 		}
 
 		.brand {
+			display: none;
+		}
+
+		.resize {
 			display: none;
 		}
 

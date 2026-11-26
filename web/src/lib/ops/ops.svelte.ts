@@ -16,7 +16,12 @@ import {
 export interface Removed {
 	id: number;
 	at: number;
+	/** Unread-first lists: whether the thread counted as unread before the op (ops not applied). */
+	wasUnread?: boolean;
 }
+
+/** When an op's effect starts showing, stops showing, or is confirmed by the server. */
+export type OpPhase = 'activate' | 'deactivate' | 'done';
 
 /** What the ops client needs from a thread list. */
 export interface OpList {
@@ -25,6 +30,8 @@ export interface OpList {
 	putBack(entries: readonly Removed[]): void;
 	scheduleRefetch(): void;
 	patchRow(id: number, patch: (row: ThreadRowDto) => ThreadRowDto): void;
+	/** Called after an op is applied or rolled back, and on confirmation before it is forgotten. */
+	opsChanged?(intent: OpIntent, phase: OpPhase): void;
 }
 
 export interface OpsApi {
@@ -152,6 +159,26 @@ export class OpsStore {
 		return out;
 	}
 
+	/** The applied markRead/markUnread intents, oldest first. */
+	unreadIntents(): OpIntent[] {
+		void this.version;
+		const out: OpIntent[] = [];
+		for (const op of this.#ops.values()) {
+			if (op.applied && (op.intent.kind === 'markRead' || op.intent.kind === 'markUnread')) {
+				out.push(op.intent);
+			}
+		}
+		return out;
+	}
+
+	/** Whether an op that is showing or still being sent involves thread `id`. */
+	touches(id: number): boolean {
+		for (const op of this.#ops.values()) {
+			if ((op.applied || op.status === 'sending') && op.intent.threadIds.includes(id)) return true;
+		}
+		return false;
+	}
+
 	describe(op: TrackedOp): string {
 		return describeIntent(op.intent, this.#host.names());
 	}
@@ -159,7 +186,7 @@ export class OpsStore {
 	/** Starts an op: applies it here, sends it, and offers Undo. */
 	run(
 		intent: OpIntent,
-		options: { view?: ViewId | null; origins?: Origins; undoOf?: TrackedOp } = {}
+		options: { view?: ViewId | null; origins?: Origins; undoOf?: TrackedOp; quiet?: boolean } = {}
 	): TrackedOp {
 		const op: TrackedOp = {
 			opId: this.#host.uuid?.() ?? crypto.randomUUID(),
@@ -176,10 +203,12 @@ export class OpsStore {
 		this.#ops.set(op.opId, op);
 		this.#activate(op, options.undoOf);
 		const inverse = this.#inverse(op);
-		this.#host.notify.show(describeDone(intent, this.#host.names()), {
-			key: `op:${op.opId}`,
-			actions: inverse ? [{ label: 'Undo', run: () => this.undo(op) }] : []
-		});
+		if (!options.quiet) {
+			this.#host.notify.show(describeDone(intent, this.#host.names()), {
+				key: `op:${op.opId}`,
+				actions: inverse ? [{ label: 'Undo', run: () => this.undo(op) }] : []
+			});
+		}
 		void this.#send(op, 0);
 		return op;
 	}
@@ -344,6 +373,7 @@ export class OpsStore {
 		const wasApplied = op.applied;
 		op.applied = false;
 		op.status = 'done';
+		this.#notify(op, 'done');
 		this.#ops.delete(op.opId);
 		this.version++;
 		if (wasApplied) for (const fn of this.#settled) fn(op);
@@ -380,6 +410,7 @@ export class OpsStore {
 			}
 		}
 		op.applied = true;
+		this.#notify(op, 'activate');
 		this.version++;
 	}
 
@@ -392,7 +423,12 @@ export class OpsStore {
 		}
 		op.removed = [];
 		op.applied = false;
+		this.#notify(op, 'deactivate');
 		this.version++;
+	}
+
+	#notify(op: TrackedOp, phase: OpPhase): void {
+		for (const list of this.#host.lists()) list.opsChanged?.(op.intent, phase);
 	}
 
 	#text(e: unknown): string {

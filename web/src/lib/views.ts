@@ -28,3 +28,45 @@ export function withAccount(href: string, account: number | null): string {
 	if (account === null) return href;
 	return `${href}${href.includes('?') ? '&' : '?'}${ACCOUNT_PARAM}=${account}`;
 }
+
+/** The parts of a URL the list mapping reads (`page.url` is a read-only URL). */
+export interface UrlLike {
+	readonly pathname: string;
+	readonly searchParams: { get(name: string): string | null };
+}
+
+/** The view and list path a URL shows, or `null` when it is not a thread list. */
+export function viewForPath(input: string | UrlLike): { view: ViewId; path: string } | null {
+	const url = typeof input === 'string' ? new URL(input, 'http://tagmail.invalid') : input;
+	const account = accountParam(url);
+	const parts = url.pathname.split('/').filter(Boolean);
+	if (parts[0] === 'inbox' && parts.length === 1) {
+		return { view: scopedView('inbox', account), path: withAccount('/inbox', account) };
+	}
+	if (parts[0] === 'label' && parts.length === 2) {
+		let key: string;
+		try {
+			key = decodeURIComponent(parts[1]);
+		} catch {
+			return null;
+		}
+		return {
+			view: scopedView(`label:${key}`, account),
+			path: withAccount(`/label/${encodeURIComponent(key)}`, account)
+		};
+	}
+	if (parts[0] === 'mailbox' && parts.length === 2) {
+		const id = Number(parts[1]);
+		if (!Number.isSafeInteger(id)) return null;
+		return { view: `mailbox:${id}`, path: `/mailbox/${id}` };
+	}
+	if (parts[0] === 'search' && parts.length === 1) {
+		const query = (url.searchParams.get('q') ?? '').trim();
+		if (!query) return null;
+		return {
+			view: scopedView(`search:${query}`, account),
+			path: withAccount(`/search?q=${encodeURIComponent(query)}`, account)
+		};
+	}
+	return null;
+}

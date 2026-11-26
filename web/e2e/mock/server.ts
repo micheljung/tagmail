@@ -138,21 +138,29 @@ function allIds(): number[] {
 
 class BadView extends Error {}
 
+/** Whether `r` passes one search term; `undefined` for terms the mock ignores. */
+function matchesTerm(r: Row, i: number, term: string): boolean | undefined {
+	if (term === 'is:starred') return r.starred;
+	if (term === 'is:unread') return r.unreadCount > 0;
+	if (term === 'in:sent') return isSent(i);
+	if (term === 'in:inbox') return isInboxBox(mailboxOf(r.id));
+	if (term === 'has:attachment') return r.hasAttachment;
+	if (term.startsWith('label:')) return r.labels.includes(term.slice(6));
+	if (term.startsWith('from:')) {
+		const who = term.slice(5);
+		return r.senders.some((s) => s.email.includes(who) || s.name?.toLowerCase().includes(who));
+	}
+	if (!term.includes(':')) {
+		return `${r.subject} ${r.snippet}`.toLowerCase().includes(term.replace(/"/g, ''));
+	}
+	return undefined;
+}
+
 function matches(r: Row, i: number, query: string): boolean {
 	for (const term of query.toLowerCase().split(/\s+/).filter(Boolean)) {
-		if (term === 'is:starred' && !r.starred) return false;
-		else if (term === 'is:unread' && r.unreadCount === 0) return false;
-		else if (term === 'in:sent' && !isSent(i)) return false;
-		else if (term === 'has:attachment' && !r.hasAttachment) return false;
-		else if (term.startsWith('label:') && !r.labels.includes(term.slice(6))) return false;
-		else if (term.startsWith('from:')) {
-			const who = term.slice(5);
-			if (!r.senders.some((s) => s.email.includes(who) || s.name?.toLowerCase().includes(who)))
-				return false;
-		} else if (!term.includes(':')) {
-			const text = `${r.subject} ${r.snippet}`.toLowerCase();
-			if (!text.includes(term.replace(/"/g, ''))) return false;
-		}
+		const negated = term.length > 1 && term.startsWith('-');
+		const hit = matchesTerm(r, i, negated ? term.slice(1) : term);
+		if (hit !== undefined && hit === negated) return false;
 	}
 	return true;
 }

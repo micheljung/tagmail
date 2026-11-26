@@ -1,5 +1,4 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { APP_NAME } from '#lib/document-title.ts';
 	import ComposeForm from '#lib/compose/ComposeForm.svelte';
@@ -8,14 +7,16 @@
 	import { act } from '#lib/ops/actions.svelte.ts';
 	import { patchRow } from '#lib/ops/effects.ts';
 	import { shortcuts, type ShortcutAction } from '#lib/shortcuts/index.ts';
-	import { lists, nav, ops, toasts } from '#lib/stores/index.ts';
+	import { focusInListPane, listOwnsAct, scheduleAutoRead } from '#lib/readingPane.ts';
+	import { lists, nav, ops, prefs, toasts } from '#lib/stores/index.ts';
 	import { api, type ReplyMode, type ThreadDetailDto } from '#lib/transport/index.ts';
 	import type { IconName } from '#lib/ui/Icon.svelte';
 	import Icon from '#lib/ui/Icon.svelte';
 	import LabelChip from '#lib/ui/LabelChip.svelte';
 	import MessageCard from '#lib/ui/MessageCard.svelte';
 	import { errorText } from '#lib/ui/errors.ts';
-	import { onMount } from 'svelte';
+	import { navigate } from '#lib/ui/navigate.ts';
+	import { onMount, untrack } from 'svelte';
 	import { SvelteSet } from 'svelte/reactivity';
 
 	const id = $derived(Number(page.params.id));
@@ -41,11 +42,11 @@
 		{ action: 'move', icon: 'folder', label: 'Move to', key: 'v' }
 	];
 
-	function run(action: ShortcutAction): boolean {
+	function run(action: ShortcutAction, options?: { quiet?: boolean }): boolean {
 		if (!thread) return false;
 		const view = list && list.index.has(thread.id) ? list.view : null;
-		const done = act(action, { threadIds: [thread.id], rows: [thread], view });
-		if (done && LEAVES.has(action)) void goto(lists.currentPath);
+		const done = act(action, { threadIds: [thread.id], rows: [thread], view }, options);
+		if (done && LEAVES.has(action)) void navigate(lists.currentPath);
 		return done;
 	}
 
@@ -111,7 +112,7 @@
 		api.thread(current, controller.signal).then(
 			(d) => {
 				if (d.thread.id !== current) {
-					void goto(`/thread/${d.thread.id}`, { replace: true, state: page.state });
+					void navigate(`/thread/${d.thread.id}`, { replace: true, state: page.state });
 					return;
 				}
 				detail = d;
@@ -119,8 +120,11 @@
 				for (const m of d.messages) if (m.unread) expanded.add(m.id);
 				const last = d.messages.at(-1);
 				if (last) expanded.add(last.id);
-				if (list && list.index.has(current)) list.selectedId = current;
-				requestAnimationFrame(() => heading?.focus({ preventScroll: true }));
+				list?.selectThread(current);
+				// Next to the list, a conversation opened from it leaves focus there.
+				requestAnimationFrame(() => {
+					if (!focusInListPane()) heading?.focus({ preventScroll: true });
+				});
 			},
 			(e: unknown) => {
 				if (!controller.signal.aborted) error = errorText(e);
@@ -132,11 +136,11 @@
 	onMount(() =>
 		shortcuts.push((action) => {
 			if (action === 'next' && older !== undefined) {
-				void goto(`/thread/${older}`);
+				void navigate(`/thread/${older}`);
 				return true;
 			}
 			if (action === 'previous' && newer !== undefined) {
-				void goto(`/thread/${newer}`);
+				void navigate(`/thread/${newer}`);
 				return true;
 			}
 			if (action === 'reply' || action === 'replyAll' || action === 'forward') {
@@ -144,9 +148,33 @@
 				return true;
 			}
 			if (action === 'next' || action === 'previous') return true;
+			// The list pane next to it acts on its ticked or highlighted rows instead.
+			if (
+				prefs.split &&
+				list &&
+				listOwnsAct({
+					checked: list.checked.size,
+					selectedId: list.selectedId,
+					routeId: id,
+					focusInList: focusInListPane()
+				})
+			) {
+				return false;
+			}
 			return run(action);
 		})
 	);
+
+	// In the reading pane, a conversation left open for a moment counts as read.
+	const loadedId = $derived(detail?.thread.id);
+	$effect(() => {
+		if (loadedId === undefined || loadedId !== id) return;
+		return scheduleAutoRead({
+			split: prefs.split,
+			isUnread: () => untrack(() => (thread?.unreadCount ?? 0) > 0),
+			markRead: () => untrack(() => run('markRead', { quiet: true }))
+		});
+	});
 
 	function toggle(messageId: number) {
 		if (!expanded.delete(messageId)) expanded.add(messageId);
