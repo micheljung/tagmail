@@ -429,6 +429,11 @@
 			content: none;
 		}
 
+		/* Compact phone rows are two lines: sender and subject. */
+		:global(html[data-density='compact']) .snippet {
+			display: none;
+		}
+
 		.skeleton .body {
 			display: block;
 		}

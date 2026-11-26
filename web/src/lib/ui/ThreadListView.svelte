@@ -1,15 +1,18 @@
 <script lang="ts">
-	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import VirtualList from '../list/VirtualList.svelte';
+	import { sectionLayout } from '../list/sections';
 	import { act, inTrash, runOp, type ActionTarget } from '../ops/actions.svelte';
 	import { SWIPE_OPS, type SwipeAllowed } from '../list/swipe';
 	import { shortcuts, type ShortcutAction } from '../shortcuts';
-	import { accounts, nav, ops, type ThreadList } from '../stores';
+	import { focusInListPane, listOwnsAct } from '../readingPane';
+	import { accounts, nav, ops, prefs, type ThreadList } from '../stores';
 	import type { ThreadRowDto } from '../transport';
 	import { PARTIAL_TEXT } from '../desktop/desktop.svelte';
 	import { viewScope } from '../views';
 	import Icon, { type IconName } from './Icon.svelte';
+	import { navigate } from './navigate';
+	import { rowHeightFor } from '../prefs';
 	import ThreadRow from './ThreadRow.svelte';
 
 	let {
@@ -17,26 +20,27 @@
 		label,
 		emptyTitle,
 		emptyHint,
-		hiddenLabel
+		hiddenLabel,
+		deferToThread = false,
+		routeId = null
 	}: {
 		list: ThreadList;
 		label: string;
 		emptyTitle: string;
 		emptyHint: string;
 		hiddenLabel?: string;
+		/** Shown next to an open conversation (`/thread/*`), which then owns j/k and its own acts. */
+		deferToThread?: boolean;
+		/** The open conversation's id, if any. */
+		routeId?: number | null;
 	} = $props();
 
 	const COMPACT_QUERY = '(max-width: 720px)';
 	const COARSE_QUERY = '(pointer: coarse)';
-	const ROW_HEIGHT = 40;
-	const ROW_HEIGHT_COARSE = 48;
-	const ROW_HEIGHT_COMPACT = 76;
 
 	let compact = $state(false);
 	let coarse = $state(false);
-	const rowHeight = $derived(
-		compact ? ROW_HEIGHT_COMPACT : coarse ? ROW_HEIGHT_COARSE : ROW_HEIGHT
-	);
+	const rowHeight = $derived(rowHeightFor(prefs.density, { coarse, phone: compact }));
 
 	const TOOLBAR: { action: ShortcutAction; icon: IconName; label: string; key: string }[] = [
 		{ action: 'archive', icon: 'archive', label: 'Archive', key: 'e' },
@@ -52,6 +56,8 @@
 	const markers = $derived(
 		accounts.multi && viewScope(list.view).account === null && !list.view.startsWith('mailbox:')
 	);
+	/** Unread-first inboxes show section headers between the rows. */
+	const layout = $derived(list.sectioned ? sectionLayout(list.count, list.split) : undefined);
 	const checkedCount = $derived(list.checked.size);
 	const allState = $derived(
 		checkedCount === 0 ? 'false' : checkedCount >= visibleCount() ? 'true' : 'mixed'
@@ -78,6 +84,16 @@
 		return act(action, target());
 	}
 
+	/** Takes focus on mount; next to a reading pane only when nothing else holds it. */
+	function shouldAutofocus(): boolean {
+		// A density or layout change from the quick settings remounts the list; focus stays there.
+		if (document.activeElement?.closest('[data-quick-settings]')) return false;
+		if (!prefs.split) return true;
+		if (deferToThread) return false;
+		const active = document.activeElement;
+		return !active || active === document.body || focusInListPane();
+	}
+
 	onMount(() => {
 		const mq = matchMedia(COMPACT_QUERY);
 		const coarseMq = matchMedia(COARSE_QUERY);
@@ -88,17 +104,20 @@
 		onChange();
 		mq.addEventListener('change', onChange);
 		coarseMq.addEventListener('change', onChange);
-		list.attached = true;
+		const detach = list.attach();
 		const pop = shortcuts.push((action) => {
 			switch (action) {
 				case 'next':
+					if (deferToThread) return false;
 					list.move(1);
 					return true;
 				case 'previous':
+					if (deferToThread) return false;
 					list.move(-1);
 					return true;
 				case 'open': {
 					if (list.selectedId === null) return false;
+					if (deferToThread && list.selectedId === routeId) return false;
 					open(list.selectedId);
 					return true;
 				}
@@ -107,19 +126,30 @@
 					list.toggleChecked(list.activeIndex);
 					return true;
 				default:
+					if (
+						deferToThread &&
+						!listOwnsAct({
+							checked: list.checked.size,
+							selectedId: list.selectedId,
+							routeId,
+							focusInList: focusInListPane()
+						})
+					) {
+						return false;
+					}
 					return run(action);
 			}
 		});
 		return () => {
 			mq.removeEventListener('change', onChange);
 			coarseMq.removeEventListener('change', onChange);
-			list.attached = false;
+			detach();
 			pop();
 		};
 	});
 
 	function open(id: number) {
-		void goto(`/thread/${id}`);
+		void navigate(`/thread/${id}`);
 	}
 </script>
 
@@ -193,9 +223,9 @@
 					activeIndex={list.activeIndex}
 					{label}
 					keyAt={(i) => list.idAt(i)}
-					initialOffset={list.scrollOffset}
-					autofocus
-					onoffset={(v) => (list.scrollOffset = v)}
+					initialOffset={list.scrollRow * rowHeight}
+					autofocus={shouldAutofocus()}
+					onoffset={(rows) => (list.scrollRow = rows)}
 					onrange={(range, direction) => {
 						list.noteScrollDirection(direction);
 						list.ensureWindow(range);
@@ -205,7 +235,11 @@
 						const id = list.idAt(i);
 						if (id !== undefined) open(id);
 					}}
+					{layout}
 				>
+					{#snippet header(section)}
+						<h2 class="section">{section === 'unread' ? 'Unread' : 'Everything else'}</h2>
+					{/snippet}
 					{#snippet row(index, active)}
 						{@const id = list.idAt(index)}
 						{@const row = id === undefined ? undefined : ops.project(list.rows.get(id))}
@@ -360,6 +394,19 @@
 	.viewport {
 		flex: 1;
 		min-height: 0;
+	}
+
+	.section {
+		display: flex;
+		align-items: flex-end;
+		height: 100%;
+		margin: 0;
+		padding: 0 18px 6px;
+		border-bottom: 1px solid var(--line);
+		color: var(--muted);
+		font-size: 12px;
+		font-weight: 600;
+		letter-spacing: 0.02em;
 	}
 
 	.state {

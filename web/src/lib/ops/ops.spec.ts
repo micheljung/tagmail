@@ -1,7 +1,15 @@
 import type { ThreadRowDto } from '@tagmail/api-types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, type NewOpDto, type OpDto, type ViewId } from '../transport';
-import { MAX_RESENDS, OpsStore, type OpList, type OpsApi, type Removed } from './ops.svelte';
+import type { OpIntent } from './effects';
+import {
+	MAX_RESENDS,
+	OpsStore,
+	type OpList,
+	type OpPhase,
+	type OpsApi,
+	type Removed
+} from './ops.svelte';
 
 function row(id: number, patch: Partial<ThreadRowDto> = {}): ThreadRowDto {
 	return {
@@ -26,6 +34,8 @@ class FakeList implements OpList {
 	ids: number[];
 	refetches = 0;
 	readonly rows = new Map<number, ThreadRowDto>();
+	/** Set by a test: called from `opsChanged`. */
+	onOps?: (intent: OpIntent, phase: OpPhase) => void;
 
 	constructor(
 		readonly view: ViewId,
@@ -54,6 +64,10 @@ class FakeList implements OpList {
 	patchRow(id: number, patch: (r: ThreadRowDto) => ThreadRowDto): void {
 		const r = this.rows.get(id);
 		if (r) this.rows.set(id, patch(r));
+	}
+
+	opsChanged(intent: OpIntent, phase: OpPhase): void {
+		this.onOps?.(intent, phase);
 	}
 }
 
@@ -137,6 +151,14 @@ describe('OpsStore', () => {
 		expect(label.ids).toEqual([2, 4]);
 		expect(toasts[0]).toMatchObject({ text: 'Archived 1 conversation', actions: ['Undo'] });
 		expect(store.unsynced.map((o) => o.status)).toEqual(['sending']);
+	});
+
+	it('applies and sends a quiet op without a toast', () => {
+		const { store, posted, toasts } = setup();
+		store.run({ kind: 'markRead', threadIds: [2] }, { view: 'inbox', quiet: true });
+		expect(posted).toHaveLength(1);
+		expect(store.project(row(2)).unreadCount).toBe(0);
+		expect(toasts).toEqual([]);
 	});
 
 	it('projects pending row changes and keeps them once confirmed', async () => {
@@ -327,5 +349,55 @@ describe('OpsStore', () => {
 		await store.load();
 		expect(store.unsynced).toMatchObject([{ opId: 'srv-1', status: 'failed', serverKnown: true }]);
 		expect(inbox.ids).toEqual([1, 2, 3, 4]);
+	});
+
+	it('lists the applied read and unread intents, oldest first', async () => {
+		const { store, posted } = setup();
+		store.run({ kind: 'markRead', threadIds: [1] }, { view: 'inbox' });
+		store.run({ kind: 'star', threadIds: [2] }, { view: 'inbox' });
+		store.run({ kind: 'markUnread', threadIds: [1, 3] }, { view: 'inbox' });
+		expect(store.unreadIntents()).toEqual([
+			{ kind: 'markRead', threadIds: [1] },
+			{ kind: 'markUnread', threadIds: [1, 3] }
+		]);
+		posted[0].reject(new ApiError(400, { error: 'bad', message: 'no' }));
+		await flush();
+		expect(store.unreadIntents()).toEqual([{ kind: 'markUnread', threadIds: [1, 3] }]);
+	});
+
+	it('touches threads of applied or sending ops, not failed ones', async () => {
+		const { store, posted } = setup();
+		store.run({ kind: 'archive', threadIds: [1] }, { view: 'inbox' });
+		store.run({ kind: 'star', threadIds: [2] }, { view: 'inbox' });
+		expect(store.touches(1)).toBe(true);
+		expect(store.touches(3)).toBe(false);
+		posted[0].reject(new ApiError(400, { error: 'bad', message: 'no' }));
+		posted[1].resolve(dto(posted[1].request, 'pending'));
+		await flush();
+		expect(store.touches(1)).toBe(false);
+		expect(store.touches(2)).toBe(true);
+	});
+
+	it('tells lists about each phase once the projection matches it', async () => {
+		const { store, posted, inbox } = setup();
+		const seen: string[] = [];
+		inbox.onOps = (intent, phase) => {
+			const live = store.unreadIntents().length;
+			const tracked = store.unsynced.length;
+			seen.push(`${intent.kind}:${phase}:${live}:${tracked}`);
+		};
+		const op = store.run({ kind: 'markRead', threadIds: [1] }, { view: 'inbox' });
+		posted[0].reject(new ApiError(400, { error: 'bad', message: 'no' }));
+		await flush();
+		const retried = store.retry(op);
+		posted[1].resolve(dto(posted[1].request, 'done'));
+		await retried;
+		expect(seen).toEqual([
+			'markRead:activate:1:1',
+			'markRead:deactivate:0:1',
+			'markRead:activate:1:1',
+			'markRead:done:0:1'
+		]);
+		expect(store.unsynced).toEqual([]);
 	});
 });

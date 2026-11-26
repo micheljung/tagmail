@@ -1,3 +1,4 @@
+import type { ListNames } from '../listMeta';
 import { OpsStore } from '../ops/ops.svelte';
 import { api } from '../transport';
 import { errorText } from '../ui/errors';
@@ -13,9 +14,24 @@ export const hub = new EventHub(api.transport);
 export const nav = new NavStore(api);
 export const accounts = new AccountsStore(api);
 export const calendars = new CalendarsStore(api);
-export const lists = new ThreadLists((view) => new ThreadList(view, api, hub, nav));
+export const lists: ThreadLists = new ThreadLists(
+	(view, options): ThreadList =>
+		new ThreadList(view, api, hub, nav, {
+			...options,
+			unreadIntents: () => ops.unreadIntents(),
+			touches: (id) => ops.touches(id)
+		})
+);
 export const toasts = new Toasts();
-export const ops = new OpsStore({
+export const listNames: ListNames = {
+	account: (id) => accounts.name(id),
+	label: (key) => nav.labelName(key),
+	mailbox: (id) => ({
+		name: nav.mailboxName(id),
+		specialUse: nav.mailboxes.find((m) => m.id === id)?.specialUse ?? null
+	})
+};
+export const ops: OpsStore = new OpsStore({
 	api,
 	lists: () => lists.all(),
 	context: () => ({ inboxIds: nav.inboxIds }),

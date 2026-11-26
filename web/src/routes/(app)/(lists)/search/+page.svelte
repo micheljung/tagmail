@@ -1,27 +1,29 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { APP_NAME } from '#lib/document-title.ts';
-	import { accounts } from '#lib/stores/index.ts';
+	import { listMeta } from '#lib/listMeta.ts';
+	import { listNames } from '#lib/stores/index.ts';
 	import ListPage from '#lib/ui/ListPage.svelte';
 	import { accountParam, scopedView, withAccount } from '#lib/views.ts';
 
 	const query = $derived((page.url.searchParams.get('q') ?? '').trim());
 	const account = $derived(accountParam(page.url));
-	const scope = $derived(account === null ? '' : ` in ${accounts.name(account)}`);
+	const view = $derived(scopedView(`search:${query}`, account));
+	const meta = $derived(listMeta(view, listNames));
 </script>
 
 <svelte:head>
-	<title>{query ? `${query} · ` : ''}Search · {APP_NAME}</title>
+	<title>{meta.title} · {APP_NAME}</title>
 </svelte:head>
 
 {#if query}
 	{#key `${account}/${query}`}
 		<ListPage
-			view={scopedView(`search:${query}`, account)}
+			{view}
 			path={withAccount(`/search?q=${encodeURIComponent(query)}`, account)}
-			label={`Search results for ${query}${scope}`}
-			emptyTitle="No conversations match"
-			emptyHint="Try fewer words, or operators like from:, label: or after:2026/01/01."
+			label={meta.label}
+			emptyTitle={meta.emptyTitle}
+			emptyHint={meta.emptyHint}
 		/>
 	{/key}
 {:else}

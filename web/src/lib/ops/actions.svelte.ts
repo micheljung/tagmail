@@ -34,17 +34,28 @@ export function originsOf(rows: readonly ThreadRowDto[]): Map<number, number[]> 
 }
 
 /** Runs `intent` on `target`'s threads as one op per account. */
-export function runOp(intent: Omit<OpIntent, 'threadIds'>, target: ActionTarget): void {
+export function runOp(
+	intent: Omit<OpIntent, 'threadIds'>,
+	target: ActionTarget,
+	quiet = false
+): void {
 	for (const threadIds of byAccount(target.threadIds, target.rows)) {
-		ops.run({ ...intent, threadIds }, { view: target.view, origins: originsOf(target.rows) });
+		ops.run(
+			{ ...intent, threadIds },
+			{ view: target.view, origins: originsOf(target.rows), quiet }
+		);
 	}
 }
 
 /** Runs a write shortcut or toolbar action on `target`; returns whether it applied. */
-export function act(action: ShortcutAction, target: ActionTarget): boolean {
+export function act(
+	action: ShortcutAction,
+	target: ActionTarget,
+	options: { quiet?: boolean } = {}
+): boolean {
 	const { threadIds, rows, view } = target;
 	if (threadIds.length === 0) return false;
-	const run = (kind: OpIntent['kind']) => runOp({ kind }, target);
+	const run = (kind: OpIntent['kind']) => runOp({ kind }, target, options.quiet);
 	switch (action) {
 		case 'archive':
 			run('archive');
