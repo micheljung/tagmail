@@ -31,9 +31,9 @@ interface MockPush {
  * headless Chromium always denies. `existing` starts subscribed with that
  * server key and permission granted.
  */
-async function stubPush(page: Page, options: { existing?: string } = {}) {
+async function stubPush(page: Page, options: { existing?: string; failSubscribe?: boolean } = {}) {
 	await page.addInitScript(
-		({ endpoint, existing }) => {
+		({ endpoint, existing, failSubscribe }) => {
 			const stub = { subscribed: 0, unsubscribed: 0, permissionRequests: 0 };
 			(window as unknown as { __push: typeof stub }).__push = stub;
 			const bytes = (key: string) =>
@@ -54,6 +54,10 @@ async function stubPush(page: Page, options: { existing?: string } = {}) {
 				: null;
 			PushManager.prototype.subscribe = function (opts?: PushSubscriptionOptionsInit) {
 				stub.subscribed++;
+				if (failSubscribe)
+					return Promise.reject(
+						new DOMException('Registration failed - push service error', 'AbortError')
+					);
 				current = subscription(bytes(opts?.applicationServerKey as string));
 				return Promise.resolve(current as unknown as PushSubscription);
 			};
@@ -67,7 +71,7 @@ async function stubPush(page: Page, options: { existing?: string } = {}) {
 				return Promise.resolve(permission);
 			};
 		},
-		{ endpoint: ENDPOINT, existing: options.existing }
+		{ endpoint: ENDPOINT, existing: options.existing, failSubscribe: options.failSubscribe }
 	);
 }
 
@@ -172,6 +176,25 @@ test('Enable notifications subscribes this browser and the settings apply to it'
 	await expect(enable).toBeVisible();
 	expect((await stubState(page)).unsubscribed).toBe(1);
 	expect((await mockPush(page)).subscriptions).toEqual([]);
+});
+
+test('a push service failure shows what to check and lets the user try again', async ({ page }) => {
+	await stubPush(page, { failSubscribe: true });
+	await openSettings(page);
+	await page.getByRole('button', { name: 'Enable notifications' }).click();
+
+	const trouble = page.locator('[data-push-trouble="push-service"]');
+	await expect(trouble).toContainText('Couldn’t turn on notifications');
+	expect(await trouble.locator('ol.steps li').count()).toBeGreaterThanOrEqual(3);
+	await expect(
+		trouble.locator('[data-check]').filter({ hasText: 'server answers' })
+	).toHaveAttribute('data-check', 'ok');
+	await trouble.getByText('Technical details').click();
+	await expect(trouble).toContainText('Registration failed - push service error');
+
+	const { subscribed } = await stubState(page);
+	await trouble.getByRole('button', { name: 'Try again' }).click();
+	await expect.poll(async () => (await stubState(page)).subscribed).toBe(subscribed + 1);
 });
 
 test('an existing subscription is registered again when the app starts', async ({ page }) => {
@@ -281,8 +304,8 @@ test('notifications blocked in the browser say so', async ({ page }) => {
 		Object.defineProperty(Notification, 'permission', { get: () => 'denied' })
 	);
 	await openSettings(page);
-	await expect(page.locator('[data-push-state="blocked"]')).toHaveText(
-		'Blocked in browser settings'
+	await expect(page.locator('[data-push-state="blocked"]')).toContainText(
+		'Notifications are blocked for this site'
 	);
 	await expect(page.getByRole('button', { name: 'Enable notifications' })).toHaveCount(0);
 });

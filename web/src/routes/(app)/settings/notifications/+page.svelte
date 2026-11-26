@@ -11,6 +11,16 @@
 		updatePush,
 		type PushAvailability
 	} from '#lib/push/client.ts';
+	import {
+		CAUSE,
+		classifyPushError,
+		detectBrowser,
+		selfChecks,
+		troubleshootingSteps,
+		type Check,
+		type PushFailure,
+		type Step
+	} from '#lib/push/diagnose.ts';
 	import { pushPrefs } from '#lib/push/prefs.ts';
 	import { appRegistration } from '#lib/pwa/register.ts';
 	import { accounts } from '#lib/stores/index.ts';
@@ -26,7 +36,36 @@
 	let busy = $state<string | null>(null);
 	let error = $state<string | null>(null);
 
+	interface Trouble {
+		failure: PushFailure;
+		raw: string;
+		steps: Step[];
+		checks: Check[];
+	}
+	let trouble = $state<Trouble | null>(null);
+
 	const accountIds = $derived(accounts.accounts.map((a) => a.id));
+
+	async function diagnose(e: unknown): Promise<Trouble> {
+		const env = pushEnv();
+		const brave = 'brave' in navigator;
+		const failure = classifyPushError(e);
+		const serverReachable = await api.pushKey().then(
+			() => true,
+			() => false
+		);
+		return {
+			failure,
+			raw: errorText(e),
+			steps: troubleshootingSteps(failure, detectBrowser(env.userAgent, brave)),
+			checks: selfChecks({
+				secureContext: globalThis.isSecureContext,
+				workerRegistered: manager !== null,
+				permission: env.permission,
+				serverReachable
+			})
+		};
+	}
 
 	async function refresh() {
 		const all = await api.pushSubscriptions();
@@ -71,8 +110,14 @@
 	function enable() {
 		const push = manager;
 		if (!push) return;
+		trouble = null;
 		void act('enable', async () => {
-			mine = await enablePush(push, api, pushPrefs, () => Notification.requestPermission());
+			try {
+				mine = await enablePush(push, api, pushPrefs, () => Notification.requestPermission());
+			} catch (e) {
+				trouble = await diagnose(e);
+				return;
+			}
 			if (!mine) availability = pushAvailability(pushEnv());
 		});
 	}
@@ -135,6 +180,35 @@
 
 	{#if error}<p class="error" role="alert">{error}</p>{/if}
 
+	{#if trouble}
+		<section class="trouble" aria-labelledby="trouble-title" data-push-trouble={trouble.failure}>
+			<h2 id="trouble-title">Couldn’t turn on notifications</h2>
+			<p>{CAUSE[trouble.failure]}</p>
+			<ul class="checks">
+				{#each trouble.checks as check (check.label)}
+					<li data-check={check.state}>
+						<span aria-hidden="true">
+							{check.state === 'ok' ? '✓' : check.state === 'fail' ? '✗' : '?'}
+						</span>
+						<span>{check.label}{check.state === 'ok' ? '' : ` — ${check.hint}`}</span>
+					</li>
+				{/each}
+			</ul>
+			<ol class="steps">
+				{#each trouble.steps as step (step.title)}
+					<li><strong>{step.title}</strong><span>{step.detail}</span></li>
+				{/each}
+			</ol>
+			<div class="actions">
+				<button class="btn primary" onclick={enable} disabled={busy === 'enable'}>Try again</button>
+			</div>
+			<details>
+				<summary>Technical details</summary>
+				<code>{trouble.raw}</code>
+			</details>
+		</section>
+	{/if}
+
 	<section aria-labelledby="device-title">
 		<h2 id="device-title">This device</h2>
 		{#if availability === null}
@@ -147,7 +221,14 @@
 				open it from there.
 			</p>
 		{:else if availability === 'blocked'}
-			<p class="muted" data-push-state="blocked">Blocked in browser settings</p>
+			<div data-push-state="blocked">
+				<p class="muted">{CAUSE.permission}</p>
+				<ol class="steps">
+					{#each troubleshootingSteps('permission', 'other') as step (step.title)}
+						<li><strong>{step.title}</strong><span>{step.detail}</span></li>
+					{/each}
+				</ol>
+			</div>
 		{:else if !mine}
 			<button class="btn primary" onclick={enable} disabled={busy === 'enable'}>
 				<Icon name="bell" size={18} />Enable notifications
@@ -343,6 +424,48 @@
 
 	.muted {
 		color: var(--muted);
+	}
+
+	.trouble {
+		padding: 14px 16px;
+		border: 1px solid var(--line);
+		border-radius: var(--radius);
+	}
+
+	.checks {
+		display: grid;
+		gap: 4px;
+		margin: 0 0 12px;
+		padding: 0;
+		list-style: none;
+	}
+
+	.checks li {
+		display: flex;
+		gap: 8px;
+	}
+
+	.checks [data-check='fail'] {
+		color: var(--danger);
+	}
+
+	.steps {
+		display: grid;
+		gap: 8px;
+		margin: 0 0 12px;
+		padding-left: 20px;
+	}
+
+	.steps span {
+		display: block;
+		color: var(--muted);
+		font-size: 13px;
+	}
+
+	details {
+		margin-top: 12px;
+		color: var(--muted);
+		font-size: 13px;
 	}
 
 	.error {
