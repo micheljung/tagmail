@@ -338,6 +338,12 @@ impl Desktop {
             ClientError::Api { status, body } if status != 401 => {
                 api::Response::json(status, &body)
             }
+            ClientError::Status { status } if (300..400).contains(&status) => api::Response::error(
+                502,
+                "server_redirect",
+                "The server redirected the request, probably to a login page. \
+                 Let /api through your reverse proxy without a login.",
+            ),
             ClientError::Unauthorized | ClientError::Api { .. } | ClientError::Status { .. } => {
                 api::Response::error(400, "invalid_code", "That code is wrong or expired")
             }
