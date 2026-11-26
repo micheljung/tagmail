@@ -28,6 +28,8 @@ jobs:
         with:
           toolchain: "1.100"
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Restore seeded Maildir
         id: seed-cache
         uses: actions/cache@v6
@@ -61,6 +63,8 @@ jobs:
         with:
           toolchain: "1.100"
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Restore seeded Maildir
         id: seed-cache
         uses: actions/cache@v6
@@ -91,6 +95,10 @@ jobs:
 
   web-playwright:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     defaults:
       run:
         working-directory: web
@@ -102,16 +110,26 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - name: Cache Playwright browsers
+        id: pw-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
       - name: Install Chromium and WebKit
         run: pnpm exec playwright install --with-deps chromium webkit
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+      - name: Install system libraries for cached browsers
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: pnpm exec playwright install-deps chromium webkit
       - run: pnpm run build
       - name: Playwright against the mock API (100k threads)
-        run: pnpm exec playwright test
+        run: pnpm exec playwright test --shard=${{ matrix.shard }}/2
       - name: Upload Playwright report
         if: failure()
         uses: actions/upload-artifact@v6
         with:
-          name: playwright-report
+          name: playwright-report-${{ matrix.shard }}
           path: web/playwright-report
           retention-days: 7
 
@@ -130,6 +148,8 @@ jobs:
         with:
           toolchain: "1.100"
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
