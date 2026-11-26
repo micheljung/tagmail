@@ -363,6 +363,10 @@ test.describe('density', () => {
 });
 
 test.describe('unread first', () => {
+	// WebKit does not route requests that go through the service worker, so holding the ops POST
+	// with page.route only works when the worker is out of the way.
+	test.use({ serviceWorkers: 'block' });
+
 	test.beforeEach(async ({ page }) => {
 		await seed(page, { 'tagmail.inboxType': 'unread' });
 	});
