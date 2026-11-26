@@ -51,3 +51,24 @@ them back on; after signing out, enable them again in Settings.
 Notifications are sent through the push service of the browser vendor
 (Google, Apple, Mozilla). The content is end-to-end encrypted to the device;
 the push service sees only when and how large.
+
+### Notifications won't turn on
+
+If **Enable notifications** fails, Tagmail shows what went wrong, a short
+self-check and steps for your browser. The most common case is
+"Registration failed - push service error": the browser could not reach its
+own push service, so Tagmail's server was never asked.
+
+- **Brave:** open `brave://settings/privacy` and turn on **Use Google
+  services for push messaging**, then restart Brave.
+- **Chrome, Edge, Chromium:** leave private windows; open
+  `chrome://gcm-internals` and look for "Connected"; make sure a VPN,
+  firewall or DNS filter does not block `fcm.googleapis.com`. Chromium builds
+  without Google API keys (many Linux packages, Ungoogled Chromium) cannot
+  register for push at all; use Chrome, Edge or Firefox.
+- **Firefox:** leave private windows; in `about:config` check that
+  `dom.push.enabled` is `true`.
+- **Any browser:** clear the site's data, reload and try again.
+
+If the self-check shows "Tagmail's server answers", the server is fine and
+the cause is in the browser or network.
