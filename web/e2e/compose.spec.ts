@@ -64,13 +64,23 @@ test('c composes, autosaves, sends and reports the outbox status', async ({ page
 	await win.getByRole('button', { name: 'Bold' }).click();
 	await page.keyboard.type(' Really.');
 	await expect(win.getByRole('status')).toHaveText('Draft saved');
+	// "Draft saved" can still be the autosave from before the bad chip was
+	// removed, so wait for the stored draft itself to catch up.
+	await expect
+		.poll(async () => {
+			const { drafts } = await state(page);
+			return (
+				drafts.length === 1 &&
+				drafts[0]?.to.length === 1 &&
+				drafts[0]?.html.includes('<b> Really.</b>')
+			);
+		})
+		.toBe(true);
 	const saved = await state(page);
-	expect(saved.drafts).toHaveLength(1);
 	expect(saved.drafts[0]).toMatchObject({
 		subject: 'Lisbon photos',
 		to: [{ email: 'ana@sousa.family' }]
 	});
-	expect(saved.drafts[0].html).toContain('<b> Really.</b>');
 
 	await page.keyboard.press('Control+Enter');
 	await expect(win).toHaveCount(0);
