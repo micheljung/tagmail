@@ -71,9 +71,9 @@ struct Cli {
     #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
     poll_interval: u64,
     /// Render the sanitized `<style>` sheets and `class` attributes of HTML
-    /// mail, so responsive mail can reflow (off by default; turning it off
-    /// takes effect on the next message load)
-    #[arg(long, env = "TAGMAIL_RENDER_AUTHOR_CSS")]
+    /// mail, so responsive mail can reflow (on by default; `--render-author-css=false`
+    /// turns it off, taking effect on the next message load)
+    #[arg(long, env = "TAGMAIL_RENDER_AUTHOR_CSS", default_value_t = true, action = clap::ArgAction::Set)]
     render_author_css: bool,
     /// Async worker threads; the work is IO-bound, so few keep memory low
     #[arg(long, default_value_t = DEFAULT_WORKER_THREADS, value_parser = clap::value_parser!(u64).range(1..=256))]

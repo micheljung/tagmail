@@ -142,7 +142,7 @@ impl<S: Store> Api<S> {
     }
 
     /// Keeps sanitized author `<style>` sheets and `class` attributes in
-    /// rendered bodies (`--render-author-css`; off by default). Bodies are
+    /// rendered bodies (`--render-author-css`; on by default). Bodies are
     /// rendered per request and served `no-store`, so turning it off takes
     /// effect on the next load.
     pub fn with_author_css(mut self, on: bool) -> Api<S> {
