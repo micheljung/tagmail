@@ -7,3 +7,6 @@ bun.lockb
 
 # Miscellaneous
 /static/
+
+# Golden render output, compared byte for byte (crates/api-core/tests/corpus_render.rs)
+/e2e/corpus/rendered/

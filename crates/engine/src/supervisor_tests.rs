@@ -324,6 +324,39 @@ async fn polls_run_while_waiting_for_the_bulk_permit() {
 }
 
 #[tokio::test]
+async fn request_sync_polls_a_mailbox_idle_does_not_watch() {
+    const QUIET: Duration = Duration::from_secs(2);
+    let srv = seeded("s", 1);
+    let f = fixture(&[account(1, 2, &srv)], config(|_| {})).await;
+    f.engine.start_all().await.unwrap();
+    eventually("initial sync live", || f.all_live(1)).await;
+    eventually("account loop settled", || async {
+        let turns = f.engine.inner.loop_turns.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        f.engine.inner.loop_turns.load(Ordering::SeqCst) == turns
+    })
+    .await;
+
+    lock(&srv).append(
+        "Archive",
+        FakeMsg::new("archived@x", "Late", "bob@x", "me@x", 1_790_000_900),
+    );
+    tokio::time::sleep(QUIET).await;
+    assert!(!f.has("archived@x").await, "IDLE only watches INBOX");
+
+    f.engine.request_sync(AccountId(1));
+    let deadline = Instant::now() + QUIET;
+    while !f.has("archived@x").await {
+        assert!(
+            Instant::now() < deadline,
+            "request_sync did not poll Archive"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
 async fn auth_backoff_of_one_account_does_not_hold_back_another() {
     let (a, b) = (seeded("a", 1), seeded("b", 1));
     lock(&a).password = Some("other".to_owned());

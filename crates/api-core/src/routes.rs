@@ -8,6 +8,7 @@ pub enum RouteId {
     Version,
     Status,
     ViewIndex,
+    SyncView,
     Threads,
     Changes,
     Mailboxes,
@@ -75,6 +76,7 @@ pub const ROUTES: &[Route] = &[
     route(Method::Get, "/api/version", RouteId::Version),
     route(Method::Get, "/api/status", RouteId::Status),
     route(Method::Get, "/api/views/{view}/index", RouteId::ViewIndex),
+    route(Method::Post, "/api/views/{view}/sync", RouteId::SyncView),
     route(Method::Get, "/api/threads", RouteId::Threads),
     route(Method::Get, "/api/changes", RouteId::Changes),
     route(Method::Get, "/api/mailboxes", RouteId::Mailboxes),
@@ -217,6 +219,14 @@ mod tests {
         assert_eq!(
             resolve(Method::Get, &["views", "label:a/b", "index"]),
             Ok((RouteId::ViewIndex, vec!["label:a/b"]))
+        );
+        assert_eq!(
+            resolve(Method::Post, &["views", "inbox", "sync"]),
+            Ok((RouteId::SyncView, vec!["inbox"]))
+        );
+        assert_eq!(
+            resolve(Method::Get, &["views", "inbox", "sync"]),
+            Err(Miss::MethodNotAllowed)
         );
         assert_eq!(
             resolve(Method::Post, &["image-senders"]),

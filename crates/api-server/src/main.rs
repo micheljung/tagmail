@@ -70,6 +70,11 @@ struct Cli {
     /// Seconds between polls of mailboxes not covered by IDLE
     #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..))]
     poll_interval: u64,
+    /// Render the sanitized `<style>` sheets and `class` attributes of HTML
+    /// mail, so responsive mail can reflow (off by default; turning it off
+    /// takes effect on the next message load)
+    #[arg(long, env = "TAGMAIL_RENDER_AUTHOR_CSS")]
+    render_author_css: bool,
     /// Async worker threads; the work is IO-bound, so few keep memory low
     #[arg(long, default_value_t = DEFAULT_WORKER_THREADS, value_parser = clap::value_parser!(u64).range(1..=256))]
     worker_threads: u64,
@@ -146,6 +151,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         },
         web_dir: cli.web_dir.or_else(default_web_dir),
         push: Default::default(),
+        render_author_css: cli.render_author_css,
     };
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),

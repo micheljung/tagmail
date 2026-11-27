@@ -32,6 +32,7 @@
 	import { withAccount } from '#lib/views.ts';
 	import { NAV_WIDTH_DEFAULT, NAV_WIDTH_MAX, NAV_WIDTH_MIN, clampNavWidth } from '#lib/prefs.ts';
 	import SearchBar from '#lib/ui/SearchBar.svelte';
+	import { selectionBar } from '#lib/ui/selectionBar.svelte.ts';
 	import { onMount, tick } from 'svelte';
 	import type { LayoutProps } from './$types';
 
@@ -245,8 +246,14 @@
 />
 
 <a class="skip" href="#main">Skip to conversations</a>
-<div class="shell" class:drawer={drawerOpen} style:--nav-w="{navWidth}px">
-	<header class="top" inert={compact && drawerOpen}>
+<div
+	class="shell"
+	class:drawer={drawerOpen}
+	class:selecting={selectionBar.active}
+	style:--nav-w="{navWidth}px"
+>
+	<!-- On phones the list's selection bar takes the header's place. -->
+	<header class="top" inert={compact && drawerOpen} hidden={selectionBar.active}>
 		{#if compact && onThread}
 			<button class="menu" aria-label="Back" onclick={back}>
 				<Icon name="back" />
@@ -539,6 +546,14 @@
 			grid-template-columns: minmax(0, 1fr);
 			grid-template-rows: calc(64px + env(safe-area-inset-top)) minmax(0, 1fr);
 			padding: 0 env(safe-area-inset-right) 0 env(safe-area-inset-left);
+		}
+
+		.selecting {
+			grid-template-rows: minmax(0, 1fr);
+		}
+
+		.top[hidden] {
+			display: none;
 		}
 
 		.top {

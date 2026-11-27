@@ -1,0 +1,8 @@
+[
+	{ "name": "responsive", "tags": ["responsive"], "unstyledTextSelector": "p" },
+	{ "name": "fixed-600", "tags": ["fixed-600"] },
+	{ "name": "text", "tags": ["text"], "unstyledTextSelector": "body" },
+	{ "name": "centered", "tags": ["centered"], "unstyledTextSelector": "p" },
+	{ "name": "long-token", "tags": ["long-token"], "unstyledTextSelector": "p" },
+	{ "name": "long-token-bare", "tags": ["long-token-bare"], "unstyledTextSelector": "p" }
+]

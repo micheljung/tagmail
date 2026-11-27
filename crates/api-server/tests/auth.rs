@@ -43,6 +43,7 @@ impl Dirs {
             auth: AuthConfig::default(),
             web_dir: None,
             push: Default::default(),
+            render_author_css: false,
         }
     }
 }

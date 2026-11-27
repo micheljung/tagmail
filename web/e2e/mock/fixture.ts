@@ -1,4 +1,7 @@
 /** Deterministic mailbox of `THREAD_COUNT` threads for the e2e mock API. */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 export const THREAD_COUNT = 100_000;
 export const NOW = Date.UTC(2026, 10, 20, 16, 42) / 1000;
 export const XSS_INDEX = 7;
@@ -36,6 +39,45 @@ export const LABELS = [
 	{ key: 'newsletters', name: 'Newsletters' },
 	{ key: 'side project', name: 'Side project' }
 ];
+
+/**
+ * Label of the rendering corpus rows; kept out of `LABELS` so specs that pick
+ * or look up fixture labels never meet it.
+ */
+export const CORPUS_LABEL = { key: 'corpus', name: 'Corpus' };
+
+export interface CorpusEmail {
+	name: string;
+	tags: string[];
+	/** Text without an author `font-size`, for the font-size checks. */
+	unstyledTextSelector?: string;
+}
+
+export const CORPUS_DIR = join(import.meta.dirname, '../corpus');
+export const CORPUS = JSON.parse(
+	readFileSync(join(CORPUS_DIR, 'manifest.json'), 'utf8')
+) as CorpusEmail[];
+/** The corpus takes the oldest list positions, so the thread count stays the same. */
+const CORPUS_START = THREAD_COUNT - CORPUS.length;
+
+function corpusAt(i: number): CorpusEmail | undefined {
+	return i >= CORPUS_START && i < THREAD_COUNT ? CORPUS[i - CORPUS_START] : undefined;
+}
+
+/** The corpus email a thread shows, if any. */
+export function corpusOf(threadId: number): CorpusEmail | undefined {
+	const at = positionOf(threadId);
+	return at === undefined ? undefined : corpusAt(at);
+}
+
+/** Thread id of the corpus email `name`. */
+export function corpusThreadId(name: string): number {
+	const k = CORPUS.findIndex((c) => c.name === name);
+	if (k < 0) throw new Error(`no corpus email ${name}`);
+	return idAt(CORPUS_START + k);
+}
+
+const CORPUS_SENDER: Address = { name: 'Sample Sender', email: 'sender@example.com' };
 
 export const MAILBOXES = [
 	{ id: 1, accountId: 1, name: 'INBOX', delimiter: '/', specialUse: null },
@@ -137,6 +179,23 @@ export function rowAt(i: number): Row {
 	const labels = LABELS.filter(() => r() < 0.08).map((l) => l.key);
 	const unread = r() < (i < 40 ? 0.45 : 0.12);
 	const xss = i === XSS_INDEX;
+	const corpus = corpusAt(i);
+	if (corpus) {
+		return {
+			id: idAt(i),
+			accountId: 1,
+			subject: `Corpus: ${corpus.name}`,
+			snippet: `Rendering corpus email (${corpus.tags.join(', ')})`,
+			lastDate: Math.round(NOW - i * 1260),
+			messageCount: 1,
+			unreadCount: 0,
+			starred: false,
+			hasAttachment: false,
+			senders: [CORPUS_SENDER],
+			labels: [CORPUS_LABEL.key],
+			mailboxIds: [1]
+		};
+	}
 	return {
 		id: idAt(i),
 		accountId: 1,
@@ -262,7 +321,8 @@ export function messagesOf(row: Row): Message[] {
 			starred: row.starred && k === row.messageCount - 1,
 			hasAttachment: row.hasAttachment && k === 0,
 			hasRemoteImages:
-				(row.id % 3 === 0 && k === row.messageCount - 1) || positionOf(row.id) === XSS_INDEX
+				(row.id % 3 === 0 && k === row.messageCount - 1 && !corpusOf(row.id)) ||
+				positionOf(row.id) === XSS_INDEX
 		});
 	}
 	return out;
@@ -280,6 +340,7 @@ export function messageById(id: number): { row: Row; message: Message } | undefi
 
 export function remoteImages(row: Row, m: Message): number {
 	if (positionOf(row.id) === XSS_INDEX) return 1;
+	if (corpusOf(row.id)) return 0;
 	return row.id % 3 === 0 && m.id === row.id * 10 + row.messageCount - 1 ? 1 : 0;
 }
 

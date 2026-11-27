@@ -7,7 +7,14 @@ import type { NewOpDto, OpDto } from '../transport';
 import { Api, CURSOR_HEADER, type ViewId } from '../transport/api';
 import { EventHub } from './events.svelte';
 import { NavStore } from './nav.svelte';
-import { REFETCH_DEBOUNCE_MS, ThreadList, ThreadLists } from './threadList.svelte';
+import {
+	REFETCH_DEBOUNCE_MS,
+	REFRESH_MIN_SPIN_MS,
+	REFRESH_TIMEOUT_MS,
+	ThreadList,
+	ThreadLists,
+	UP_TO_DATE_MS
+} from './threadList.svelte';
 
 const EPOCH = '00000000000000aa';
 const INBOX = 1;
@@ -67,9 +74,34 @@ function fixture(view: ViewId = 'inbox', options: { unreadFirst?: boolean } = {}
 	const unread = { ids: new Set([40, 20]), seq: null as number | null, fail: false, hold: false };
 	const unreadCalls: (() => void)[] = [];
 	let unreadCount = 0;
+	const syncCalls: { path: string; method: string | undefined }[] = [];
+	let sync: () => Promise<Response> = () => Promise.resolve(new Response(null, { status: 202 }));
+	const lastErrors: Record<number, string | null> = {};
+	let statusCalls = 0;
 	let push: (e: ApiEvent) => void = () => {};
 	const transport: ApiTransport = {
-		request(path) {
+		request(path, init) {
+			if (path.startsWith('/api/views/') && path.endsWith('/sync')) {
+				syncCalls.push({ path, method: init?.method });
+				return sync();
+			}
+			if (path === '/api/status') {
+				statusCalls++;
+				const accounts = [1, 2].map((id) => ({
+					id,
+					name: `a${id}`,
+					email: null,
+					status: 'running',
+					phase: 'live',
+					mailboxesTotal: 1,
+					mailboxesLive: 1,
+					textPending: 0,
+					lastError: lastErrors[id] ?? null,
+					capabilities: [],
+					degraded: []
+				}));
+				return Promise.resolve(Response.json({ accounts }));
+			}
 			if (path.startsWith('/api/views/') && decodeURIComponent(path).includes(UNREAD_VIEW)) {
 				unreadCount++;
 				return new Promise((resolve) => {
@@ -157,6 +189,10 @@ function fixture(view: ViewId = 'inbox', options: { unreadFirst?: boolean } = {}
 		unreadCount: () => unreadCount,
 		send,
 		indexCalls,
+		syncCalls,
+		statusCalls: () => statusCalls,
+		setSync: (s: () => Promise<Response>) => (sync = s),
+		setLastError: (id: number, e: string | null) => (lastErrors[id] = e),
 		setOrder: (o: number[]) => (order = o),
 		setDate: (id: number, d: number) => dates.set(id, d),
 		ids: () => list.index.slice(0, list.count),
@@ -660,5 +696,207 @@ describe('ThreadList, unread first', () => {
 		} finally {
 			vi.unstubAllGlobals();
 		}
+	});
+});
+
+describe('ThreadList.refresh', () => {
+	beforeEach(() => vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] }));
+	afterEach(() => vi.useRealTimers());
+
+	/** A list that started a refresh whose sync request already answered. */
+	async function refreshing(view?: ViewId) {
+		const f = await ready(view);
+		void f.list.refresh();
+		await flush();
+		expect(f.list.refreshing).toBe('busy');
+		return f;
+	}
+
+	const at = (ms: number) => vi.advanceTimersByTimeAsync(ms);
+
+	it('posts one sync for the view and ignores a second pull while busy', async () => {
+		const f = await refreshing('label:work');
+		void f.list.refresh();
+		await flush();
+		expect(f.syncCalls).toEqual([
+			{ path: `/api/views/${encodeURIComponent('label:work')}/sync`, method: 'POST' }
+		]);
+	});
+
+	it('ends on a change that moves the list, but not before the minimum spin', async () => {
+		const f = await refreshing();
+		await at(100);
+		f.setDate(60, 600);
+		f.send([upsert(60, 600, [INBOX])]);
+		expect(f.ids()[0]).toBe(60);
+		await at(REFRESH_MIN_SPIN_MS - 101);
+		expect(f.list.refreshing).toBe('busy');
+		await at(1);
+		expect(f.list.refreshing).toBe('idle');
+		await at(REFRESH_TIMEOUT_MS);
+		expect(f.list.refreshing).toBe('idle');
+		expect(f.statusCalls()).toBe(0);
+	});
+
+	it('ends at once on a qualifying change after the minimum spin', async () => {
+		const f = await refreshing();
+		await at(1000);
+		f.send([upsert(40, 400, [ARCHIVE])]);
+		expect(f.list.refreshing).toBe('idle');
+	});
+
+	it('ends on a change that schedules a refetch (a bulk mailbox op)', async () => {
+		const f = await refreshing();
+		await at(700);
+		f.send([{ entity: 'mailbox', id: INBOX, op: { kind: 'bulk', mailbox: INBOX }, payload: null }]);
+		expect(f.list.refreshing).toBe('idle');
+	});
+
+	it('is not ended by a refetch the window loader asks for', async () => {
+		const f = await refreshing();
+		await at(700);
+		f.list.scheduleRefetch();
+		await at(REFETCH_DEBOUNCE_MS);
+		await flush();
+		expect(f.list.refreshing).toBe('busy');
+	});
+
+	it('runs to the neutral timeout on irrelevant changes, then shows up to date', async () => {
+		const f = await refreshing();
+		await at(100);
+		f.send([
+			{ entity: 'op', id: 1, op: { kind: 'upsert' }, payload: null },
+			{ entity: 'outbox', id: 1, op: { kind: 'upsert' }, payload: null },
+			{ entity: 'identity', id: 1, op: { kind: 'upsert' }, payload: null },
+			{ entity: 'message', id: 9, op: { kind: 'upsert' }, payload: { threadId: 50 } },
+			upsert(70, 700, [ARCHIVE])
+		]);
+		expect(f.ids()).toEqual([50, 40, 30, 20, 10]);
+		await at(REFRESH_TIMEOUT_MS - 101);
+		expect(f.list.refreshing).toBe('busy');
+		await at(1);
+		await flush();
+		expect(f.statusCalls()).toBe(1);
+		expect(f.list.refreshing).toBe('done');
+		await at(UP_TO_DATE_MS - 1);
+		expect(f.list.refreshing).toBe('done');
+		await at(1);
+		expect(f.list.refreshing).toBe('idle');
+	});
+
+	it('ends a search view early only on a thread upsert, else at the timeout', async () => {
+		const early = await refreshing('search:foo');
+		await at(700);
+		early.send([upsert(60, 600, [INBOX])]);
+		expect(early.list.refreshing).toBe('idle');
+
+		const late = await refreshing('search:foo');
+		late.send([{ entity: 'label', id: 1, op: { kind: 'upsert' }, payload: null }]);
+		await at(REFRESH_TIMEOUT_MS);
+		await flush();
+		expect(late.list.refreshing).toBe('done');
+	});
+
+	it('reports a failed request after the minimum spin', async () => {
+		const f = await ready();
+		f.setSync(() =>
+			Promise.resolve(Response.json({ error: 'boom', message: 'boom' }, { status: 500 }))
+		);
+		void f.list.refresh();
+		await flush();
+		expect(f.list.refreshing).toBe('busy');
+		await at(REFRESH_MIN_SPIN_MS - 1);
+		expect(f.list.refreshing).toBe('busy');
+		await at(1);
+		expect(f.list.refreshing).toBe('failed');
+		await at(UP_TO_DATE_MS);
+		expect(f.list.refreshing).toBe('idle');
+		await at(REFRESH_TIMEOUT_MS);
+		expect(f.list.refreshing).toBe('idle');
+		expect(f.statusCalls()).toBe(0);
+	});
+
+	it('waits for a request still pending at the timeout and reports its failure', async () => {
+		const f = await ready();
+		let fail = (): void => undefined;
+		f.setSync(
+			() =>
+				new Promise<Response>((resolve) => {
+					fail = () => resolve(Response.json({ error: 'boom', message: 'boom' }, { status: 500 }));
+				})
+		);
+		void f.list.refresh();
+		await at(REFRESH_TIMEOUT_MS);
+		await flush();
+		expect(f.statusCalls()).toBe(1);
+		expect(f.list.refreshing).toBe('busy');
+		await at(1000);
+		expect(f.list.refreshing).toBe('busy');
+		fail();
+		await flush();
+		expect(f.list.refreshing).toBe('failed');
+	});
+
+	it('shows up to date once a request pending at the timeout succeeds', async () => {
+		const f = await ready();
+		let answer = (): void => undefined;
+		f.setSync(
+			() =>
+				new Promise<Response>((resolve) => {
+					answer = () => resolve(new Response(null, { status: 202 }));
+				})
+		);
+		void f.list.refresh();
+		await at(REFRESH_TIMEOUT_MS);
+		await flush();
+		expect(f.list.refreshing).toBe('busy');
+		answer();
+		await flush();
+		expect(f.list.refreshing).toBe('done');
+	});
+
+	it('reports offline when the request cannot reach the server', async () => {
+		const f = await ready();
+		f.setSync(() => Promise.reject(new TypeError('Failed to fetch')));
+		void f.list.refresh();
+		await at(REFRESH_MIN_SPIN_MS);
+		expect(f.list.refreshing).toBe('offline');
+	});
+
+	it("shows couldn't refresh when an account of the view has a last error at the timeout", async () => {
+		const f = await refreshing();
+		f.setLastError(2, 'login failed');
+		await at(REFRESH_TIMEOUT_MS);
+		await flush();
+		expect(f.list.refreshing).toBe('failed');
+	});
+
+	it("ignores another account's last error in a scoped view", async () => {
+		const f = await refreshing('account:1/inbox');
+		f.setLastError(2, 'login failed');
+		await at(REFRESH_TIMEOUT_MS);
+		await flush();
+		expect(f.list.refreshing).toBe('done');
+	});
+
+	it('maps a mailbox view to its account for the last error check', async () => {
+		const f = await refreshing(`mailbox:${ARCHIVE}`);
+		f.setLastError(1, 'login failed');
+		await at(REFRESH_TIMEOUT_MS);
+		await flush();
+		expect(f.list.refreshing).toBe('failed');
+	});
+
+	it('can refresh again once the status cleared', async () => {
+		const f = await refreshing();
+		await at(REFRESH_TIMEOUT_MS);
+		await flush();
+		expect(f.list.refreshing).toBe('done');
+		void f.list.refresh();
+		await flush();
+		expect(f.list.refreshing).toBe('busy');
+		expect(f.syncCalls).toHaveLength(2);
+		await at(UP_TO_DATE_MS);
+		expect(f.list.refreshing).toBe('busy');
 	});
 });

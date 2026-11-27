@@ -6,6 +6,11 @@ const MOBILE_ONLY = '**/mobile.spec.ts';
 const CHROMIUM_ONLY = '**/pwa.spec.ts';
 /** Regenerates docs/images (`pnpm run screenshots`); never part of a normal run. */
 const SCREENSHOTS = process.env.TAGMAIL_SCREENSHOTS === '1';
+/*
+ * Touch input differs per mobile project: Chromium drives real touch through
+ * CDP (`@cdp-touch` blocks), WebKit has no CDP and sends synthetic events
+ * (`@synthetic-touch` blocks). Each project drops the other's tag.
+ */
 const noSandbox = process.env.PW_NO_SANDBOX === '1' ? ['--no-sandbox'] : [];
 
 export default defineConfig({
@@ -35,9 +40,15 @@ export default defineConfig({
 		{
 			name: 'mobile-chromium',
 			testMatch: MOBILE_ONLY,
+			grepInvert: /@synthetic-touch/,
 			use: { ...devices['Pixel 7'], launchOptions: { args: noSandbox } }
 		},
-		{ name: 'mobile-webkit', testMatch: MOBILE_ONLY, use: { ...devices['iPhone 13'] } },
+		{
+			name: 'mobile-webkit',
+			testMatch: MOBILE_ONLY,
+			grepInvert: /@cdp-touch/,
+			use: { ...devices['iPhone 13'] }
+		},
 		...(SCREENSHOTS
 			? [
 					{

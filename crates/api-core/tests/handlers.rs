@@ -288,6 +288,7 @@ struct Registry {
     updated: Mutex<Vec<(AccountId, bool)>>,
     removed: Mutex<Vec<AccountId>>,
     tested: Mutex<Vec<NewAccount>>,
+    synced: Mutex<Vec<AccountId>>,
 }
 
 impl AccountRegistry for Registry {
@@ -297,6 +298,10 @@ impl AccountRegistry for Registry {
 
     fn account_updated(&self, id: AccountId, restart: bool) {
         self.updated.lock().unwrap().push((id, restart));
+    }
+
+    fn request_sync(&self, id: AccountId) {
+        self.synced.lock().unwrap().push(id);
     }
 
     fn account_removed(&self, id: AccountId) -> BoxFuture<()> {
@@ -832,6 +837,43 @@ async fn create_account_needs_an_engine() {
     let resp = post(&api, "/api/accounts", &account_json()).await;
     assert_eq!(resp.status, 503);
     assert!(api.store().accounts.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn sync_view_polls_the_accounts_of_the_view() {
+    let (api, registry) = api(MemStore::default());
+    post(&api, "/api/accounts", &account_json()).await;
+    post(&api, "/api/accounts", &account_json()).await;
+    let cases: [(&str, &[AccountId]); 6] = [
+        ("inbox", &[AccountId(1), AccountId(2)]),
+        ("label:Work", &[AccountId(1), AccountId(2)]),
+        ("search:hello", &[AccountId(1), AccountId(2)]),
+        ("mailbox:1", &[AccountId(1)]),
+        ("account:2%2Finbox", &[AccountId(2)]),
+        ("account:2%2Fsearch:hello", &[AccountId(2)]),
+    ];
+    for (view, want) in cases {
+        registry.synced.lock().unwrap().clear();
+        let resp = post(&api, &format!("/api/views/{view}/sync"), &Value::Null).await;
+        assert_eq!(resp.status, 202, "{view}");
+        assert!(resp.body.is_empty(), "{view}");
+        assert_eq!(*registry.synced.lock().unwrap(), want, "{view}");
+    }
+    registry.synced.lock().unwrap().clear();
+    for view in ["mailbox:99", "nope", "mailbox:x", "account:x%2Finbox"] {
+        let resp = post(&api, &format!("/api/views/{view}/sync"), &Value::Null).await;
+        assert_eq!(resp.status, 404, "{view}");
+    }
+    assert!(registry.synced.lock().unwrap().is_empty());
+    assert_eq!(get(&api, "/api/views/inbox/sync").await.status, 405);
+}
+
+#[tokio::test]
+async fn sync_view_needs_an_engine() {
+    let api = Api::new(Arc::new(MemStore::default()), None);
+    let resp = post(&api, "/api/views/inbox/sync", &Value::Null).await;
+    assert_eq!(resp.status, 503);
+    assert_eq!(json_body(&resp)["error"], "engine_unavailable");
 }
 
 #[tokio::test]

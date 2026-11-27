@@ -5954,9 +5954,11 @@ version = "0.3.0"
 dependencies = [
  "ammonia",
  "base64 0.23.1",
+ "cssparser 0.38.0",
  "form_urlencoded",
  "hex",
  "hmac",
+ "html5ever 0.40.1",
  "mail-parser 1.0.1",
  "peak_alloc",
  "percent-encoding",

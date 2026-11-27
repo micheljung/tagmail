@@ -27,6 +27,8 @@ export type SwipeOutcome =
 
 /** Movement before the gesture picks an axis. */
 export const AXIS_LOCK_PX = 10;
+/** A still touch this long ticks the row (Gmail's long-press). */
+export const HOLD_MS = 450;
 /** Share of the row width that commits at any speed. */
 export const COMMIT_RATIO = 0.35;
 /** A flick commits from this far when it is fast enough. */
@@ -136,10 +138,16 @@ export interface SwipeParams {
 	/** The offset changed; 0 with `settling` means a snap back. */
 	onmove: (dx: number, settling: boolean) => void;
 	oncommit: (direction: SwipeDirection) => void;
+	/** A still touch hold; the hold is armed only when this is set. */
+	onhold?: () => void;
 }
 
-/** A click that follows a drag must not open the thread. */
-function swallowNextClick(node: HTMLElement): void {
+/**
+ * A click that follows a drag must not open the thread. After a hold it is
+ * swallowed on `window`: the hold swaps the header for the shorter selection
+ * bar, so the rows shift and the release's click can land on another row.
+ */
+function swallowNextClick(node: EventTarget): void {
 	const swallow = (e: Event) => {
 		e.preventDefault();
 		e.stopPropagation();
@@ -172,44 +180,109 @@ function point(e: PointerEvent): SwipePoint {
 	};
 }
 
-/** Svelte action binding a {@link SwipeTracker} to a row's pointer events. */
+/**
+ * Svelte action binding a {@link SwipeTracker} to a row's pointer events,
+ * plus the long-press hold. The hold timer runs beside the tracker, not in
+ * it, so it also works while swiping is off (selection mode).
+ */
 export function swipe(node: HTMLElement, params: SwipeParams) {
 	let current = params;
 	const tracker = new SwipeTracker(
 		() => node.getBoundingClientRect().width,
 		() => current.allowed()
 	);
+	/** The touch pointer that is down on this row, or -1. */
+	let touchId = -1;
+	let startX = 0;
+	let startY = 0;
+	let holdTimer: ReturnType<typeof setTimeout> | undefined;
+	let held = false;
+
+	function disarm() {
+		clearTimeout(holdTimer);
+		holdTimer = undefined;
+	}
+
+	function hold() {
+		disarm();
+		if (held || !current.onhold) return;
+		held = true;
+		if (tracker.cancel().kind === 'snapBack') current.onmove(0, true);
+		current.onhold();
+	}
 
 	function finish(outcome: SwipeOutcome) {
-		if (outcome.kind === 'none') return;
+		disarm();
+		touchId = -1;
+		const wasHeld = held;
+		held = false;
+		if (outcome.kind === 'none') {
+			// A release after a hold must not open the thread or untick the row.
+			if (wasHeld) swallowNextClick(window);
+			return;
+		}
 		swallowNextClick(node);
 		current.onmove(0, outcome.kind === 'snapBack');
 		if (outcome.kind === 'commit') current.oncommit(outcome.direction);
 	}
 
-	const onDown = (e: PointerEvent) => void tracker.down(point(e));
+	const onDown = (e: PointerEvent) => {
+		void tracker.down(point(e));
+		if (e.pointerType !== 'touch' || touchId !== -1) return;
+		touchId = e.pointerId;
+		startX = e.clientX;
+		startY = e.clientY;
+		held = false;
+		if (current.onhold) holdTimer = setTimeout(hold, HOLD_MS);
+	};
 	const onMove = (e: PointerEvent) => {
+		if (e.pointerId === touchId) {
+			if (held) return;
+			const moved = Math.max(Math.abs(e.clientX - startX), Math.abs(e.clientY - startY));
+			if (moved >= AXIS_LOCK_PX) disarm();
+		}
 		const wasSwiping = tracker.swiping;
 		if (!tracker.move(point(e))) return;
+		disarm();
 		if (!wasSwiping) capture(node, e.pointerId);
 		current.onmove(tracker.dx, false);
 	};
-	const onUp = (e: PointerEvent) => finish(tracker.up(point(e)));
+	const onUp = (e: PointerEvent) => {
+		// A second finger lifting leaves the first one's gesture alone.
+		if (touchId !== -1 && e.pointerId !== touchId) return;
+		finish(tracker.up(point(e)));
+	};
 	const onCancel = () => finish(tracker.cancel());
+	/** The platform's own long-press can come before ours; it counts as the hold. */
+	const onContextMenu = (e: Event) => {
+		if (touchId === -1 || !current.onhold) return;
+		e.preventDefault();
+		hold();
+	};
+	/** After a hold the finger stays put: no native pan starts under it. */
+	const onTouchMove = (e: TouchEvent) => {
+		if (held && e.cancelable) e.preventDefault();
+	};
 
 	node.addEventListener('pointerdown', onDown);
 	node.addEventListener('pointermove', onMove);
 	node.addEventListener('pointerup', onUp);
 	node.addEventListener('pointercancel', onCancel);
+	node.addEventListener('contextmenu', onContextMenu);
+	node.addEventListener('touchmove', onTouchMove, { passive: false });
 	return {
 		update(next: SwipeParams) {
 			current = next;
+			if (!next.onhold) disarm();
 		},
 		destroy() {
+			disarm();
 			node.removeEventListener('pointerdown', onDown);
 			node.removeEventListener('pointermove', onMove);
 			node.removeEventListener('pointerup', onUp);
 			node.removeEventListener('pointercancel', onCancel);
+			node.removeEventListener('contextmenu', onContextMenu);
+			node.removeEventListener('touchmove', onTouchMove);
 		}
 	};
 }

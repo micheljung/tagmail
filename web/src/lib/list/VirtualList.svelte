@@ -12,7 +12,15 @@
 		type ListGeometry,
 		type Range
 	} from './math';
+	import { PULL_THRESHOLD_PX, PullTracker } from './pull';
 	import type { Section, SectionLayout } from './sections';
+
+	export interface PullToRefresh {
+		/** Re-read on every move and on release; false disengages a pull at once. */
+		enabled: boolean;
+		busy: boolean;
+		onrefresh: () => void;
+	}
 
 	interface Props {
 		/** Threads; `activeIndex`, `onselect`, `onactivate` and `onrange` speak thread indexes. */
@@ -39,6 +47,7 @@
 		/** Section headers between the rows; geometry is then in display slots. */
 		layout?: SectionLayout;
 		header?: Snippet<[Section]>;
+		pullToRefresh?: PullToRefresh;
 	}
 
 	let {
@@ -58,7 +67,8 @@
 		maxSpacer,
 		autofocus = false,
 		layout,
-		header
+		header,
+		pullToRefresh
 	}: Props = $props();
 
 	const uid = $props.id();
@@ -137,6 +147,60 @@
 		onoffset?.(topRow);
 	}
 
+	/** Where the indicator rests while a refresh runs. */
+	const PULL_REST_PX = 48;
+	let pullOffset = $state(0);
+	let pulling = $state(false);
+	const pull = new PullTracker(
+		() => pullToRefresh?.enabled ?? false,
+		() => scroller.scrollTop
+	);
+	const indicatorOffset = $derived(pulling ? pullOffset : pullToRefresh?.busy ? PULL_REST_PX : 0);
+
+	function syncPull() {
+		pullOffset = pull.offset;
+		pulling = pull.pulling;
+	}
+
+	/** Pulls are possible; the non-passive listeners exist only then. */
+	const pullEnabled = $derived(pullToRefresh?.enabled ?? false);
+
+	// Non-passive listeners: Svelte's `ontouchmove` is passive, and a pull must
+	// be able to `preventDefault()` the native pan. Without pulls (desktop,
+	// selection mode) none are attached, so scrolling stays on passive listeners.
+	$effect(() => {
+		if (!pullEnabled) return;
+		const el = scroller;
+		const start = (e: TouchEvent) => {
+			pull.start(e);
+			syncPull();
+		};
+		const move = (e: TouchEvent) => {
+			if (pull.move(e)) e.preventDefault();
+			syncPull();
+		};
+		const end = (e: TouchEvent) => {
+			const refresh = pull.end(e.touches.length);
+			syncPull();
+			if (refresh) pullToRefresh?.onrefresh();
+		};
+		const cancel = () => {
+			pull.cancel();
+			syncPull();
+		};
+		el.addEventListener('touchstart', start, { passive: false });
+		el.addEventListener('touchmove', move, { passive: false });
+		el.addEventListener('touchend', end);
+		el.addEventListener('touchcancel', cancel);
+		return () => {
+			el.removeEventListener('touchstart', start);
+			el.removeEventListener('touchmove', move);
+			el.removeEventListener('touchend', end);
+			el.removeEventListener('touchcancel', cancel);
+			cancel();
+		};
+	});
+
 	function onkeydown(event: KeyboardEvent) {
 		if (event.ctrlKey || event.metaKey || event.altKey) return;
 		const page = pageRows(geometry);
@@ -164,56 +228,82 @@
 	}
 </script>
 
-<div
-	class="scroller"
-	bind:this={scroller}
-	bind:clientHeight={viewport}
-	{onscroll}
-	{onkeydown}
-	{onclick}
-	role="listbox"
-	tabindex="0"
-	aria-label={label}
-	aria-activedescendant={activeKey !== undefined ? `thread-${activeKey}` : undefined}
->
-	{#if layout}
-		<!-- Header slots scroll out of the DOM; options are described by these instead. -->
-		{#each layout.sections as section (section)}
-			<div hidden id={headerId(section)}>{@render header?.(section)}</div>
-		{/each}
+<div class="frame">
+	{#if pullToRefresh && indicatorOffset > 0}
+		<div
+			class="pull"
+			class:dragging={pulling}
+			class:busy={pullToRefresh.busy && !pulling}
+			role="progressbar"
+			aria-label="Refreshing"
+			aria-valuemin={pulling ? 0 : undefined}
+			aria-valuemax={pulling ? 100 : undefined}
+			aria-valuenow={pulling
+				? Math.round(Math.min(1, pullOffset / PULL_THRESHOLD_PX) * 100)
+				: undefined}
+			style:transform="translateY({indicatorOffset}px)"
+		>
+			<span class="spinner" style:--turn={Math.min(1, pullOffset / PULL_THRESHOLD_PX)}></span>
+		</div>
 	{/if}
-	<div class="spacer" style:height="{spacerHeight(geometry)}px">
-		{#each rows as r (r.key)}
-			{#if r.index === undefined}
-				<div
-					class="slot header"
-					aria-hidden="true"
-					style:height="{rowHeight}px"
-					style:transform="translateY({rowOffset(r.display, scrollTop, geometry)}px)"
-				>
-					{@render header?.(r.section)}
-				</div>
-			{:else}
-				<div
-					class="slot"
-					role="option"
-					id={typeof r.key === 'number' && r.key >= 0 ? `thread-${r.key}` : undefined}
-					data-index={r.index}
-					aria-selected={r.index === activeIndex}
-					aria-setsize={count}
-					aria-posinset={r.index + 1}
-					aria-describedby={layout ? headerId(layout.sectionOf(r.index)) : undefined}
-					style:height="{rowHeight}px"
-					style:transform="translateY({rowOffset(r.display, scrollTop, geometry)}px)"
-				>
-					{@render row(r.index, r.index === activeIndex)}
-				</div>
-			{/if}
-		{/each}
+	<div
+		class="scroller"
+		bind:this={scroller}
+		bind:clientHeight={viewport}
+		{onscroll}
+		{onkeydown}
+		{onclick}
+		role="listbox"
+		tabindex="0"
+		aria-label={label}
+		aria-activedescendant={activeKey !== undefined ? `thread-${activeKey}` : undefined}
+	>
+		{#if layout}
+			<!-- Header slots scroll out of the DOM; options are described by these instead. -->
+			{#each layout.sections as section (section)}
+				<div hidden id={headerId(section)}>{@render header?.(section)}</div>
+			{/each}
+		{/if}
+		<div class="spacer" style:height="{spacerHeight(geometry)}px">
+			{#each rows as r (r.key)}
+				{#if r.index === undefined}
+					<div
+						class="slot header"
+						aria-hidden="true"
+						style:height="{rowHeight}px"
+						style:transform="translateY({rowOffset(r.display, scrollTop, geometry)}px)"
+					>
+						{@render header?.(r.section)}
+					</div>
+				{:else}
+					<div
+						class="slot"
+						role="option"
+						id={typeof r.key === 'number' && r.key >= 0 ? `thread-${r.key}` : undefined}
+						data-index={r.index}
+						aria-selected={r.index === activeIndex}
+						aria-setsize={count}
+						aria-posinset={r.index + 1}
+						aria-describedby={layout ? headerId(layout.sectionOf(r.index)) : undefined}
+						style:height="{rowHeight}px"
+						style:transform="translateY({rowOffset(r.display, scrollTop, geometry)}px)"
+					>
+						{@render row(r.index, r.index === activeIndex)}
+					</div>
+				{/if}
+			{/each}
+		</div>
 	</div>
 </div>
 
 <style>
+	/* Holds the pull indicator beside the listbox and clips it above the top. */
+	.frame {
+		position: relative;
+		height: 100%;
+		overflow: hidden;
+	}
+
 	.scroller {
 		position: relative;
 		height: 100%;
@@ -231,6 +321,55 @@
 	.spacer {
 		position: relative;
 		width: 100%;
+	}
+
+	/* Overlay outside the listbox: `.spacer` and the rows do not move during a pull. */
+	.pull {
+		position: absolute;
+		top: -40px;
+		left: 50%;
+		z-index: 2;
+		width: 36px;
+		height: 36px;
+		margin-left: -18px;
+		display: grid;
+		place-items: center;
+		border-radius: 50%;
+		background: var(--surface);
+		box-shadow: 0 1px 4px rgb(0 0 0 / 0.25);
+		pointer-events: none;
+		transition: transform 0.2s ease-out;
+	}
+
+	.pull.dragging {
+		transition: none;
+	}
+
+	.spinner {
+		width: 18px;
+		height: 18px;
+		border: 2px solid var(--accent);
+		border-right-color: transparent;
+		border-radius: 50%;
+		transform: rotate(calc(var(--turn) * 270deg));
+	}
+
+	.pull.busy .spinner {
+		animation: pull-spin 0.8s linear infinite;
+	}
+
+	@keyframes pull-spin {
+		to {
+			transform: rotate(360deg);
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.pull,
+		.pull.busy .spinner {
+			transition: none;
+			animation-duration: 2.4s;
+		}
 	}
 
 	.slot {

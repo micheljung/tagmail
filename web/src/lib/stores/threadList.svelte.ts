@@ -5,6 +5,7 @@ import { PAGE_SIZE, RowCache } from '../list/rowCache.svelte';
 import type { Range } from '../list/math';
 import { partition } from '../list/sections';
 import type { Api, ViewId, ViewIndexResult } from '../transport';
+import { ApiError } from '../transport/api';
 import { storePath } from '../readingPane';
 import { scopedView, viewScope } from '../views';
 import { parseCursor, type Cursor } from './cursor';
@@ -14,6 +15,12 @@ import type { OpIntent } from '../ops/effects';
 import type { OpList, OpPhase, Removed } from '../ops/ops.svelte';
 
 export const REFETCH_DEBOUNCE_MS = 300;
+/** A refresh spins at least this long, so a fast answer does not flicker. */
+export const REFRESH_MIN_SPIN_MS = 600;
+/** No qualifying change by then: the refresh ends neutrally. */
+export const REFRESH_TIMEOUT_MS = 3500;
+/** How long "Up to date" / "Couldn't refresh" stays. */
+export const UP_TO_DATE_MS = 1500;
 
 interface ThreadPayload {
 	accountId?: number;
@@ -55,6 +62,13 @@ function message(e: unknown): string {
 }
 
 /**
+ * Pull-to-refresh: `busy` while waiting for the sync; then `done` ("Up to
+ * date"), `failed` or `offline` for a moment; `idle` again. A change that
+ * moves the list ends `busy` straight back to `idle`.
+ */
+export type RefreshState = 'idle' | 'busy' | 'done' | 'failed' | 'offline';
+
+/**
  * One thread list (inbox, a label, a search): its id index, row cache,
  * selection (by thread id, so patches never shift it) and live patching
  * from the change feed.
@@ -92,6 +106,7 @@ export class ThreadList implements ChangeListener, OpList {
 	scrollRow = 0;
 	/** Rows currently rendered; patches only trust dates inside it. */
 	window: Range = { first: 0, last: -1 };
+	refreshing = $state<RefreshState>('idle');
 
 	readonly #api: Api;
 	readonly #hub: EventHub;
@@ -105,6 +120,12 @@ export class ThreadList implements ChangeListener, OpList {
 	#attachCount = 0;
 	#stopFocusWatch: (() => void) | null = null;
 	#disposed = false;
+	#refreshStartedAt = 0;
+	/** Bumped per refresh so a stale request or status read cannot end a newer one. */
+	#refreshRun = 0;
+	#refreshTimer: ReturnType<typeof setTimeout> | null = null;
+	/** Set by `#apply` when a change asks for a reload (not by the window loader). */
+	#changeRefetch = false;
 
 	/** Date-ordered ids: what the view index holds, patched live. */
 	#base = new ThreadIndex();
@@ -222,6 +243,8 @@ export class ThreadList implements ChangeListener, OpList {
 		this.#stopFocusWatch?.();
 		this.#stopFocusWatch = null;
 		this.#held.clear();
+		this.#clearRefreshTimer();
+		this.#refreshRun++;
 		this.rows.clear();
 	}
 
@@ -402,6 +425,100 @@ export class ThreadList implements ChangeListener, OpList {
 		if (direction !== 0) this.#direction = Math.sign(direction);
 	}
 
+	/**
+	 * Asks the engine to sync the view's accounts now. The sync sends no
+	 * completion signal: a change that moves this list ends the spinner early;
+	 * otherwise it ends at `REFRESH_TIMEOUT_MS`. A failed sync request ends it
+	 * as soon as it fails (after the minimum spin), before or after the timeout.
+	 */
+	async refresh(): Promise<void> {
+		if (this.refreshing === 'busy') return;
+		this.#clearRefreshTimer();
+		const run = ++this.#refreshRun;
+		this.#refreshStartedAt = Date.now();
+		this.refreshing = 'busy';
+		const sync = this.#api.syncView(this.view).then(
+			(): RefreshState | null => null,
+			(e: unknown): RefreshState => (isOffline(e) ? 'offline' : 'failed')
+		);
+		this.#refreshTimer = setTimeout(
+			() => void this.#refreshTimedOut(run, sync),
+			REFRESH_TIMEOUT_MS
+		);
+		const failure = await sync;
+		if (failure === null || run !== this.#refreshRun || this.refreshing !== 'busy') return;
+		this.#endRefresh(failure);
+	}
+
+	/**
+	 * The timeout: the `/api/status` read starts now, so with the sync request
+	 * already answered the refresh ends about one status read after
+	 * `REFRESH_TIMEOUT_MS`. A request still pending is waited for: "Up to date"
+	 * (or the status's verdict) only once it succeeded, its failure otherwise.
+	 */
+	async #refreshTimedOut(run: number, sync: Promise<RefreshState | null>): Promise<void> {
+		this.#refreshTimer = null;
+		const status = this.#statusOutcome();
+		const outcome = (await sync) ?? (await status);
+		if (run !== this.#refreshRun || this.refreshing !== 'busy') return;
+		this.#endRefresh(outcome);
+	}
+
+	/** `failed` when an account of this view reports a last error, else `done`. */
+	async #statusOutcome(): Promise<RefreshState> {
+		try {
+			const accounts = this.#viewAccounts();
+			const { accounts: status } = await this.#api.status();
+			return status.some((a) => a.lastError && (accounts === null || accounts.has(a.id)))
+				? 'failed'
+				: 'done';
+		} catch (e) {
+			return isOffline(e) ? 'offline' : 'failed';
+		}
+	}
+
+	/** Ends `busy` with `outcome`, held until the minimum spin has passed. */
+	#endRefresh(outcome: RefreshState): void {
+		this.#clearRefreshTimer();
+		const run = this.#refreshRun;
+		const settle = () => {
+			this.#refreshTimer = null;
+			if (run !== this.#refreshRun) return;
+			this.refreshing = outcome;
+			if (outcome === 'idle') return;
+			this.#refreshTimer = setTimeout(() => {
+				this.#refreshTimer = null;
+				if (run === this.#refreshRun) this.refreshing = 'idle';
+			}, UP_TO_DATE_MS);
+		};
+		const wait = this.#refreshStartedAt + REFRESH_MIN_SPIN_MS - Date.now();
+		if (wait > 0) this.#refreshTimer = setTimeout(settle, wait);
+		else settle();
+	}
+
+	#clearRefreshTimer(): void {
+		if (this.#refreshTimer) clearTimeout(this.#refreshTimer);
+		this.#refreshTimer = null;
+	}
+
+	/** Accounts a sync of this view covers, `null` for every account. */
+	#viewAccounts(): Set<number> | null {
+		const { account, inner } = viewScope(this.view);
+		if (account !== null) return new Set([account]);
+		if (inner.startsWith('mailbox:')) {
+			const id = Number(inner.slice('mailbox:'.length));
+			const box = this.#nav.mailboxes.find((m) => m.id === id);
+			if (box) return new Set([box.accountId]);
+		}
+		return null;
+	}
+
+	/** A reload requested by a change; it also ends a running refresh. */
+	#refetchForChange(): void {
+		this.#changeRefetch = true;
+		this.scheduleRefetch();
+	}
+
 	scheduleRefetch(): void {
 		if (this.#refetchTimer) return;
 		this.#refetchTimer = setTimeout(() => {
@@ -413,6 +530,7 @@ export class ThreadList implements ChangeListener, OpList {
 	changes(page: ChangesDto): void {
 		const next = parseCursor(page.next);
 		let touched = false;
+		this.#changeRefetch = false;
 		for (const change of page.changes) {
 			// Before the skip: the index may already have a change the unread search lacks.
 			if (this.#unreadView) this.#noteUnreadChange(change);
@@ -422,6 +540,8 @@ export class ThreadList implements ChangeListener, OpList {
 			touched = this.#apply(change) || touched;
 		}
 		if (touched) this.#indexChanged();
+		if ((touched || this.#changeRefetch) && this.refreshing === 'busy') this.#endRefresh('idle');
+		this.#changeRefetch = false;
 		if (this.attached) this.ensureWindow(this.window);
 	}
 
@@ -465,7 +585,7 @@ export class ThreadList implements ChangeListener, OpList {
 				return false;
 			}
 			case 'mailbox':
-				if (change.op.kind === 'bulk') this.scheduleRefetch();
+				if (change.op.kind === 'bulk') this.#refetchForChange();
 				return false;
 			default:
 				return false;
@@ -481,7 +601,7 @@ export class ThreadList implements ChangeListener, OpList {
 		const payload = (change.payload ?? {}) as ThreadPayload;
 		const member = this.#member(payload);
 		if (member === undefined) {
-			if (this.#base.has(id) || payload.lastDate !== undefined) this.scheduleRefetch();
+			if (this.#base.has(id) || payload.lastDate !== undefined) this.#refetchForChange();
 			return false;
 		}
 		// Sectioned, base dates are only known around the loaded display rows: a thread whose
@@ -499,7 +619,7 @@ export class ThreadList implements ChangeListener, OpList {
 		const removed = this.#remove(id);
 		if (!member) return removed;
 		if (payload.lastDate === undefined) {
-			this.scheduleRefetch();
+			this.#refetchForChange();
 			return removed;
 		}
 		const base = this.#base;
@@ -518,7 +638,7 @@ export class ThreadList implements ChangeListener, OpList {
 			known
 		);
 		if (at === null) {
-			this.scheduleRefetch();
+			this.#refetchForChange();
 			return removed;
 		}
 		base.insert(at, id);
@@ -689,6 +809,11 @@ export class ThreadList implements ChangeListener, OpList {
 			win?.removeEventListener('blur', onBlur);
 		};
 	}
+}
+
+function isOffline(e: unknown): boolean {
+	if (typeof navigator !== 'undefined' && navigator.onLine === false) return true;
+	return e instanceof TypeError || (e instanceof ApiError && e.code === 'offline');
 }
 
 export const MAX_CACHED_LISTS = 4;

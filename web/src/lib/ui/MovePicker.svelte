@@ -67,6 +67,7 @@
 			const threadIds = own.size > 0 ? t.threadIds.filter((id) => own.has(id)) : t.threadIds;
 			runOp({ kind, mailboxId: m.id }, { ...t, threadIds });
 		}
+		t.onapply?.();
 		close();
 	}
 

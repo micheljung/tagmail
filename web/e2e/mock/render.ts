@@ -1,4 +1,15 @@
-import { ME, XSS_INDEX, positionOf, remoteImages, type Message, type Row } from './fixture.ts';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+	CORPUS_DIR,
+	ME,
+	XSS_INDEX,
+	corpusOf,
+	positionOf,
+	remoteImages,
+	type Message,
+	type Row
+} from './fixture.ts';
 
 /** The real server's CSPs, generated from the Rust constants. */
 export { RENDER_CSP, WEB_APP_CSP } from '../../../packages/api-types/src/generated/csp.ts';
@@ -38,8 +49,15 @@ export function quotedBody(row: Row, m: Message): string {
 	return `<p>${escape(m.snippet)}.</p>`;
 }
 
-export function renderMessage(row: Row, m: Message, images: boolean): string {
+/** `authorCss`: the server runs with `--render-author-css` (B1). */
+export function renderMessage(row: Row, m: Message, images: boolean, authorCss = false): string {
 	if (positionOf(row.id) === XSS_INDEX) return page(XSS_BODY);
+	// Real sanitizer output, written by `crates/api-core/tests/corpus_render.rs`.
+	const corpus = corpusOf(row.id);
+	if (corpus) {
+		const file = `${corpus.name}${authorCss ? '.b1' : ''}.html`;
+		return readFileSync(join(CORPUS_DIR, 'rendered', file), 'utf8');
+	}
 	const greeting = m.from === ME ? 'Hi,' : `Hi ${ME.name?.split(' ')[0]},`;
 	const banner =
 		remoteImages(row, m) > 0

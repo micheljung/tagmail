@@ -1104,6 +1104,10 @@ impl<F: ConnectorFactory> AccountRegistry for Engine<F> {
         });
     }
 
+    fn request_sync(&self, id: AccountId) {
+        self.request_poll(id);
+    }
+
     fn account_removed(&self, id: AccountId) -> BoxFuture<()> {
         let engine = self.clone();
         Box::pin(async move {

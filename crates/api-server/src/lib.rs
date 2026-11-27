@@ -65,6 +65,9 @@ pub struct Config {
     /// Built SPA served at `/`; without it only the API is served.
     pub web_dir: Option<PathBuf>,
     pub push: PushConfig,
+    /// Keep sanitized author `<style>` sheets and `class` attributes in
+    /// rendered messages (B1; off until the security review passes).
+    pub render_author_css: bool,
 }
 
 pub struct Server {
@@ -182,8 +185,9 @@ impl Server {
             push_tests,
             shutdown.clone(),
         );
-        let mut api =
-            Api::new(store.clone(), registry).with_image_proxy(Arc::new(ImageFetcher::new(tls)));
+        let mut api = Api::new(store.clone(), registry)
+            .with_image_proxy(Arc::new(ImageFetcher::new(tls)))
+            .with_author_css(config.render_author_css);
         if let Some(engine) = &engine {
             api = api.with_compose(engine.clone() as Arc<dyn Compose>);
             api = api.with_writes(engine.clone() as Arc<dyn WriteService>);

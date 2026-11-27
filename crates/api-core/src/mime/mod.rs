@@ -2,6 +2,7 @@
 //! HTML (sanitized HTML, or plain text turned into HTML), and the parts a
 //! reader can download.
 
+pub mod css;
 pub mod reduce;
 pub mod sanitize;
 
@@ -220,6 +221,19 @@ pub fn body(
     part_url: &dyn Fn(u32) -> String,
     remote: Option<RemoteImages>,
 ) -> Body {
+    body_with(message, part_url, remote, false)
+}
+
+/// [`body`], with the author's `<style>` sheets and `class` attributes
+/// kept through [`css`] when `author_css` is set (`--render-author-css`).
+/// The sheets of every HTML part apply to all of them, since the parts are
+/// concatenated into one document.
+pub fn body_with(
+    message: &Message<'_>,
+    part_url: &dyn Fn(u32) -> String,
+    remote: Option<RemoteImages>,
+    author_css: bool,
+) -> Body {
     let root = message.root();
     let cid_parts: HashMap<String, u32> = root
         .parts()
@@ -267,7 +281,7 @@ pub fn body(
         .map(|cid| (cid.clone(), part_url(cid_parts[cid])))
         .collect();
     cids.extend(inline_images);
-    let (html, stats) = sanitize::sanitize(&source, Links { cids, remote });
+    let (html, stats) = sanitize::sanitize(&source, Links { cids, remote }, author_css);
     Body {
         kind,
         html,
@@ -331,9 +345,10 @@ pub fn document(body_html: &str) -> String {
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\
          <meta name=\"referrer\" content=\"no-referrer\">\
-         <style>html,body{{margin:0;padding:0}}body{{font-family:system-ui,sans-serif;\
-         overflow-wrap:anywhere;word-break:break-word}}img{{max-width:100%;height:auto}}\
-         table{{max-width:100%}}</style></head><body>{body_html}</body></html>"
+         <style>:root{{color-scheme:light}}html,body{{margin:0;padding:0}}\
+         body{{font-family:system-ui,sans-serif;overflow-wrap:break-word}}\
+         a{{overflow-wrap:anywhere}}pre{{white-space:pre-wrap}}\
+         img{{max-width:100%;height:auto}}</style></head><body>{body_html}</body></html>"
     )
 }
 
@@ -472,6 +487,20 @@ mod tests {
         assert!(text_to_html("http:// x").contains("http:// x"));
         assert!(text_to_html("(https://a.example)").contains("href=\"https://a.example\""));
         assert!(text_to_html("\"><script>").contains("&quot;&gt;&lt;script&gt;"));
+    }
+
+    #[test]
+    fn document_css_wraps_links_without_squeezing_tables() {
+        let doc = document("<p>x</p>");
+        assert!(doc.contains("a{overflow-wrap:anywhere}"), "{doc}");
+        assert!(doc.contains("body{font-family:system-ui,sans-serif;overflow-wrap:break-word}"));
+        assert!(doc.contains(":root{color-scheme:light}"));
+        assert!(doc.contains("pre{white-space:pre-wrap}"));
+        assert!(doc.contains("img{max-width:100%;height:auto}"));
+        assert!(!doc.contains("table{max-width"), "{doc}");
+        assert!(!doc.contains("word-break"), "{doc}");
+        assert!(!doc.contains("font-size"), "{doc}");
+        assert!(doc.ends_with("<body><p>x</p></body></html>"));
     }
 
     #[test]

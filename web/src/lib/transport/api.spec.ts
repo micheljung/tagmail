@@ -49,6 +49,24 @@ describe('Api', () => {
 		expect((await client.viewIndex('search:old')).partial).toBe(true);
 	});
 
+	it('posts a view sync and treats 202 as done', async () => {
+		const seen: [string, string | undefined][] = [];
+		const client = api((path, init) => {
+			seen.push([path, init?.method]);
+			return path.includes('mailbox')
+				? new Response(JSON.stringify({ error: 'not_found', message: 'no such mailbox' }), {
+						status: 404
+					})
+				: new Response(null, { status: 202 });
+		});
+		await expect(client.syncView('account:2/label:a b')).resolves.toBeUndefined();
+		expect(seen[0]).toEqual(['/api/views/account%3A2%2Flabel%3Aa%20b/sync', 'POST']);
+		await expect(client.syncView('mailbox:9')).rejects.toMatchObject({
+			status: 404,
+			code: 'not_found'
+		});
+	});
+
 	it('turns error bodies into ApiError and reports 401 outside auth routes', async () => {
 		const onUnauthorized = vi.fn();
 		const client = api(

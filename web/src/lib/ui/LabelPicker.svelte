@@ -63,6 +63,7 @@
 		const { add, remove } = labelChanges(initial, final);
 		for (const label of add) runOp({ kind: 'label.add', label }, t);
 		for (const label of remove) runOp({ kind: 'label.remove', label }, t);
+		t.onapply?.();
 		close();
 	}
 

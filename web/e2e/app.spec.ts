@@ -142,3 +142,18 @@ test('phone width shows one column with a menu drawer', async ({ page }) => {
 	await expect(page.getByRole('listbox', { name: 'Label Finance' })).toBeVisible();
 	await expect(list(page)).toHaveCount(0);
 });
+
+test('clicking a row while others are ticked still opens the thread', async ({ page }) => {
+	await openInbox(page);
+	const before = await page.evaluate(() => history.length);
+	for (const index of [0, 1]) {
+		await row(page, index).getByRole('checkbox', { name: 'Select conversation' }).click();
+		await expect(row(page, index).locator('.check')).toHaveAttribute('aria-checked', 'true');
+	}
+	await expect(page.locator('.total')).toHaveText('2 selected');
+	await row(page, 3).locator('.subject').click();
+	await expect(page).toHaveURL(/\/thread\/\d+$/);
+	// Only the thread was pushed: no selection entry.
+	expect(await page.evaluate(() => history.length)).toBe(before + 1);
+	expect(await page.evaluate(() => JSON.stringify(history.state))).not.toContain('selection');
+});

