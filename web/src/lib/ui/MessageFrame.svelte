@@ -125,6 +125,14 @@
 		transition: opacity 160ms var(--ease);
 	}
 
+	/* Cancel the thread (6px) and card (6px) gutters so the mail spans the screen. */
+	@media (max-width: 720px) {
+		.paper {
+			margin: 0 -12px;
+			border-radius: 0;
+		}
+	}
+
 	.loaded iframe {
 		opacity: 1;
 	}
