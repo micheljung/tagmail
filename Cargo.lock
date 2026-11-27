@@ -5950,7 +5950,7 @@ dependencies = [
 
 [[package]]
 name = "tagmail-api-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ammonia",
  "base64 0.23.1",
@@ -5980,7 +5980,7 @@ dependencies = [
 
 [[package]]
 name = "tagmail-api-server"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -6022,7 +6022,7 @@ dependencies = [
 
 [[package]]
 name = "tagmail-calendar"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "calcard",
  "chrono",
@@ -6033,7 +6033,7 @@ dependencies = [
 
 [[package]]
 name = "tagmail-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64 0.23.1",
  "caseless",
@@ -6047,7 +6047,7 @@ dependencies = [
 
 [[package]]
 name = "tagmail-dav"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "axum",
  "futures-util",
@@ -6067,7 +6067,7 @@ dependencies = [
 
 [[package]]
 name = "tagmail-desktop"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "form_urlencoded",
  "http",
@@ -6100,7 +6100,7 @@ dependencies = [
 
 [[package]]
 name = "tagmail-engine"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "ammonia",
  "base64 0.23.1",
@@ -6129,7 +6129,7 @@ dependencies = [
 
 [[package]]
 name = "tagmail-imap"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "imap-codec",
  "imap-next",
@@ -6145,7 +6145,7 @@ dependencies = [
 
 [[package]]
 name = "tagmail-replica"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "base64 0.23.1",
  "futures-util",
@@ -6174,7 +6174,7 @@ dependencies = [
 
 [[package]]
 name = "tagmail-store"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chacha20poly1305",
  "hex",
@@ -8051,7 +8051,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
