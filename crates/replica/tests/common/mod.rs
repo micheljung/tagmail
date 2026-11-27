@@ -51,6 +51,7 @@ impl Fixture {
             auth: Default::default(),
             web_dir: None,
             push: Default::default(),
+            render_author_css: false,
         };
         let engine = tagmail_engine::EngineConfig {
             draft_debounce: Duration::from_secs(3600),

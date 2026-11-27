@@ -12,7 +12,7 @@ use tempfile::TempDir;
 
 const PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUg==";
 
-fn config(data: &Path, keys: &Path) -> Config {
+fn config(data: &Path, keys: &Path, render_author_css: bool) -> Config {
     Config {
         listen: "127.0.0.1:0".parse().unwrap(),
         data_dir: data.to_owned(),
@@ -23,6 +23,7 @@ fn config(data: &Path, keys: &Path) -> Config {
         auth: Default::default(),
         web_dir: None,
         push: Default::default(),
+        render_author_css,
     }
 }
 
@@ -36,7 +37,8 @@ fn raw() -> String {
             "--r\r\n",
             "Content-Type: text/html\r\n",
             "\r\n",
-            "<p onmouseover=\"x()\">Hi</p><img src=\"cid:logo@x\">",
+            "<style>p.x{{color:red;background:url(https://cdn.example/b.png)}}</style>",
+            "<p onmouseover=\"x()\">Hi</p><p class=\"x\">Styled</p><img src=\"cid:logo@x\">",
             "<img src=\"https://cdn.example/t.gif\"><script>alert(1)</script>\r\n",
             "--r\r\n",
             "Content-Type: image/png\r\n",
@@ -118,8 +120,12 @@ async fn owner(server: &Server) -> reqwest::Client {
 }
 
 async fn start() -> (Server, TempDir, TempDir) {
+    start_with(false).await
+}
+
+async fn start_with(render_author_css: bool) -> (Server, TempDir, TempDir) {
     let (data, keys) = (TempDir::new().unwrap(), TempDir::new().unwrap());
-    let server = Server::start(&config(data.path(), keys.path()), None)
+    let server = Server::start(&config(data.path(), keys.path(), render_author_css), None)
         .await
         .unwrap();
     seed(&server).await;
@@ -151,8 +157,13 @@ async fn renders_cached_messages_with_csp_and_signed_parts() {
     assert_eq!(resp.headers()["content-security-policy"], RENDER_CSP);
     assert_eq!(resp.headers()["content-type"], "text/html; charset=utf-8");
     assert_eq!(resp.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(resp.headers()["cache-control"], "no-store");
     let html = resp.text().await.unwrap();
     assert!(html.contains("<p>Hi</p>"), "{html}");
+    assert!(
+        !html.contains("p.x") && !html.contains("class="),
+        "author CSS is off by default: {html}"
+    );
     assert!(
         !html.contains("script") && !html.contains("onmouseover") && !html.contains("cdn.example")
     );
@@ -193,6 +204,29 @@ async fn renders_cached_messages_with_csp_and_signed_parts() {
     server.shutdown().await.unwrap();
 }
 
+/// `--render-author-css` (B1): the sanitized sheet and `class` are served,
+/// still `no-store`, so turning the flag off takes effect on the next load.
+#[tokio::test]
+async fn author_css_is_served_sanitized_and_uncached_when_enabled() {
+    let (server, _d, _k) = start_with(true).await;
+    let c = owner(&server).await;
+    let resp = get(&c, &server, "/api/messages/10/render").await;
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.headers()["cache-control"], "no-store");
+    assert_eq!(resp.headers()["content-security-policy"], RENDER_CSP);
+    let html = resp.text().await.unwrap();
+    assert!(
+        html.contains("<body><style>p.x{color:red}</style>"),
+        "{html}"
+    );
+    assert!(html.contains("<p class=\"x\">Styled</p>"), "{html}");
+    assert!(
+        !html.contains("cdn.example") && !html.contains("script"),
+        "{html}"
+    );
+    server.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn thread_detail_follows_merges_and_skips_tombstones() {
     let (server, _d, _k) = start().await;
@@ -219,7 +253,7 @@ async fn thread_detail_follows_merges_and_skips_tombstones() {
 #[tokio::test]
 async fn image_senders_persist_across_restarts() {
     let (data, keys) = (TempDir::new().unwrap(), TempDir::new().unwrap());
-    let cfg = config(data.path(), keys.path());
+    let cfg = config(data.path(), keys.path(), false);
     let server = Server::start(&cfg, None).await.unwrap();
     let resp = owner(&server)
         .await
@@ -252,7 +286,7 @@ async fn image_senders_persist_across_restarts() {
 #[tokio::test]
 async fn url_keys_are_created_kept_and_rotated() {
     let (data, keys) = (TempDir::new().unwrap(), TempDir::new().unwrap());
-    let server = Server::start(&config(data.path(), keys.path()), None)
+    let server = Server::start(&config(data.path(), keys.path(), false), None)
         .await
         .unwrap();
     let t0 = 1_800_000_000;
@@ -279,7 +313,7 @@ async fn url_keys_are_created_kept_and_rotated() {
 #[tokio::test]
 async fn image_proxy_is_rate_limited_per_client_ip() {
     let (data, keys) = (TempDir::new().unwrap(), TempDir::new().unwrap());
-    let mut cfg = config(data.path(), keys.path());
+    let mut cfg = config(data.path(), keys.path(), false);
     cfg.auth.trusted_proxies = vec!["127.0.0.0/8".parse().unwrap()];
     let server = Server::start(&cfg, None).await.unwrap();
     let c = owner(&server).await;

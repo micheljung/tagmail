@@ -520,6 +520,12 @@ pub trait AccountRegistry: Send + Sync + 'static {
         let _ = (id, restart);
     }
 
+    /// Fire-and-forget: syncs every mailbox of the account soon; no
+    /// completion signal. Unknown or stopped accounts are ignored.
+    fn request_sync(&self, id: AccountId) {
+        let _ = id;
+    }
+
     /// Called after the account is marked `deleting`: stops it, purges its
     /// cache and config rows and emits the change events. Resolves when
     /// the purge is done.

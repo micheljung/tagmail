@@ -160,6 +160,11 @@ export class Api {
 		};
 	}
 
+	/** Asks the engine to sync the view's accounts now (`202`, no completion signal). */
+	syncView(view: ViewId): Promise<void> {
+		return this.#empty(`/api/views/${encodeURIComponent(view)}/sync`, 'POST');
+	}
+
 	threads(ids: readonly number[], signal?: AbortSignal): Promise<ThreadsDto> {
 		return this.#json<ThreadsDto>(`/api/threads?ids=${ids.join(',')}`, { signal });
 	}

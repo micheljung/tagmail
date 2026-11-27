@@ -1,4 +1,4 @@
-import { expect, test as base, type Page } from '@playwright/test';
+import { expect, test as base, type Locator, type Page } from '@playwright/test';
 import { PASSWORD } from './mock/fixture.ts';
 
 export interface CspViolation {
@@ -68,4 +68,37 @@ export async function openInbox(page: Page): Promise<void> {
 	await signIn(page);
 	await page.goto('/inbox');
 	await expect(row(page, 0).locator('[data-loaded]')).toBeVisible();
+}
+
+/**
+ * The font size (px) that most text in an email frame has: walks the frame's
+ * text nodes (whitespace-only nodes and `script`/`style` skipped), sums their
+ * length per computed `font-size`, and returns the size with the largest sum.
+ * With `selector`, only text inside matching elements counts. 0 when none.
+ */
+export async function dominantTextPx(frame: Locator, selector?: string): Promise<number> {
+	return frame.evaluate((el, selector) => {
+		const doc = (el as HTMLIFrameElement).contentDocument!;
+		const roots = selector ? [...doc.querySelectorAll(selector)] : [doc.body];
+		const totals = new Map<number, number>();
+		for (const root of roots) {
+			const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+			for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+				const text = (node.nodeValue ?? '').trim();
+				const parent = node.parentElement;
+				if (!text || !parent || parent.closest('script,style')) continue;
+				const px = parseFloat(doc.defaultView!.getComputedStyle(parent).fontSize);
+				totals.set(px, (totals.get(px) ?? 0) + text.length);
+			}
+		}
+		let best = 0;
+		let bestLength = 0;
+		for (const [px, length] of totals) {
+			if (length > bestLength) {
+				best = px;
+				bestLength = length;
+			}
+		}
+		return best;
+	}, selector);
 }

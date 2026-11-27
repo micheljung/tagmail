@@ -17,7 +17,8 @@
 		swipe = { left: false, right: false },
 		onswipe,
 		oncheck,
-		onstar
+		onstar,
+		onhold
 	}: {
 		row: ThreadRowDto | undefined;
 		active: boolean;
@@ -33,6 +34,8 @@
 		onswipe?: (direction: SwipeDirection) => void;
 		oncheck?: (range: boolean) => void;
 		onstar?: () => void;
+		/** A touch long-press on the row; unset, the row never holds. */
+		onhold?: () => void;
 	} = $props();
 
 	const unread = $derived((row?.unreadCount ?? 0) > 0);
@@ -79,7 +82,8 @@
 				else if (!settling) uncovered = null;
 				dx = next;
 			},
-			oncommit: (direction) => onswipe?.(direction)
+			oncommit: (direction) => onswipe?.(direction),
+			onhold
 		}}
 	>
 		<button
@@ -154,6 +158,15 @@
 		color: var(--ink-2);
 		touch-action: pan-y;
 		transition: background 80ms linear;
+	}
+
+	@media (pointer: coarse) {
+		/* A long-press selects the row; no callout or text selection under the finger. */
+		.row {
+			-webkit-touch-callout: none;
+			-webkit-user-select: none;
+			user-select: none;
+		}
 	}
 
 	.row.settling {
@@ -381,15 +394,24 @@
 			padding: 0 4px 0 16px;
 		}
 
+		/* Visually hidden, not display:none: it stays in the accessibility tree. */
 		.check {
-			display: none;
+			position: absolute;
+			width: 1px;
+			height: 1px;
+			overflow: hidden;
+			clip-path: inset(50%);
+			white-space: nowrap;
 		}
 
 		.checked .check {
 			display: grid;
-			position: absolute;
 			left: 0;
 			top: 0;
+			width: 44px;
+			height: 44px;
+			overflow: visible;
+			clip-path: none;
 		}
 
 		.star {

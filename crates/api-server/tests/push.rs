@@ -61,6 +61,7 @@ impl Dirs {
             auth: Default::default(),
             web_dir: None,
             push,
+            render_author_css: false,
         }
     }
 }

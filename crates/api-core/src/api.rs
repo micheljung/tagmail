@@ -167,6 +167,16 @@ pub(crate) fn invalid(field: &str, message: impl Into<String>) -> Response {
     )
 }
 
+fn parse_view(view: &str) -> Result<View, Response> {
+    view.parse::<View>().map_err(|e| match e {
+        ViewError::Unknown => Response::error(404, "not_found", "no such view"),
+        ViewError::Query(e) => Response::error(400, "invalid_query", e.to_string()),
+        ViewError::Scope => {
+            bad_request("only inbox, label and search views can be scoped to an account")
+        }
+    })
+}
+
 pub(crate) fn bad_request(message: impl Into<String>) -> Response {
     Response::error(400, "bad_request", message)
 }
@@ -185,6 +195,8 @@ pub struct Api<S> {
     pub(crate) calendar: Option<Arc<dyn crate::caldav::CalendarService>>,
     /// URL signing keys and when they were read.
     pub(crate) keys: tokio::sync::Mutex<Option<(std::time::Instant, UrlKeys)>>,
+    /// Render author `<style>` sheets and `class` attributes (B1).
+    pub(crate) author_css: bool,
 }
 
 impl<S: Store> Api<S> {
@@ -199,6 +211,7 @@ impl<S: Store> Api<S> {
             writes: None,
             calendar: None,
             keys: tokio::sync::Mutex::new(None),
+            author_css: false,
         }
     }
 
@@ -244,6 +257,7 @@ impl<S: Store> Api<S> {
                 RouteId::Version => Ok(self.version()),
                 RouteId::Status => self.status().await,
                 RouteId::ViewIndex => self.view_index(params[0]).await,
+                RouteId::SyncView => self.sync_view(params[0]).await,
                 RouteId::Threads => self.threads(req.query).await,
                 RouteId::Changes => self.changes(req.query).await,
                 RouteId::Mailboxes => self.mailboxes().await,
@@ -345,19 +359,9 @@ impl<S: Store> Api<S> {
     }
 
     async fn view_index(&self, view: &str) -> Result<Response, StoreError> {
-        let view = match view.parse::<View>() {
+        let view = match parse_view(view) {
             Ok(view) => view,
-            Err(ViewError::Unknown) => {
-                return Ok(Response::error(404, "not_found", "no such view"));
-            }
-            Err(ViewError::Query(e)) => {
-                return Ok(Response::error(400, "invalid_query", e.to_string()));
-            }
-            Err(ViewError::Scope) => {
-                return Ok(bad_request(
-                    "only inbox, label and search views can be scoped to an account",
-                ));
-            }
+            Err(resp) => return Ok(resp),
         };
         let index = self.store.view_index(view).await?;
         let ids: Vec<i64> = index.ids.iter().map(|id| id.0).collect();
@@ -365,6 +369,40 @@ impl<S: Store> Api<S> {
         let mut resp = Response::new(200, OCTET_STREAM, body);
         resp.headers.push((CURSOR_HEADER, index.cursor.to_string()));
         Ok(resp)
+    }
+
+    /// `POST /api/views/{view}/sync`: asks the engine to poll every account
+    /// the view spans (all mailboxes of each, a deliberate superset).
+    async fn sync_view(&self, view: &str) -> Result<Response, StoreError> {
+        let view = match parse_view(view) {
+            Ok(view) => view,
+            Err(resp) => return Ok(resp),
+        };
+        let accounts = match view {
+            View::Account(id, _) => vec![id],
+            View::Mailbox(id) => {
+                let mailboxes = self.store.mailboxes().await?;
+                match mailboxes.iter().find(|m| m.id == id.0) {
+                    Some(m) => vec![AccountId(m.account_id)],
+                    None => return Ok(Response::error(404, "not_found", "no such mailbox")),
+                }
+            }
+            View::Inbox | View::Label(_) | View::Search(_) => self
+                .store
+                .accounts()
+                .await?
+                .into_iter()
+                .map(|a| a.id)
+                .collect(),
+        };
+        let registry = match self.engine() {
+            Ok(r) => r,
+            Err(resp) => return Ok(resp),
+        };
+        for id in accounts {
+            registry.request_sync(id);
+        }
+        Ok(Response::new(202, JSON, Vec::new()))
     }
 
     async fn mailboxes(&self) -> Result<Response, StoreError> {

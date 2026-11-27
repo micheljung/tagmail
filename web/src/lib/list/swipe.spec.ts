@@ -1,5 +1,13 @@
-import { describe, expect, it } from 'vitest';
-import { SWIPE_OPS, SwipeTracker, type SwipeAllowed, type SwipePoint } from './swipe';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+	HOLD_MS,
+	SWIPE_OPS,
+	SwipeTracker,
+	swipe,
+	type SwipeAllowed,
+	type SwipeParams,
+	type SwipePoint
+} from './swipe';
 
 const WIDTH = 400;
 const BOTH: SwipeAllowed = { left: true, right: true };
@@ -114,5 +122,200 @@ describe('SwipeTracker', () => {
 describe('SWIPE_OPS', () => {
 	it('archives left and trashes right, never deleting for good', () => {
 		expect(SWIPE_OPS).toEqual({ left: 'archive', right: 'trash' });
+	});
+});
+
+/** A row stand-in: the action only needs events, a width and pointer capture. */
+function row() {
+	const node = Object.assign(new EventTarget(), {
+		getBoundingClientRect: () => ({ width: WIDTH }),
+		setPointerCapture: () => undefined
+	});
+	return node as unknown as HTMLElement;
+}
+
+function pointer(
+	node: HTMLElement,
+	type: string,
+	x: number,
+	y: number,
+	pointerType = 'touch',
+	pointerId = 1
+) {
+	const e = Object.assign(new Event(type, { cancelable: true }), {
+		pointerId,
+		pointerType,
+		clientX: x,
+		clientY: y
+	});
+	node.dispatchEvent(e);
+	return e;
+}
+
+/**
+ * Dispatches a click through the stubbed window's capture phase, then on the
+ * node unless that stopped it; returns whether something swallowed it.
+ */
+function click(node: EventTarget): boolean {
+	const e = new Event('click', { cancelable: true });
+	window.dispatchEvent(e);
+	if (!e.cancelBubble) node.dispatchEvent(e);
+	return e.defaultPrevented;
+}
+
+describe('swipe action hold', () => {
+	beforeEach(() => {
+		vi.useFakeTimers();
+		vi.stubGlobal('window', new EventTarget());
+	});
+	afterEach(() => {
+		vi.useRealTimers();
+		vi.unstubAllGlobals();
+	});
+
+	function setup(allowed: SwipeAllowed = BOTH) {
+		const node = row();
+		const params: SwipeParams = {
+			allowed: () => allowed,
+			onmove: vi.fn(),
+			oncommit: vi.fn(),
+			onhold: vi.fn()
+		};
+		const action = swipe(node, params);
+		return { node, params, action };
+	}
+
+	it('fires after HOLD_MS of a still touch', () => {
+		const { node, params } = setup();
+		pointer(node, 'pointerdown', 200, 50);
+		vi.advanceTimersByTime(HOLD_MS - 1);
+		expect(params.onhold).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(1);
+		expect(params.onhold).toHaveBeenCalledTimes(1);
+	});
+
+	it('is cancelled by 10 px of movement', () => {
+		const { node, params } = setup();
+		pointer(node, 'pointerdown', 200, 50);
+		pointer(node, 'pointermove', 200, 59);
+		vi.advanceTimersByTime(100);
+		pointer(node, 'pointermove', 200, 60);
+		vi.advanceTimersByTime(HOLD_MS);
+		expect(params.onhold).not.toHaveBeenCalled();
+	});
+
+	it('is cancelled by an early release', () => {
+		const { node, params } = setup();
+		pointer(node, 'pointerdown', 200, 50);
+		vi.advanceTimersByTime(HOLD_MS / 2);
+		pointer(node, 'pointerup', 200, 50);
+		vi.advanceTimersByTime(HOLD_MS);
+		expect(params.onhold).not.toHaveBeenCalled();
+		expect(click(node)).toBe(false);
+	});
+
+	it.each(['mouse', 'pen'])('never holds a %s pointer', (pointerType) => {
+		const { node, params } = setup();
+		pointer(node, 'pointerdown', 200, 50, pointerType);
+		vi.advanceTimersByTime(HOLD_MS * 2);
+		expect(params.onhold).not.toHaveBeenCalled();
+	});
+
+	it('is not armed without onhold', () => {
+		const node = row();
+		const onmove = vi.fn();
+		swipe(node, { allowed: () => BOTH, onmove, oncommit: vi.fn() });
+		pointer(node, 'pointerdown', 200, 50);
+		vi.advanceTimersByTime(HOLD_MS * 2);
+		pointer(node, 'pointerup', 200, 50);
+		expect(click(node)).toBe(false);
+	});
+
+	it('fires while swiping is off (selection mode)', () => {
+		const { node, params } = setup({ left: false, right: false });
+		pointer(node, 'pointerdown', 200, 50);
+		vi.advanceTimersByTime(HOLD_MS);
+		expect(params.onhold).toHaveBeenCalledTimes(1);
+	});
+
+	it('ignores moves after the hold until release', () => {
+		const { node, params } = setup();
+		pointer(node, 'pointerdown', 200, 50);
+		vi.advanceTimersByTime(HOLD_MS);
+		pointer(node, 'pointermove', 100, 52);
+		pointer(node, 'pointermove', 20, 55);
+		expect(params.onmove).not.toHaveBeenCalled();
+		pointer(node, 'pointerup', 20, 55);
+		expect(params.oncommit).not.toHaveBeenCalled();
+		expect(params.onhold).toHaveBeenCalledTimes(1);
+	});
+
+	it('swallows the click that follows a held release', () => {
+		const { node } = setup();
+		pointer(node, 'pointerdown', 200, 50);
+		vi.advanceTimersByTime(HOLD_MS);
+		pointer(node, 'pointerup', 200, 50);
+		expect(click(node)).toBe(true);
+		expect(click(node)).toBe(false);
+	});
+
+	it('swallows a held release click that lands on another row', () => {
+		const { node } = setup();
+		const other = row();
+		pointer(node, 'pointerdown', 200, 50);
+		vi.advanceTimersByTime(HOLD_MS);
+		pointer(node, 'pointerup', 200, 50);
+		expect(click(other)).toBe(true);
+		expect(click(node)).toBe(false);
+	});
+
+	it('stops swallowing a held release click after a short while', () => {
+		const { node } = setup();
+		pointer(node, 'pointerdown', 200, 50);
+		vi.advanceTimersByTime(HOLD_MS);
+		pointer(node, 'pointerup', 200, 50);
+		vi.advanceTimersByTime(1000);
+		expect(click(row())).toBe(false);
+	});
+
+	it('treats an early platform contextmenu as the hold and blocks it', () => {
+		const { node, params } = setup();
+		pointer(node, 'pointerdown', 200, 50);
+		vi.advanceTimersByTime(200);
+		const menu = new Event('contextmenu', { cancelable: true });
+		node.dispatchEvent(menu);
+		expect(menu.defaultPrevented).toBe(true);
+		expect(params.onhold).toHaveBeenCalledTimes(1);
+		vi.advanceTimersByTime(HOLD_MS);
+		expect(params.onhold).toHaveBeenCalledTimes(1);
+	});
+
+	it('leaves a mouse contextmenu alone', () => {
+		const { node, params } = setup();
+		const menu = new Event('contextmenu', { cancelable: true });
+		node.dispatchEvent(menu);
+		expect(menu.defaultPrevented).toBe(false);
+		expect(params.onhold).not.toHaveBeenCalled();
+	});
+
+	it('stops a native pan after the hold', () => {
+		const { node } = setup();
+		const before = new Event('touchmove', { cancelable: true });
+		pointer(node, 'pointerdown', 200, 50);
+		node.dispatchEvent(before);
+		expect(before.defaultPrevented).toBe(false);
+		vi.advanceTimersByTime(HOLD_MS);
+		const after = new Event('touchmove', { cancelable: true });
+		node.dispatchEvent(after);
+		expect(after.defaultPrevented).toBe(true);
+	});
+
+	it('a swipe past the axis lock cancels the hold', () => {
+		const { node, params } = setup();
+		pointer(node, 'pointerdown', 200, 50);
+		pointer(node, 'pointermove', 170, 50);
+		vi.advanceTimersByTime(HOLD_MS);
+		expect(params.onhold).not.toHaveBeenCalled();
+		expect(params.onmove).toHaveBeenCalledWith(-30, false);
 	});
 });

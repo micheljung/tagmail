@@ -1,0 +1,19 @@
+From: Sample Sender <sender@example.com>
+To: Reader <reader@example.com>
+Subject: Corpus plain text
+Date: Fri, 20 Nov 2026 09:00:00 +0000
+Message-ID: <corpus-plain-text@corpus.example.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+Hi Reader,
+
+This is a plain text message from the synthetic test corpus. It has a few
+hard-wrapped lines, like most plain text mail, and one link to
+https://www.example.com/help/getting-started for good measure.
+
+    An indented line that keeps its spaces.
+
+Thanks,
+Sample Sender

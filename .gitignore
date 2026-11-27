@@ -6,3 +6,4 @@ build/
 *.db
 /master.key
 /compose.yml
+/web/e2e/corpus/private/

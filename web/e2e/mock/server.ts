@@ -242,6 +242,73 @@ function login(res: ServerResponse, status = 200) {
 	});
 }
 
+/** What follows `POST /api/views/{view}/sync`; set with `POST /__mock/sync-mode`. */
+type SyncMode = 'change' | 'irrelevant' | 'none' | 'fail' | 'engine-error';
+const SYNC_CHANGE_DELAY_MS = 100;
+/** A thread id outside every view, for the `irrelevant` mode's upsert. */
+const OUTSIDE_THREAD_ID = 888_888;
+let syncMode: SyncMode = 'none';
+/** The server's `--render-author-css`; set with `POST /__mock/render-author-css`. */
+let authorCss = false;
+/** Decoded view ids of the sync requests, in order. */
+const syncCalls: string[] = [];
+
+/** A new INBOX thread delivered through the change feed. */
+function deliverNewMail(subject?: string): number {
+	const id = THREAD_COUNT + 1000 + extraOrder.length;
+	const r: Row = {
+		...rowAt(0),
+		id,
+		subject: subject ?? 'Fresh off the wire',
+		snippet: 'Delivered through the change feed while you were looking',
+		lastDate: Math.floor(Date.now() / 1000),
+		unreadCount: 1,
+		messageCount: 1,
+		labels: []
+	};
+	extraRows.set(id, r);
+	extraOrder.unshift(id);
+	pushChanges([
+		{
+			entity: 'thread',
+			id,
+			op: { kind: 'upsert' },
+			payload: { accountId: r.accountId, lastDate: r.lastDate, mailboxes: [1], removedFrom: [] }
+		}
+	]);
+	return id;
+}
+
+/**
+ * Changes no list acts on: op, outbox and identity deletes of unknown ids,
+ * and an upsert of an unknown thread placed in Archive with no `lastDate`.
+ */
+function pushIrrelevantChanges() {
+	pushChanges([
+		{ entity: 'op', id: 0, op: { kind: 'delete' }, payload: { opId: 'mock-sync-op' } },
+		{ entity: 'outbox', id: OUTSIDE_THREAD_ID, op: { kind: 'delete' }, payload: null },
+		{ entity: 'identity', id: OUTSIDE_THREAD_ID, op: { kind: 'delete' }, payload: null },
+		{
+			entity: 'thread',
+			id: OUTSIDE_THREAD_ID,
+			op: { kind: 'upsert' },
+			payload: { accountId: 1, mailboxes: [3], removedFrom: [], labels: [] }
+		}
+	]);
+}
+
+/** `/api/status` with `lastError` set on every account. */
+async function statusWithEngineError(req: IncomingMessage, res: ServerResponse, url: URL) {
+	await accountsApi(req, res, url, {
+		...writeContext,
+		send: (r, status, b) => {
+			const { accounts } = b as { accounts: object[] };
+			const failing = accounts.map((a) => ({ ...a, lastError: 'imap: connection refused' }));
+			send(r, status, { accounts: failing });
+		}
+	});
+}
+
 function pushChanges(changes: unknown[]) {
 	if (changes.length === 0) return;
 	seq++;
@@ -289,6 +356,9 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
 		res.setHeader('set-cookie', `${COOKIE}=; Max-Age=0; Path=/`);
 		return send(res, 204, '');
 	}
+	if (path === '/api/status' && syncMode === 'engine-error') {
+		return statusWithEngineError(req, res, url);
+	}
 	if (await accountsApi(req, res, url, writeContext)) return;
 	if (await pushApi(req, res, url, writeContext)) return;
 	if (await calendarApi(req, res, url, writeContext)) return;
@@ -314,6 +384,16 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
 	if (m && method === 'DELETE') {
 		devices = devices.filter((d) => d.id !== Number(m![1]));
 		return send(res, 204, '');
+	}
+	m = /^\/api\/views\/([^/]+)\/sync$/.exec(path);
+	if (m && method === 'POST') {
+		syncCalls.push(decodeURIComponent(m[1]));
+		await sleep(LATENCY_MS);
+		if (syncMode === 'fail') return error(res, 500, 'internal', 'mock sync failure');
+		if (syncMode === 'change') setTimeout(() => deliverNewMail(), SYNC_CHANGE_DELAY_MS);
+		if (syncMode === 'irrelevant') setTimeout(pushIrrelevantChanges, SYNC_CHANGE_DELAY_MS);
+		res.writeHead(202, { 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+		return res.end();
 	}
 	m = /^\/api\/views\/([^/]+)\/index$/.exec(path);
 	if (m) {
@@ -400,7 +480,7 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
 		const images =
 			url.searchParams.get('images') === '1' ||
 			(!!found.message.from && imageSenders.has(found.message.from.email.toLowerCase()));
-		const html = renderMessage(found.row, found.message, images);
+		const html = renderMessage(found.row, found.message, images, authorCss);
 		res.writeHead(200, {
 			'content-type': 'text/html; charset=utf-8',
 			'cache-control': 'no-store',
@@ -423,28 +503,18 @@ async function api(req: IncomingMessage, res: ServerResponse, url: URL) {
 async function mock(req: IncomingMessage, res: ServerResponse, url: URL) {
 	if (url.pathname === '/__mock/new-mail' && req.method === 'POST') {
 		const { subject } = await body(req);
-		const id = THREAD_COUNT + 1000 + extraOrder.length;
-		const r: Row = {
-			...rowAt(0),
-			id,
-			subject: subject ?? 'Fresh off the wire',
-			snippet: 'Delivered through the change feed while you were looking',
-			lastDate: Math.floor(Date.now() / 1000),
-			unreadCount: 1,
-			messageCount: 1,
-			labels: []
-		};
-		extraRows.set(id, r);
-		extraOrder.unshift(id);
-		pushChanges([
-			{
-				entity: 'thread',
-				id,
-				op: { kind: 'upsert' },
-				payload: { accountId: r.accountId, lastDate: r.lastDate, mailboxes: [1], removedFrom: [] }
-			}
-		]);
-		return send(res, 200, { id });
+		return send(res, 200, { id: deliverNewMail(subject) });
+	}
+	if (url.pathname === '/__mock/sync-mode' && req.method === 'POST') {
+		syncMode = ((await body(req)).mode ?? 'none') as SyncMode;
+		return send(res, 204, '');
+	}
+	if (url.pathname === '/__mock/render-author-css' && req.method === 'POST') {
+		authorCss = String((await body(req)).on) === 'true';
+		return send(res, 204, '');
+	}
+	if (url.pathname === '/__mock/sync' && req.method === 'GET') {
+		return send(res, 200, { calls: syncCalls, mode: syncMode });
 	}
 	if (url.pathname === '/__mock/scenario' && req.method === 'POST') {
 		const { name } = await body(req);
@@ -463,6 +533,9 @@ async function mock(req: IncomingMessage, res: ServerResponse, url: URL) {
 		extraRows.clear();
 		imageSenders.clear();
 		extraOrder.length = 0;
+		syncMode = 'none';
+		authorCss = false;
+		syncCalls.length = 0;
 		resetWrites();
 		return send(res, 204, '');
 	}

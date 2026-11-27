@@ -1,0 +1,19 @@
+From: Sample Sender <sender@example.com>
+To: Reader <reader@example.com>
+Subject: Corpus long linked token
+Date: Fri, 20 Nov 2026 09:00:00 +0000
+Message-ID: <corpus-long-linked-token@corpus.example.com>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+<html><body>
+<table width="100%" cellpadding="0" cellspacing="0" border="0">
+  <tr><td style="padding:16px;font-family:Arial,sans-serif;line-height:1.5">
+    <p>Hi Reader,</p>
+    <p>Please confirm your synthetic account with the link below. It is deliberately one very long token.</p>
+    <p><a href="https://links.example.com/account/confirm?token=dkryFMT07elszGNU18fmtAHOV29gnuBIPW3ahovCJQX4bipwDKRY5cjqxELSZ6dkryFMT07elszGNU18fmtAHOV29gnuBIPW3ahovCJQX4bipwDKRY5cjqxELSZ6dkryFMT07elszGNU18fmtAHOV29gnuBIPW3ahovCJQX4bipwDKRY5cjqxELSZ6dkryFMT07elszGNU18fmtAHOV29gnuBIPW3ahovCJQX4bipwDKRY5cjqxELSZ6dkry">https://links.example.com/account/confirm?token=dkryFMT07elszGNU18fmtAHOV29gnuBIPW3ahovCJQX4bipwDKRY5cjqxELSZ6dkryFMT07elszGNU18fmtAHOV29gnuBIPW3ahovCJQX4bipwDKRY5cjqxELSZ6dkryFMT07elszGNU18fmtAHOV29gnuBIPW3ahovCJQX4bipwDKRY5cjqxELSZ6dkryFMT07elszGNU18fmtAHOV29gnuBIPW3ahovCJQX4bipwDKRY5cjqxELSZ6dkry</a></p>
+    <p>If the link does not work, ignore this test message.</p>
+  </td></tr>
+</table>
+</body></html>

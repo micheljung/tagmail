@@ -1,0 +1,42 @@
+From: Sample Sender <sender@example.com>
+To: Reader <reader@example.com>
+Subject: Corpus responsive newsletter
+Date: Fri, 20 Nov 2026 09:00:00 +0000
+Message-ID: <corpus-responsive-newsletter@corpus.example.com>
+MIME-Version: 1.0
+Content-Type: text/html; charset=utf-8
+Content-Transfer-Encoding: 8bit
+
+<!doctype html>
+<html><head><meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+.container { width: 600px; }
+.col { width: 300px; }
+@media only screen and (max-width: 600px) {
+  .container { width: 100% !important; }
+  .col { display: block !important; width: 100% !important; box-sizing: border-box; }
+  .hero { height: auto !important; }
+}
+</style></head>
+<body style="margin:0;padding:0;background-color:#f2f4f7">
+<table class="container" width="600" align="center" cellpadding="0" cellspacing="0" border="0" style="background-color:#ffffff">
+  <tr><td colspan="2" style="padding:24px;font-family:Arial,sans-serif">
+    <img class="hero" src="https://placeholder.example.com/hero-600x200.png" width="552" height="200" alt="Hero placeholder">
+    <h1 style="font-size:24px;margin:16px 0 8px">The Weekly Sample</h1>
+    <p>Welcome to this issue. Everything here is synthetic text written for layout testing only.</p>
+  </td></tr>
+  <tr>
+    <td class="col" width="300" valign="top" style="padding:0 24px 24px;font-family:Arial,sans-serif">
+      <h2 style="font-size:18px">Left story</h2>
+      <p>A short paragraph that would stack above the right story on a narrow screen when author CSS applies.</p>
+    </td>
+    <td class="col" width="300" valign="top" style="padding:0 24px 24px;font-family:Arial,sans-serif">
+      <h2 style="font-size:18px">Right story</h2>
+      <p>Another paragraph. On a phone the media query turns both columns into full-width blocks.</p>
+    </td>
+  </tr>
+  <tr><td colspan="2" style="padding:16px 24px;font-family:Arial,sans-serif;font-size:12px;color:#6b7280">
+    You receive this sample because it is part of the Tagmail test corpus.
+  </td></tr>
+</table>
+</body></html>

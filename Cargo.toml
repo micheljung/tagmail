@@ -22,11 +22,15 @@ calcard = { version = "0.3.14", default-features = false }
 caseless = "0.2"
 chacha20poly1305 = { version = "0.11", features = ["zeroize"] }
 chrono = { version = "0.4", default-features = false, features = ["std"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
+# Pinned to the versions ammonia already pulls in (author CSS, B1).
+cssparser = { version = "=0.38.0", default-features = false }
 form_urlencoded = "1"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 getrandom = "0.4"
 hex = "0.4"
+# Pinned like cssparser: the version ammonia parses with.
+html5ever = "=0.40.1"
 hkdf = "0.13"
 hmac = "0.13"
 ipnet = "2"

@@ -49,6 +49,7 @@ impl Env {
             auth: Default::default(),
             web_dir: None,
             push: Default::default(),
+            render_author_css: false,
         }
     }
 

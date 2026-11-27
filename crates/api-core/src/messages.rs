@@ -110,13 +110,20 @@ struct Rendered {
     message_id: Option<String>,
 }
 
-fn render(raw: &[u8], id: MessageRowId, keys: UrlKeys, at: u64, images: bool) -> Option<Rendered> {
+fn render(
+    raw: &[u8],
+    id: MessageRowId,
+    keys: UrlKeys,
+    at: u64,
+    images: bool,
+    author_css: bool,
+) -> Option<Rendered> {
     let message = mime::parse(raw)?;
     let part_keys = keys.clone();
     let part_url = move |part| signing::part_url(&part_keys, id, part, at);
     let remote: Option<mime::sanitize::RemoteImages> =
         images.then(|| Box::new(move |url: &str| signing::proxy_url(&keys, url, at)) as _);
-    let body = mime::body(&message, &part_url, remote);
+    let body = mime::body_with(&message, &part_url, remote, author_css);
     let parts = mime::parts(&message, &body.cids);
     Some(Rendered {
         reply_to: mime::addresses(message.reply_to()),
@@ -131,6 +138,15 @@ impl<S: Store> Api<S> {
     /// route answers `503`.
     pub fn with_image_proxy(mut self, proxy: Arc<dyn ImageProxy>) -> Api<S> {
         self.proxy = Some(proxy);
+        self
+    }
+
+    /// Keeps sanitized author `<style>` sheets and `class` attributes in
+    /// rendered bodies (`--render-author-css`; off by default). Bodies are
+    /// rendered per request and served `no-store`, so turning it off takes
+    /// effect on the next load.
+    pub fn with_author_css(mut self, on: bool) -> Api<S> {
+        self.author_css = on;
         self
     }
 
@@ -243,9 +259,12 @@ impl<S: Store> Api<S> {
         let keys = self.url_keys().await?;
         let id = record.id;
         let at = now();
-        Ok(blocking(move || render(&source, id, keys, at, images))
-            .await?
-            .ok_or_else(|| Response::error(422, "unparsable", "the message cannot be parsed")))
+        let author_css = self.author_css;
+        Ok(
+            blocking(move || render(&source, id, keys, at, images, author_css))
+                .await?
+                .ok_or_else(|| Response::error(422, "unparsable", "the message cannot be parsed")),
+        )
     }
 
     pub(crate) async fn message(&self, id: &str) -> Result<Response, StoreError> {
@@ -404,7 +423,7 @@ impl<S: Store> Api<S> {
                 None => None,
                 Some(raw) => {
                     let (keys, id, at) = (keys.clone(), m.id, now());
-                    blocking(move || render(&raw, id, keys, at, false))
+                    blocking(move || render(&raw, id, keys, at, false, false))
                         .await?
                         .map(|r| r.body.stats.remote_images > 0)
                 }

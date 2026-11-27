@@ -1,6 +1,6 @@
 //! Allocation peak of rendering a large message: body text parts are
 //! decoded up to a cap and attachments are never decoded, also when
-//! reduced from a stream first.
+//! reduced from a stream first, and with author CSS on.
 
 use base64::Engine as _;
 use peak_alloc::PeakAlloc;
@@ -22,8 +22,12 @@ fn base64_lines(data: &[u8]) -> String {
 }
 
 fn huge(html_bytes: usize, attachment_bytes: usize) -> Vec<u8> {
+    huge_with("", html_bytes, attachment_bytes)
+}
+
+fn huge_with(head: &str, html_bytes: usize, attachment_bytes: usize) -> Vec<u8> {
     let paragraph = "<p>Lorem ipsum <b>dolor</b> sit amet, consectetur adipiscing.</p>\r\n";
-    let html = paragraph.repeat(html_bytes / paragraph.len());
+    let html = format!("{head}{}", paragraph.repeat(html_bytes / paragraph.len()));
     let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
     png.resize(attachment_bytes, 7);
     let mut inline = b"\x89PNG\r\n\x1a\n".to_vec();
@@ -81,4 +85,25 @@ fn rendering_caps_body_text_and_never_decodes_attachments() {
     let body = mime::body(&message, &|id| format!("/api/parts/t{id}"), None);
     assert!(!body.html.contains("Message too large"));
     assert!(body.html.len() > MIB / 2 * 9 / 10);
+
+    // With author CSS on (B1), the `<style>` pre-pass parses the capped
+    // body once more; it keeps names and sheet text only, so the peak stays
+    // in the same budget. In this test, not its own: the peak counter is
+    // global, so concurrent tests would disturb each other.
+    let sheet = format!(
+        "<style>{}</style>",
+        "p{color:red}@media (max-width:600px){b{display:block}}".repeat(600)
+    );
+    let raw = huge_with(&sheet, 4 * MIB, 32 * MIB);
+    let before = ALLOC.current_usage();
+    ALLOC.reset_peak_usage();
+    let message = mime::parse(&raw).unwrap();
+    let body = mime::body_with(&message, &|id| format!("/api/parts/t{id}"), None, true);
+    let peak = ALLOC.peak_usage() - before;
+    assert!(peak < 24 * MIB, "peak {} KiB", peak / 1024);
+    assert!(
+        body.html
+            .starts_with("<style>p{color:red}@media (max-width:600px){b{display:block}}")
+    );
+    assert!(body.html.contains("Message too large to display fully"));
 }

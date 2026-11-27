@@ -1,5 +1,7 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { afterNavigate, goto } from '$app/navigation';
+	import { page } from '$app/state';
+	import { onMount, tick, untrack } from 'svelte';
 	import VirtualList from '../list/VirtualList.svelte';
 	import { sectionLayout } from '../list/sections';
 	import { act, inTrash, runOp, type ActionTarget } from '../ops/actions.svelte';
@@ -7,10 +9,12 @@
 	import { shortcuts, type ShortcutAction } from '../shortcuts';
 	import { focusInListPane, listOwnsAct } from '../readingPane';
 	import { accounts, nav, ops, prefs, type ThreadList } from '../stores';
-	import type { ThreadRowDto } from '../transport';
+	import type { RefreshState } from '../stores/threadList.svelte';
+	import { isDesktop, type ThreadRowDto } from '../transport';
 	import { PARTIAL_TEXT } from '../desktop/desktop.svelte';
 	import { viewScope } from '../views';
 	import Icon, { type IconName } from './Icon.svelte';
+	import { selectionBar } from './selectionBar.svelte';
 	import { navigate } from './navigate';
 	import { rowHeightFor } from '../prefs';
 	import ThreadRow from './ThreadRow.svelte';
@@ -94,6 +98,144 @@
 		return !active || active === document.body || focusInListPane();
 	}
 
+	const REFRESH_TEXT: Partial<Record<RefreshState, string>> = {
+		done: 'Up to date',
+		failed: "Couldn't refresh",
+		offline: "Offline, couldn't refresh"
+	};
+	const refreshText = $derived(REFRESH_TEXT[list.refreshing] ?? '');
+
+	/** Phones and touch screens: a hold selects, taps then toggle, Back clears. */
+	const touchMode = $derived(compact || coarse);
+	/** The selection action bar replaces the app header; phones only. */
+	const cab = $derived(compact && checkedCount > 0);
+	const anyUnread = $derived(cab && target().rows.some((r) => r.unreadCount > 0));
+
+	let sectionEl: HTMLElement | undefined = $state();
+	let moreButton: HTMLButtonElement | undefined = $state();
+	let moreMenu: HTMLDivElement | undefined = $state();
+	let moreOpen = $state(false);
+	/** The thread ticked or unticked last, for focus on exit. */
+	let lastToggled: number | undefined;
+	/** Whether this list pushed the history entry Back pops to leave selection. */
+	let selectionEntryPushed = false;
+
+	$effect(() => {
+		selectionBar.active = cab;
+		return () => {
+			selectionBar.active = false;
+		};
+	});
+
+	$effect(() => {
+		if (!cab) moreOpen = false;
+	});
+
+	// Selection starts: push the entry Back pops. It reaches 0: leave it.
+	$effect(() => {
+		const n = checkedCount;
+		untrack(() => {
+			if (n > 0 && touchMode && !selectionEntryPushed) {
+				selectionEntryPushed = true;
+				void goto(page.url.href, { shallow: true, state: { ...page.state, selection: true } });
+			} else if (n === 0 && selectionEntryPushed) exitSelection();
+		});
+	});
+
+	// Back popped the selection entry; the browser already left it.
+	$effect(() => {
+		const inSelection = page.state.selection;
+		untrack(() => {
+			if (inSelection || !selectionEntryPushed) return;
+			selectionEntryPushed = false;
+			list.setAllChecked(false);
+			restoreFocus();
+		});
+	});
+
+	// Coming back to an entry a selection left behind: make it a plain list.
+	afterNavigate(() => {
+		void tick().then(() => {
+			if (page.state.selection && list.checked.size === 0 && !selectionEntryPushed) {
+				const state = { ...page.state };
+				delete state.selection;
+				void goto(page.url.href, { shallow: true, replace: true, state });
+			}
+		});
+	});
+
+	/** Leaves selection mode; safe to call more than once. */
+	function exitSelection() {
+		const was = selectionEntryPushed || list.checked.size > 0;
+		list.setAllChecked(false);
+		if (selectionEntryPushed) {
+			// Cleared before back(): popstate comes later and must not go back again.
+			selectionEntryPushed = false;
+			history.back();
+		}
+		if (was) restoreFocus();
+	}
+
+	function restoreFocus() {
+		moreOpen = false;
+		void tick().then(() => {
+			const at = lastToggled === undefined ? -1 : list.index.indexOf(lastToggled);
+			if (at !== -1) list.select(at);
+			sectionEl?.querySelector<HTMLElement>('.scroller')?.focus({ preventScroll: true });
+		});
+	}
+
+	function toggle(index: number) {
+		lastToggled = list.idAt(index);
+		list.toggleChecked(index);
+	}
+
+	/** Bar actions that finish at once end the selection. */
+	function cabRun(action: ShortcutAction) {
+		moreOpen = false;
+		if (run(action)) exitSelection();
+	}
+
+	/** Picker actions end the selection only when the picker is confirmed. */
+	function cabPick(action: 'label' | 'move') {
+		moreOpen = false;
+		act(action, { ...target(), onapply: exitSelection });
+	}
+
+	async function openMore() {
+		moreOpen = true;
+		await tick();
+		moreMenu?.querySelector<HTMLElement>('[role=menuitem]')?.focus();
+	}
+
+	function closeMore() {
+		moreOpen = false;
+		moreButton?.focus();
+	}
+
+	function onMoreKey(e: KeyboardEvent) {
+		const items = [...(moreMenu?.querySelectorAll<HTMLElement>('[role=menuitem]') ?? [])];
+		const at = items.indexOf(document.activeElement as HTMLElement);
+		if (e.key === 'Escape') closeMore();
+		else if (e.key === 'ArrowDown') items[(at + 1) % items.length]?.focus();
+		else if (e.key === 'ArrowUp') items[(at - 1 + items.length) % items.length]?.focus();
+		else if (e.key === 'Tab') moreOpen = false;
+		else return;
+		if (e.key !== 'Tab') {
+			e.preventDefault();
+			e.stopPropagation();
+		}
+	}
+
+	/** Shift+F10 or the ContextMenu key: the keyboard way into selection on phones. */
+	function onListKey(e: KeyboardEvent) {
+		if (!compact || list.activeIndex === -1) return;
+		if (e.key !== 'ContextMenu' && !(e.shiftKey && e.key === 'F10')) return;
+		e.preventDefault();
+		const id = list.idAt(list.activeIndex);
+		if (id !== undefined && !list.checked.has(id)) toggle(list.activeIndex);
+	}
+
 	onMount(() => {
 		const mq = matchMedia(COMPACT_QUERY);
 		const coarseMq = matchMedia(COARSE_QUERY);
@@ -145,6 +287,11 @@
 			coarseMq.removeEventListener('change', onChange);
 			detach();
 			pop();
+			// Navigated away mid-selection: the selection does not come back with the list.
+			if (selectionEntryPushed) {
+				selectionEntryPushed = false;
+				list.setAllChecked(false);
+			}
 		};
 	});
 
@@ -153,7 +300,16 @@
 	}
 </script>
 
-<section class="list" aria-label={label}>
+<svelte:window
+	onpointerdown={(e) => {
+		if (moreOpen && !moreMenu?.parentElement?.contains(e.target as Node)) moreOpen = false;
+	}}
+/>
+
+<section class="list" aria-label={label} bind:this={sectionEl}>
+	<span class="sr-only" aria-live="polite">
+		{compact && checkedCount > 0 ? `${checkedCount.toLocaleString()} selected` : ''}
+	</span>
 	{#if list.partial}
 		<p class="partial" role="status" data-partial>
 			<Icon name="alert" size={16} />{PARTIAL_TEXT}
@@ -177,44 +333,119 @@
 			<span class="muted">{emptyHint}</span>
 		</div>
 	{:else}
-		<div class="bar" role="toolbar" aria-label="Conversation actions">
-			<button
-				class="all"
-				role="checkbox"
-				aria-checked={allState}
-				aria-label="Select all conversations on screen"
-				title="Select (x)"
-				onclick={() => list.setAllChecked(checkedCount === 0)}
-			>
-				<span class="box {allState}" aria-hidden="true">
-					{#if allState === 'true'}<Icon
-							name="check"
-							size={13}
-						/>{:else if allState === 'mixed'}<span class="dash"></span>{/if}
-				</span>
-			</button>
-			{#if checkedCount > 0}
-				<div class="actions">
-					{#each TOOLBAR as item (item.action)}
-						<button
-							class="act"
-							aria-label={item.label}
-							title="{item.label} ({item.key})"
-							onclick={() => run(item.action)}
+		{#if cab}
+			<div class="cab" role="toolbar" aria-label="Selection actions">
+				<button class="act" aria-label="Close selection" onclick={exitSelection}>
+					<Icon name="close" size={20} />
+				</button>
+				<span class="total picked">{checkedCount.toLocaleString()} selected</span>
+				<button class="act" aria-label="Archive" onclick={() => cabRun('archive')}>
+					<Icon name="archive" size={20} />
+				</button>
+				<button class="act" aria-label="Delete" onclick={() => cabRun('delete')}>
+					<Icon name="trash" size={20} />
+				</button>
+				{#if anyUnread}
+					<button class="act" aria-label="Mark as read" onclick={() => cabRun('markRead')}>
+						<Icon name="read" size={20} />
+					</button>
+				{:else}
+					<button class="act" aria-label="Mark as unread" onclick={() => cabRun('markUnread')}>
+						<Icon name="unread" size={20} />
+					</button>
+				{/if}
+				<div class="more">
+					<button
+						class="act"
+						aria-label="More"
+						aria-haspopup="menu"
+						aria-expanded={moreOpen}
+						aria-controls="selection-more"
+						bind:this={moreButton}
+						onclick={() => (moreOpen ? closeMore() : void openMore())}
+					>
+						<svg width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
+							<circle cx="12" cy="5.5" r="1.7" />
+							<circle cx="12" cy="12" r="1.7" />
+							<circle cx="12" cy="18.5" r="1.7" />
+						</svg>
+					</button>
+					{#if moreOpen}
+						<div
+							class="menu"
+							id="selection-more"
+							role="menu"
+							aria-label="More actions"
+							tabindex="-1"
+							bind:this={moreMenu}
+							onkeydown={onMoreKey}
 						>
-							<Icon name={item.icon} size={18} />
-						</button>
-					{/each}
+							<button role="menuitem" onclick={() => cabPick('label')}>
+								<Icon name="tag" size={18} />Label as
+							</button>
+							<button role="menuitem" onclick={() => cabPick('move')}>
+								<Icon name="folder" size={18} />Move to
+							</button>
+							<button role="menuitem" onclick={() => cabRun('star')}>
+								<Icon name="star" size={18} />Star
+							</button>
+							<button
+								role="menuitem"
+								onclick={() => {
+									moreOpen = false;
+									list.setAllChecked(true);
+								}}
+							>
+								<Icon name="check" size={18} />Select all
+							</button>
+						</div>
+					{/if}
 				</div>
-				<span class="total" aria-live="polite">{checkedCount.toLocaleString()} selected</span>
-			{:else}
-				<span class="total" aria-live="polite">
-					{list.count.toLocaleString()} conversation{list.count === 1 ? '' : 's'}
-				</span>
-			{/if}
-			{#if list.error}<span class="warn" role="status">{list.error}</span>{/if}
-		</div>
-		<div class="viewport">
+			</div>
+		{:else}
+			<div class="bar" role="toolbar" aria-label="Conversation actions">
+				<button
+					class="all"
+					role="checkbox"
+					aria-checked={allState}
+					aria-label="Select all conversations on screen"
+					title="Select (x)"
+					onclick={() => list.setAllChecked(checkedCount === 0)}
+				>
+					<span class="box {allState}" aria-hidden="true">
+						{#if allState === 'true'}<Icon
+								name="check"
+								size={13}
+							/>{:else if allState === 'mixed'}<span class="dash"></span>{/if}
+					</span>
+				</button>
+				{#if checkedCount > 0}
+					<div class="actions">
+						{#each TOOLBAR as item (item.action)}
+							<button
+								class="act"
+								aria-label={item.label}
+								title="{item.label} ({item.key})"
+								onclick={() => run(item.action)}
+							>
+								<Icon name={item.icon} size={18} />
+							</button>
+						{/each}
+					</div>
+					<span class="total" aria-live="polite">{checkedCount.toLocaleString()} selected</span>
+				{:else}
+					<span class="total" aria-live="polite">
+						{list.count.toLocaleString()} conversation{list.count === 1 ? '' : 's'}
+					</span>
+				{/if}
+				{#if list.error}<span class="warn" role="status">{list.error}</span>{/if}
+			</div>
+		{/if}
+		<!-- svelte-ignore a11y_no_static_element_interactions -->
+		<div class="viewport" onkeydown={onListKey}>
+			<p class="refresh" class:shown={refreshText !== ''} role="status" aria-live="polite">
+				{refreshText}
+			</p>
 			{#key rowHeight}
 				<VirtualList
 					count={list.count}
@@ -225,6 +456,11 @@
 					keyAt={(i) => list.idAt(i)}
 					initialOffset={list.scrollRow * rowHeight}
 					autofocus={shouldAutofocus()}
+					pullToRefresh={{
+						enabled: touchMode && !isDesktop() && checkedCount === 0,
+						busy: list.refreshing === 'busy',
+						onrefresh: () => list.refresh()
+					}}
 					onoffset={(rows) => (list.scrollRow = rows)}
 					onrange={(range, direction) => {
 						list.noteScrollDirection(direction);
@@ -232,6 +468,8 @@
 					}}
 					onselect={(i) => list.select(i)}
 					onactivate={(i) => {
+						// Touch selection mode: a tap toggles; desktop keeps opening the thread.
+						if (touchMode && checkedCount > 0) return toggle(i);
 						const id = list.idAt(i);
 						if (id !== undefined) open(id);
 					}}
@@ -259,7 +497,17 @@
 									{ threadIds: [id], rows: [row], view: list.view }
 								);
 							}}
-							oncheck={(range) => list.toggleChecked(index, range)}
+							oncheck={(range) => {
+								lastToggled = id;
+								list.toggleChecked(index, range);
+							}}
+							onhold={touchMode
+								? () => {
+										if (id === undefined || list.checked.has(id)) return;
+										list.select(index);
+										toggle(index);
+									}
+								: undefined}
 							onstar={() => {
 								if (id === undefined || !row) return;
 								act('star', { threadIds: [id], rows: [row], view: list.view });
@@ -371,6 +619,84 @@
 		}
 	}
 
+	/* Phone selection bar: takes the app header's place and height. */
+	.cab {
+		position: sticky;
+		top: 0;
+		z-index: 2;
+		flex: none;
+		display: flex;
+		align-items: center;
+		height: calc(64px + env(safe-area-inset-top));
+		padding: env(safe-area-inset-top) 4px 0;
+		background: var(--accent);
+		color: var(--accent-ink);
+	}
+
+	.cab .act {
+		width: 44px;
+		height: 44px;
+		color: inherit;
+	}
+
+	.cab .act:hover {
+		background: color-mix(in oklab, var(--accent-ink) 14%, transparent);
+		color: inherit;
+	}
+
+	.cab .picked {
+		flex: 1;
+		min-width: 0;
+		padding: 0 8px;
+		overflow: hidden;
+		font-family: inherit;
+		font-size: 17px;
+		font-weight: 650;
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+	}
+
+	.more {
+		position: relative;
+	}
+
+	.menu {
+		position: absolute;
+		top: calc(100% + 4px);
+		right: 0;
+		z-index: 3;
+		display: flex;
+		flex-direction: column;
+		min-width: 200px;
+		padding: 6px 0;
+		border: 1px solid var(--line);
+		border-radius: var(--radius);
+		background: var(--surface);
+		box-shadow: var(--shadow-lg);
+		color: var(--ink);
+	}
+
+	.menu button {
+		display: flex;
+		align-items: center;
+		gap: 14px;
+		min-height: 48px;
+		padding: 0 18px;
+		border: 0;
+		background: none;
+		color: inherit;
+		font: inherit;
+		font-size: 15px;
+		text-align: left;
+		cursor: pointer;
+	}
+
+	.menu button:hover,
+	.menu button:focus-visible {
+		background: var(--hover);
+	}
+
 	.total {
 		font-family: var(--font-mono);
 		font-variant-numeric: tabular-nums;
@@ -392,6 +718,7 @@
 	}
 
 	.viewport {
+		position: relative;
 		flex: 1;
 		min-height: 0;
 	}
@@ -407,6 +734,30 @@
 		font-size: 12px;
 		font-weight: 600;
 		letter-spacing: 0.02em;
+	}
+
+	/* Pull-to-refresh outcome: an overlay, never in the scroller's flow. */
+	.refresh {
+		position: absolute;
+		top: 12px;
+		left: 50%;
+		z-index: 2;
+		margin: 0;
+		padding: 8px 14px;
+		border-radius: 999px;
+		background: var(--ink);
+		color: var(--surface);
+		font-size: 13px;
+		font-weight: 600;
+		white-space: nowrap;
+		pointer-events: none;
+		opacity: 0;
+		transform: translateX(-50%);
+		transition: opacity 120ms linear;
+	}
+
+	.refresh.shown {
+		opacity: 1;
 	}
 
 	.state {

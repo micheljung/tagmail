@@ -11,6 +11,8 @@ export interface ActionTarget {
 	rows: ThreadRowDto[];
 	/** The list the action starts from, for undo. */
 	view: ViewId | null;
+	/** Called when a picker opened for this target is confirmed (not on cancel). */
+	onapply?: () => void;
 }
 
 /** Open label (`l`) and move (`v`) pickers; the shell renders them. */

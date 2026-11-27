@@ -36,6 +36,7 @@ impl Dirs {
             auth: Default::default(),
             web_dir: None,
             push: Default::default(),
+            render_author_css: false,
         }
     }
 
@@ -49,6 +50,7 @@ struct Registry {
     added: Mutex<Vec<AccountId>>,
     updated: Mutex<Vec<(AccountId, bool)>>,
     removed: Mutex<Vec<AccountId>>,
+    synced: Mutex<Vec<AccountId>>,
 }
 
 impl AccountRegistry for Registry {
@@ -58,6 +60,10 @@ impl AccountRegistry for Registry {
 
     fn account_updated(&self, id: AccountId, restart: bool) {
         self.updated.lock().unwrap().push((id, restart));
+    }
+
+    fn request_sync(&self, id: AccountId) {
+        self.synced.lock().unwrap().push(id);
     }
 
     fn account_removed(&self, id: AccountId) -> BoxFuture<()> {
@@ -884,6 +890,60 @@ async fn accounts_are_listed_patched_and_deleted() {
             .collect::<Vec<_>>(),
         ["active", "active", "deleting"]
     );
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn sync_view_needs_a_session_and_the_csrf_header() {
+    let dirs = Dirs::new();
+    let registry = Arc::new(Registry::default());
+    let server = Server::start(
+        &dirs.config(&dirs.key()),
+        Some(registry.clone() as Arc<dyn AccountRegistry>),
+    )
+    .await
+    .unwrap();
+    let client = owner(&server).await;
+    let resp = client
+        .post(url(&server, "/api/accounts"))
+        .json(&new_account())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let sync = url(&server, "/api/views/inbox/sync");
+
+    let resp = reqwest::Client::new()
+        .post(&sync)
+        .header("x-requested-with", "tagmail")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401, "no session");
+
+    let resp = reqwest::Client::new()
+        .post(url(&server, "/api/auth/login"))
+        .header("x-requested-with", "tagmail")
+        .json(&json!({ "password": PASSWORD }))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "{}", resp.status());
+    let cookie = resp.headers()["set-cookie"].to_str().unwrap();
+    let cookie = cookie.split(';').next().unwrap().to_owned();
+    let resp = reqwest::Client::new()
+        .post(&sync)
+        .header("cookie", cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403, "cookie session without the CSRF header");
+    assert!(registry.synced.lock().unwrap().is_empty());
+
+    let resp = client.post(&sync).send().await.unwrap();
+    assert_eq!(resp.status(), 202);
+    assert!(resp.bytes().await.unwrap().is_empty());
+    assert_eq!(*registry.synced.lock().unwrap(), [AccountId(1)]);
     server.shutdown().await.unwrap();
 }
 
