@@ -2,13 +2,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{BufReader, Read};
-use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::calendar_dto::{
-    CalEventDto, CaldavSettingsDto, CalendarDto, CalendarTargetDto, EventInstanceDto,
-};
+use crate::calendar_dto::{CalEventDto, CaldavSettingsDto, CalendarDto};
 use crate::dto::{
     AccountDto, AccountStateDto, AddressDto, ChangeDto, ChangeOpDto, EntityDto, LabelDto,
     MailboxDto, SpecialUseDto, ThreadRowDto, TlsMode,
@@ -1248,14 +1245,18 @@ impl Store for SqliteStore {
         )))
     }
 
+    #[cfg(feature = "calendar")]
     async fn events_in(
         &self,
-        range: Range<i64>,
-        calendars: Vec<CalendarTargetDto>,
-    ) -> StoreResult<Vec<EventInstanceDto>> {
+        range: std::ops::Range<i64>,
+        calendars: Vec<crate::calendar_dto::CalendarTargetDto>,
+    ) -> StoreResult<Vec<crate::calendar_dto::EventInstanceDto>> {
+        let window = tagmail_calendar::Window::around_unix(now_secs());
         Ok(self
             .cache
-            .read(move |conn| sqlite_calendar::events_in(conn, range.start, range.end, &calendars))
+            .read(move |conn| {
+                sqlite_calendar::events_in(conn, range.start, range.end, &calendars, &window)
+            })
             .await?)
     }
 

@@ -29,6 +29,7 @@ import {
 	type CalOutcome
 } from './calOps.ts';
 import { idAt, messagesOf, rowAt } from './fixture.ts';
+import { MAX_EVENTS_SPAN, MAX_TIME, MIN_TIME, eventsIn } from './calendarEvents.ts';
 import { mailOpExists, type WriteContext } from './write.ts';
 
 export type InvitationScenario =
@@ -287,6 +288,7 @@ let calendars: CalendarDto[] = [];
 let confirms: ConfirmHostDto[] = [];
 let puts: { accountId: number; body: CaldavSettingsInputDto }[] = [];
 let patches: CalendarPatchDto[] = [];
+let seenEventQueries: string[] = [];
 
 function blankSettings(): CaldavSettingsDto {
 	return {
@@ -336,6 +338,7 @@ export function resetCaldav(scenario: CaldavScenario = 'unconfigured'): void {
 	calendars = [];
 	puts = [];
 	patches = [];
+	seenEventQueries = [];
 	confirms = [];
 	if (scenario === 'configured') {
 		caldav.set(ACCOUNT_A, {
@@ -411,7 +414,14 @@ function applyInput(accountId: number, input: CaldavSettingsInputDto): void {
 }
 
 export function caldavState() {
-	return { settings: Object.fromEntries(caldav), calendars, puts, patches, confirms };
+	return {
+		settings: Object.fromEntries(caldav),
+		calendars,
+		puts,
+		patches,
+		confirms,
+		eventQueries: seenEventQueries
+	};
 }
 
 const changed = new Map<number, Partial<InvitationDto>>();
@@ -493,6 +503,43 @@ export async function calendarApi(
 			}
 			ctx.send(res, 200, target);
 		} else return false;
+		return true;
+	}
+
+	if (url.pathname === '/api/calendar/events' && method === 'GET') {
+		const refuse = (field: string, message: string) =>
+			ctx.send(res, 422, { error: 'invalid', field, message });
+		const bound = (name: string) => {
+			const v = url.searchParams.get(name);
+			const n = v !== null && /^[+-]?\d+$/.test(v) ? BigInt(v) : null;
+			return n !== null && n >= -(2n ** 63n) && n < 2n ** 63n ? n : null;
+		};
+		const [from, to] = [bound('from'), bound('to')];
+		if (from === null || to === null) {
+			ctx.error(res, 400, 'bad_request', 'from and to must be Unix seconds');
+			return true;
+		}
+		const representable = (t: bigint) => t >= BigInt(MIN_TIME) && t <= BigInt(MAX_TIME);
+		if (!representable(from)) {
+			refuse('from', 'not a representable time');
+			return true;
+		}
+		if (!representable(to) || to <= from || to - from > BigInt(MAX_EVENTS_SPAN)) {
+			refuse('to', 'after from and at most 62 days later');
+			return true;
+		}
+		const wanted = [];
+		for (const value of url.searchParams.getAll('calendars')) {
+			const at = value.indexOf(':');
+			const accountId = Number(value.slice(0, at));
+			if (at < 0 || !/^[+-]?\d+$/.test(value.slice(0, at))) {
+				refuse('calendars', 'each is <accountId>:<href>');
+				return true;
+			}
+			wanted.push({ accountId, calendarHref: value.slice(at + 1) });
+		}
+		seenEventQueries.push(url.search);
+		ctx.send(res, 200, { events: eventsIn(calendars, Number(from), Number(to), wanted) });
 		return true;
 	}
 

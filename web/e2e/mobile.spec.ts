@@ -31,7 +31,7 @@ test.describe('drawer', () => {
 		await menu.tap();
 		await expect(menu).toHaveAttribute('aria-expanded', 'true');
 		await expect(drawer).toBeInViewport();
-		await expect(drawer.getByRole('button', { name: 'Compose' })).toBeFocused();
+		await expect(drawer.getByRole('link', { name: 'Mail' })).toBeFocused();
 		for (let i = 0; i < 40; i++) {
 			await page.keyboard.press('Tab');
 			expect(await drawer.evaluate((el) => el.contains(document.activeElement))).toBe(true);

@@ -11,7 +11,9 @@ import type {
 	CaldavSettingsDto,
 	CaldavSettingsInputDto,
 	CalendarDto,
+	CalendarEventsDto,
 	CalendarPatchDto,
+	CalendarTargetDto,
 	CalendarsDto,
 	CalImportDto,
 	CalRsvpDto,
@@ -23,6 +25,7 @@ import type {
 	DesktopStatusDto,
 	DeviceDto,
 	DevicesDto,
+	EventInstanceDto,
 	ImageSendersDto,
 	InvitationDto,
 	LabelDto,
@@ -186,6 +189,19 @@ export class Api {
 
 	async calendars(signal?: AbortSignal): Promise<CalendarDto[]> {
 		return (await this.#json<CalendarsDto>('/api/calendars', { signal })).calendars;
+	}
+
+	/** Instances overlapping `[from, to)` (Unix seconds); no `calendars` lists every calendar. */
+	async calendarEvents(
+		from: number,
+		to: number,
+		calendars: readonly CalendarTargetDto[],
+		signal?: AbortSignal
+	): Promise<EventInstanceDto[]> {
+		const query = new URLSearchParams({ from: String(from), to: String(to) });
+		for (const c of calendars) query.append('calendars', `${c.accountId}:${c.calendarHref}`);
+		return (await this.#json<CalendarEventsDto>(`/api/calendar/events?${query}`, { signal }))
+			.events;
 	}
 
 	rsvp(request: CalRsvpDto): Promise<OpDto> {

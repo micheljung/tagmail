@@ -70,7 +70,7 @@ fn server_only(route: RouteId) -> bool {
 
 /// Routes served from calendar records, while the replica holds them.
 fn calendar_read(route: RouteId) -> bool {
-    matches!(route, RouteId::Calendars)
+    matches!(route, RouteId::Calendars | RouteId::CalendarEvents)
 }
 
 /// Calendar writes, queued as intents while the replica holds calendars.

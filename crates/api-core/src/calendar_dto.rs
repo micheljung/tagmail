@@ -377,8 +377,19 @@ pub struct EventInstanceDto {
     pub start: i64,
     pub end: i64,
     pub all_day: bool,
+    pub summary: Option<String>,
+    pub location: Option<String>,
     pub status: Option<EventStatusDto>,
     pub partstat: Option<PartstatDto>,
+}
+
+/// `GET /api/calendar/events?from&to&calendars`: `from` and `to` are Unix
+/// seconds, each `calendars` value is `<accountId>:<href>`; none lists
+/// every calendar.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarEventsDto {
+    pub events: Vec<EventInstanceDto>,
 }
 
 /// A cached calendar object resource with its iCalendar text.

@@ -147,6 +147,7 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<CaldavSettingsInputDto>(&cfg, &mut files)?;
     file::<CaldavStatusDto>(&cfg, &mut files)?;
     file::<CalendarDto>(&cfg, &mut files)?;
+    file::<CalendarEventsDto>(&cfg, &mut files)?;
     file::<CalendarPatchDto>(&cfg, &mut files)?;
     file::<CalendarsDto>(&cfg, &mut files)?;
     file::<CalendarTargetDto>(&cfg, &mut files)?;
@@ -155,6 +156,7 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<CalRsvpDto>(&cfg, &mut files)?;
     file::<RsvpPartstatDto>(&cfg, &mut files)?;
     file::<ConfirmHostDto>(&cfg, &mut files)?;
+    file::<EventInstanceDto>(&cfg, &mut files)?;
     file::<EventStatusDto>(&cfg, &mut files)?;
     file::<FrequencyDto>(&cfg, &mut files)?;
     file::<InvitationAttendeeDto>(&cfg, &mut files)?;
