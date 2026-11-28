@@ -4,17 +4,19 @@
 
 use std::collections::HashMap;
 
-use tagmail_core::AccountId;
+use tagmail_core::{AccountId, MessageRowId};
 use tagmail_store::calendar::{
     self, CaldavConfig, CaldavStatus, CalendarPref, CalendarRow, Scheduling,
 };
 use tagmail_store::rusqlite::{Connection, OptionalExtension};
 
 use crate::calendar_dto::{
-    CaldavSettingsDto, CaldavStatusDto, CalendarDto, CalendarTargetDto, EventStatusDto,
-    PartstatDto, SchedulingDto, SchedulingOverrideDto, StoredEventDto,
+    CalEventDto, CaldavSettingsDto, CaldavStatusDto, CalendarDto, CalendarTargetDto,
+    EventInstanceDto, EventStatusDto, PartstatDto, SchedulingDto, SchedulingOverrideDto,
+    StoredEventDto,
 };
 use crate::dto::AccountStateDto;
+use crate::ops_dto::CalReplyStateDto;
 use crate::store::{CaldavSettingsUpdate, CalendarPatch, InvitationContext, StoredCopy};
 
 pub(crate) fn scheduling_dto(s: Scheduling) -> SchedulingDto {
@@ -55,7 +57,7 @@ pub(crate) fn settings_dto(c: &CaldavConfig) -> CaldavSettingsDto {
         fallback_account_id: c.fallback_account.map(|a| a.0),
         default_calendar_href: c.default_calendar_href.clone(),
         authserv_id: c.authserv_id.clone(),
-        authserv_id_suggestion: None,
+        authserv_id_suggestion: c.authserv_suggestion.clone(),
         confirmed_host: c.confirmed_host.clone(),
         status: status_dto(c.status),
         last_error: c.last_error.clone(),
@@ -217,36 +219,86 @@ pub(crate) fn mapped_accounts(
     Ok(mapped)
 }
 
+/// The REPLY state of the newest RSVP of `account` to each of `uids`,
+/// with my PARTSTAT before it.
+pub(crate) fn reply_states(
+    conn: &Connection,
+    account: AccountId,
+    uids: &[String],
+) -> tagmail_store::Result<HashMap<String, (CalReplyStateDto, Option<String>)>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT c.reply_cancelled, o.state, c.reply_op_id IS NOT NULL, c.prior_partstat \
+         FROM cal_op c \
+         LEFT JOIN outbox o ON o.op_id = c.reply_op_id \
+         WHERE c.account_id = ?1 AND c.uid = ?2 AND c.kind = 'rsvp' \
+         ORDER BY c.op_seq DESC LIMIT 1",
+    )?;
+    let mut out = HashMap::new();
+    for uid in uids {
+        let row: Option<(bool, Option<String>, bool, Option<String>)> = stmt
+            .query_row(tagmail_store::rusqlite::params![account.0, uid], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
+            .optional()?;
+        if let Some((cancelled, state, true, prior)) = row {
+            let state = match (cancelled, state.as_deref()) {
+                (true, _) => CalReplyStateDto::Cancelled,
+                (false, Some("queued")) => CalReplyStateDto::Queued,
+                (false, Some("sending")) => CalReplyStateDto::Sending,
+                (false, Some("failed")) => CalReplyStateDto::Failed,
+                (false, _) => CalReplyStateDto::Sent,
+            };
+            out.insert(uid.clone(), (state, prior));
+        }
+    }
+    Ok(out)
+}
+
 /// Stored copies of `uids` and the target, from `cache.db`.
 pub(crate) fn invitation_context(
     conn: &Connection,
     mapped: &[(AccountId, CaldavConfig)],
+    message: MessageRowId,
     uids: &[String],
+    replies: &HashMap<String, (CalReplyStateDto, Option<String>)>,
 ) -> tagmail_store::Result<InvitationContext> {
     let accounts: Vec<AccountId> = mapped.iter().map(|(a, _)| *a).collect();
-    let (target, scheduling) = mapped
-        .iter()
-        .find_map(|(account, config)| {
-            let href = config.default_calendar_href.clone()?;
-            let target = CalendarTargetDto {
+    let mut cached =
+        conn.prepare_cached("SELECT 1 FROM calendar WHERE account_id = ?1 AND href = ?2")?;
+    let mut target = None;
+    let mut scheduling = None;
+    for (account, config) in mapped {
+        let Some(href) = &config.default_calendar_href else {
+            continue;
+        };
+        if cached.exists(tagmail_store::rusqlite::params![account.0, href])? {
+            target = Some(CalendarTargetDto {
                 account_id: account.0,
-                calendar_href: href,
-            };
-            Some((Some(target), config.scheduling().map(scheduling_dto)))
-        })
-        .unwrap_or((None, None));
+                calendar_href: href.clone(),
+            });
+            scheduling = config.scheduling().map(scheduling_dto);
+            break;
+        }
+    }
     let mut stored = Vec::new();
     for uid in uids {
         for copy in calendar::events_by_uid(conn, &accounts, uid)? {
             stored.push(StoredCopy {
                 uid: uid.clone(),
                 dtstamp: copy.event.dtstamp,
+                organizer: copy.event.organizer.clone(),
                 stored: StoredEventDto {
                     account_id: copy.account.0,
                     calendar_href: copy.calendar_href,
                     partstat: copy.event.my_partstat.as_deref().map(partstat_dto),
                     sequence: copy.event.sequence,
                     status: copy.event.status.as_deref().and_then(event_status_dto),
+                    reply_state: replies.get(uid).map(|(s, _)| *s),
+                    revert_partstat: replies
+                        .get(uid)
+                        .filter(|(s, _)| *s == CalReplyStateDto::Cancelled)
+                        .and_then(|(_, p)| p.as_deref())
+                        .map(partstat_dto),
                 },
             });
         }
@@ -255,7 +307,106 @@ pub(crate) fn invitation_context(
         stored,
         target,
         scheduling,
+        authserv_id: mapped.first().and_then(|(_, c)| c.authserv_id.clone()),
+        received: conn
+            .query_row(
+                "SELECT received FROM message WHERE id = ?1",
+                [message.0],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten(),
     })
+}
+
+/// Instances overlapping `[start, end)`; an instance without duration
+/// counts at its start.
+pub(crate) fn events_in(
+    conn: &Connection,
+    start: i64,
+    end: i64,
+    calendars: &[CalendarTargetDto],
+) -> tagmail_store::Result<Vec<EventInstanceDto>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT c.account_id, c.href, e.href, e.uid, i.recurrence_id, i.start_utc, i.end_utc, \
+         i.all_day, e.status, e.my_partstat FROM cal_instance i \
+         JOIN cal_event e ON e.id = i.event_id JOIN calendar c ON c.id = e.calendar_id \
+         WHERE i.start_utc < ?2 AND (i.end_utc > ?1 OR i.start_utc >= ?1) \
+         ORDER BY i.start_utc, c.account_id, c.href, e.href, i.recurrence_id",
+    )?;
+    let rows = stmt.query_map([start, end], |r| {
+        Ok(EventInstanceDto {
+            account_id: r.get(0)?,
+            calendar_href: r.get(1)?,
+            href: r.get(2)?,
+            uid: r.get(3)?,
+            recurrence_id: r.get(4)?,
+            start: r.get(5)?,
+            end: r.get(6)?,
+            all_day: r.get(7)?,
+            status: r
+                .get::<_, Option<String>>(8)?
+                .as_deref()
+                .and_then(event_status_dto),
+            partstat: r.get::<_, Option<String>>(9)?.as_deref().map(partstat_dto),
+        })
+    })?;
+    let mut out = rows.collect::<tagmail_store::rusqlite::Result<Vec<_>>>()?;
+    if !calendars.is_empty() {
+        out.retain(|i| {
+            calendars
+                .iter()
+                .any(|c| c.account_id == i.account_id && c.calendar_href == i.calendar_href)
+        });
+    }
+    Ok(out)
+}
+
+/// Events of `account` at `href` or with `uid`, with their iCalendar text.
+pub(crate) fn events_where(
+    conn: &Connection,
+    account: AccountId,
+    href: Option<&str>,
+    uid: Option<&str>,
+) -> tagmail_store::Result<Vec<CalEventDto>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT e.id, c.href, e.href, e.etag, e.uid, e.sequence, e.status, e.my_partstat, \
+         e.organizer FROM cal_event e JOIN calendar c ON c.id = e.calendar_id \
+         WHERE c.account_id = ?1 AND (?2 IS NULL OR e.href = ?2) AND (?3 IS NULL OR e.uid = ?3) \
+         ORDER BY c.href, e.href",
+    )?;
+    let rows = stmt.query_map(
+        tagmail_store::rusqlite::params![account.0, href, uid],
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                CalEventDto {
+                    account_id: account.0,
+                    calendar_href: r.get(1)?,
+                    href: r.get(2)?,
+                    etag: r.get(3)?,
+                    uid: r.get(4)?,
+                    sequence: r.get(5)?,
+                    status: r
+                        .get::<_, Option<String>>(6)?
+                        .as_deref()
+                        .and_then(event_status_dto),
+                    partstat: r.get::<_, Option<String>>(7)?.as_deref().map(partstat_dto),
+                    organizer: r.get(8)?,
+                    ics: String::new(),
+                },
+            ))
+        },
+    )?;
+    let found = rows.collect::<tagmail_store::rusqlite::Result<Vec<_>>>()?;
+    found
+        .into_iter()
+        .map(|(id, mut event)| {
+            let ics = calendar::event_ics(conn, id)?.unwrap_or_default();
+            event.ics = String::from_utf8_lossy(&ics).into_owned();
+            Ok(event)
+        })
+        .collect()
 }
 
 #[cfg(all(test, feature = "calendar"))]
@@ -318,11 +469,15 @@ mod tests {
 
     async fn card(store: &SqliteStore, sequence: u32) -> crate::calendar_dto::InvitationDto {
         let raw = invitation(sequence);
-        let (mut dto, versions) = card::invitation(&calendar_parts(raw.as_slice()).unwrap())
-            .unwrap_or_else(|r| panic!("{}", String::from_utf8_lossy(&r.body)));
+        let (mut dto, versions, sender) =
+            card::invitation(&calendar_parts(raw.as_slice()).unwrap())
+                .unwrap_or_else(|r| panic!("{}", String::from_utf8_lossy(&r.body)));
         let uids = versions.iter().map(|v| v.uid.clone()).collect();
-        let context = store.invitation_context(INVITED, uids).await.unwrap();
-        card::apply_context(&mut dto, &versions, context);
+        let context = store
+            .invitation_context(INVITED, MessageRowId(0), uids)
+            .await
+            .unwrap();
+        card::apply_context(&mut dto, &versions, &sender, context);
         dto
     }
 
@@ -409,6 +564,8 @@ mod tests {
                 partstat: Some(PartstatDto::Accepted),
                 sequence: STORED_SEQUENCE,
                 status: Some(EventStatusDto::Confirmed),
+                reply_state: None,
+                revert_partstat: None,
             })
         );
         assert!(older.outdated);

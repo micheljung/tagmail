@@ -137,6 +137,10 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<OpKindDto>(&cfg, &mut files)?;
     file::<OpStatusDto>(&cfg, &mut files)?;
     file::<OpsDto>(&cfg, &mut files)?;
+    file::<OpDomainDto>(&cfg, &mut files)?;
+    file::<CalConflictDto>(&cfg, &mut files)?;
+    file::<CalReplyStateDto>(&cfg, &mut files)?;
+    file::<CalOpInfoDto>(&cfg, &mut files)?;
     file::<AutoApplyDto>(&cfg, &mut files)?;
     file::<CaldavDiscoveryDto>(&cfg, &mut files)?;
     file::<CaldavSettingsDto>(&cfg, &mut files)?;
@@ -146,6 +150,10 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<CalendarPatchDto>(&cfg, &mut files)?;
     file::<CalendarsDto>(&cfg, &mut files)?;
     file::<CalendarTargetDto>(&cfg, &mut files)?;
+    file::<CalApplyDto>(&cfg, &mut files)?;
+    file::<CalImportDto>(&cfg, &mut files)?;
+    file::<CalRsvpDto>(&cfg, &mut files)?;
+    file::<RsvpPartstatDto>(&cfg, &mut files)?;
     file::<ConfirmHostDto>(&cfg, &mut files)?;
     file::<EventStatusDto>(&cfg, &mut files)?;
     file::<FrequencyDto>(&cfg, &mut files)?;

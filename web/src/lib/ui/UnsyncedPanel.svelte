@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { calendarNote } from '../calendar/opState';
 	import { outbox } from '../compose/composer.svelte';
 	import { ops } from '../stores';
 	import Icon from './Icon.svelte';
@@ -49,20 +50,29 @@
 	{:else}
 		<ul class="list" aria-label="Unsynced changes">
 			{#each items as op (op.opId)}
+				{@const note = op.calendar ? calendarNote(op.status, op.calendar) : null}
 				<li class={op.status} data-op={op.opId}>
 					<span class="glyph" aria-hidden="true">
-						{#if op.status === 'failed'}<Icon name="alert" size={18} />{:else}<span class="spin"
+						{#if op.calendar}<Icon
+								name="calendar"
+								size={18}
+							/>{:else if op.status === 'failed'}<Icon name="alert" size={18} />{:else}<span
+								class="spin"
 							></span>{/if}
 					</span>
 					<div class="what">
 						<strong>{ops.describe(op)}</strong>
 						<span>
 							<span class="badge">{statusText(op.status)}</span>
-							{#if op.error}<span class="err">{op.error}</span>{/if}
+							{#if note}<span class="err">{note.text}</span>{:else if op.error}<span class="err">
+									{op.error}
+								</span>{/if}
 						</span>
 					</div>
 					{#if op.status === 'failed'}
-						<button class="btn" onclick={() => void ops.retry(op)}>Retry</button>
+						<button class="btn" onclick={() => void ops.retry(op)}>
+							{note?.retryLabel ?? 'Retry'}
+						</button>
 					{/if}
 					<button class="btn ghost" onclick={() => void ops.discard(op)}>Discard</button>
 				</li>

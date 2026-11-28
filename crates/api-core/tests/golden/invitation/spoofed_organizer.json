@@ -29,6 +29,7 @@
     }
   ],
   "method": "request",
+  "organizerChanged": false,
   "outdated": false,
   "scheduling": null,
   "senderAuth": "address_mismatch",

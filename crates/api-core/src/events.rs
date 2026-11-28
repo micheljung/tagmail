@@ -5,7 +5,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use tagmail_core::ChangeCursor;
+use tagmail_core::{ChangeCursor, ChangeFilter};
 use tokio::sync::{broadcast, watch};
 
 use crate::api::{change_page_dto, gone_error};
@@ -124,17 +124,19 @@ pub struct EventSession<S> {
     store: Arc<S>,
     head: watch::Receiver<ChangeCursor>,
     cursor: ChangeCursor,
+    filter: ChangeFilter,
     pending: Option<ChangesDto>,
     ended: bool,
 }
 
 impl<S: Store> EventSession<S> {
     /// Starts after `resume` (the client's `Last-Event-ID`), or at the
-    /// current head.
+    /// current head; sends only the changes `filter` lets through.
     pub async fn open(
         store: Arc<S>,
         source: &dyn EventSource,
         resume: Option<ChangeCursor>,
+        filter: ChangeFilter,
     ) -> StoreResult<Result<EventSession<S>, OpenError>> {
         let head = source.subscribe();
         let mut session = EventSession {
@@ -144,12 +146,17 @@ impl<S: Store> EventSession<S> {
                 epoch: tagmail_core::CacheEpoch(0),
                 seq: 0,
             },
+            filter,
             pending: None,
             ended: false,
         };
         match resume {
             None => session.cursor = session.store.head().await?,
-            Some(cursor) => match session.store.changes_since(cursor, EVENT_PAGE).await? {
+            Some(cursor) => match session
+                .store
+                .changes_since(cursor, EVENT_PAGE, filter)
+                .await?
+            {
                 ChangePage::Gone => return Ok(Err(OpenError::Gone)),
                 ChangePage::Page {
                     changes,
@@ -179,17 +186,22 @@ impl<S: Store> EventSession<S> {
             if self.head.borrow_and_update().epoch != self.cursor.epoch {
                 return Ok(Some(self.reset()));
             }
-            match self.store.changes_since(self.cursor, EVENT_PAGE).await? {
+            match self
+                .store
+                .changes_since(self.cursor, EVENT_PAGE, self.filter)
+                .await?
+            {
                 ChangePage::Gone => return Ok(Some(self.reset())),
                 ChangePage::Page {
                     changes,
                     next,
                     more,
-                } if !changes.is_empty() => {
+                } => {
                     self.cursor = next;
-                    return Ok(Some(Event::Changes(change_page_dto(changes, next, more))));
+                    if !changes.is_empty() {
+                        return Ok(Some(Event::Changes(change_page_dto(changes, next, more))));
+                    }
                 }
-                ChangePage::Page { .. } => {}
             }
             if self.head.changed().await.is_err() {
                 self.ended = true;

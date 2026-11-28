@@ -29,6 +29,13 @@ use crate::supervisor::{ConnectorFactory, Engine, Stores};
 pub const UPLOAD_TMP: &str = "tmp";
 /// Messages being built, under the outbox directory.
 pub const OUTBOX_TMP: &str = "tmp";
+/// Calendar objects of calendar ops, under the outbox directory.
+pub(crate) const CAL_OP_DIR: &str = "cal";
+/// Separates a client op id from the suffix of an outbox item it queued,
+/// as in `<opId>#reply`; client op ids never contain it.
+pub(crate) const DERIVED_OP_SEPARATOR: char = '#';
+/// `op_seen.kind` of mail ops and sends.
+pub(crate) const MAIL_OP: &str = "mail";
 
 pub(crate) fn now() -> i64 {
     SystemTime::now()
@@ -339,6 +346,179 @@ pub(crate) fn write_message(
     let size = file.as_file().metadata()?.len();
     let (_, path) = file.keep().map_err(|e| e.error)?;
     Ok((path, size))
+}
+
+/// An outbox row; its message is the file `tmp`.
+pub(crate) struct OutboxRow<'a> {
+    pub op_id: &'a str,
+    pub account: i64,
+    pub identity_id: Option<i64>,
+    pub size: u64,
+    pub msgid: &'a str,
+    pub sender: &'a str,
+    /// JSON list of [`AddressDto`].
+    pub recipients: &'a str,
+    pub subject: &'a str,
+    pub draft_id: Option<i64>,
+    /// The Message-ID flagged once sent, and how.
+    pub flag: Option<(&'a str, &'a str)>,
+}
+
+/// Queues `row` and moves its message file into the outbox; `None` when
+/// the op id is already queued.
+fn insert_outbox(
+    tx: &Transaction<'_>,
+    outbox: &Path,
+    tmp: &Path,
+    row: &OutboxRow<'_>,
+) -> ComposeResult<Option<i64>> {
+    let inserted = tx
+        .execute(
+            "INSERT OR IGNORE INTO outbox (op_id, account_id, identity_id, mime_size, \
+             msgid_hdr, sender, recipients, subject, draft_id, flag_msgid, flag_kind) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            params![
+                row.op_id,
+                row.account,
+                row.identity_id,
+                i64::try_from(row.size).unwrap_or(i64::MAX),
+                row.msgid,
+                row.sender,
+                row.recipients,
+                row.subject,
+                row.draft_id,
+                row.flag.map(|(msgid, _)| msgid),
+                row.flag.map(|(_, kind)| kind),
+            ],
+        )
+        .map_err(sql)?;
+    if inserted == 0 {
+        return Ok(None);
+    }
+    let id = tx.last_insert_rowid();
+    let name = outbox_file(id);
+    fs::rename(tmp, outbox.join(&name)).map_err(store_err)?;
+    tx.execute(
+        "UPDATE outbox SET mime_file = ?2 WHERE id = ?1",
+        params![id, name],
+    )
+    .map_err(sql)?;
+    Ok(Some(id))
+}
+
+/// Builds a generated message from the sender, its Message-ID (no angle
+/// brackets) and Date (Unix seconds).
+#[cfg(feature = "calendar")]
+pub(crate) type BuildMime<'a> =
+    &'a (dyn Fn(&AddressDto, &str, i64) -> std::io::Result<Vec<u8>> + Sync);
+
+/// A message the engine wrote itself, such as an iTIP REPLY, waiting in
+/// `<outbox>/tmp` for [`queue_generated`].
+#[cfg(feature = "calendar")]
+#[derive(Debug, Clone)]
+pub(crate) struct GeneratedMessage {
+    pub op_id: String,
+    pub account: i64,
+    pub identity_id: i64,
+    pub sender: String,
+    pub recipients: String,
+    pub subject: String,
+    pub msgid: String,
+    pub tmp: PathBuf,
+    pub size: u64,
+}
+
+#[cfg(feature = "calendar")]
+impl GeneratedMessage {
+    /// Removes the file of a message that was not queued.
+    pub(crate) fn discard(&self) {
+        let _ = fs::remove_file(&self.tmp);
+    }
+}
+
+/// Writes a generated message from identity `identity_id` (`None`: the
+/// account's default) of `account` before it is queued, so the queueing
+/// transaction does no file IO but the rename. An identity that no longer
+/// exists is an error, never replaced by another one.
+#[cfg(feature = "calendar")]
+pub(crate) async fn write_generated(
+    stores: &Stores,
+    op_id: String,
+    account: i64,
+    identity_id: Option<i64>,
+    to: &[AddressDto],
+    subject: String,
+    mime: BuildMime<'_>,
+) -> ComposeResult<GeneratedMessage> {
+    let all = read(stores, identities).await?;
+    let identity = match identity_id {
+        Some(id) => all
+            .iter()
+            .find(|x| x.id == id && x.account_id == account)
+            .ok_or_else(|| invalid("identityId", "the identity no longer exists"))?,
+        None => all
+            .iter()
+            .find(|x| x.account_id == account && x.is_default)
+            .or_else(|| all.iter().find(|x| x.account_id == account))
+            .ok_or_else(|| invalid("identityId", "the account has no identity"))?,
+    };
+    let from = AddressDto {
+        name: identity.name.clone(),
+        email: identity.address.clone(),
+    };
+    let msgid = new_message_id(&from.email);
+    let bytes = mime(&from, &msgid, now()).map_err(store_err)?;
+    let outbox = stores.outbox.clone();
+    let size = bytes.len() as u64;
+    let tmp = blocking(move || -> std::io::Result<PathBuf> {
+        let mut file = tempfile::NamedTempFile::new_in(outbox.join(OUTBOX_TMP))?;
+        std::io::Write::write_all(&mut file, &bytes)?;
+        file.as_file().sync_all()?;
+        Ok(file.keep().map_err(|e| e.error)?.1)
+    })
+    .await?
+    .map_err(store_err)?;
+    Ok(GeneratedMessage {
+        op_id,
+        account,
+        identity_id: identity.id,
+        sender: from.email,
+        recipients: serde_json::to_string(to).expect("addresses serialize"),
+        subject,
+        msgid,
+        tmp,
+        size,
+    })
+}
+
+/// Queues a generated message in the caller's transaction, under a
+/// derived op id that gets no `op_seen` row (the caller's op has it).
+/// `None` when the op id is already queued; the caller then
+/// [`GeneratedMessage::discard`]s it. The Sent copy follows
+/// `account.server_saves_sent` like any sent message.
+#[cfg(feature = "calendar")]
+pub(crate) fn queue_generated(
+    tx: &Transaction<'_>,
+    outbox: &Path,
+    m: &GeneratedMessage,
+) -> ComposeResult<Option<i64>> {
+    insert_outbox(
+        tx,
+        outbox,
+        &m.tmp,
+        &OutboxRow {
+            op_id: &m.op_id,
+            account: m.account,
+            identity_id: Some(m.identity_id),
+            size: m.size,
+            msgid: &m.msgid,
+            sender: &m.sender,
+            recipients: &m.recipients,
+            subject: &m.subject,
+            draft_id: None,
+            flag: None,
+        },
+    )
 }
 
 /// File name of a queued message in the outbox directory.
@@ -725,16 +905,22 @@ impl<F: ConnectorFactory> Engine<F> {
                     status: state_of(&state),
                 }));
             }
-            let seen = c
-                .query_row("SELECT 1 FROM op_seen WHERE op_id = ?1", [&op_id], |_| {
-                    Ok(())
+            let seen: Option<String> = c
+                .query_row("SELECT kind FROM op_seen WHERE op_id = ?1", [&op_id], |r| {
+                    r.get(0)
                 })
                 .optional()
                 .map_err(sql)?;
-            Ok(seen.map(|()| SendStatusDto {
-                op_id,
-                status: OutboxStateDto::Sent,
-            }))
+            match seen.as_deref() {
+                None => Ok(None),
+                Some(MAIL_OP) => Ok(Some(SendStatusDto {
+                    op_id,
+                    status: OutboxStateDto::Sent,
+                })),
+                Some(_) => Err(ComposeError::Conflict(
+                    "this op id was used by a calendar op".to_owned(),
+                )),
+            }
         })
         .await
     }
@@ -795,27 +981,24 @@ impl<F: ConnectorFactory> Engine<F> {
                     "the draft changed while it was queued; send again".to_owned(),
                 ));
             }
-            let inserted = tx
-                .execute(
-                    "INSERT OR IGNORE INTO outbox (op_id, account_id, identity_id, mime_size, \
-                     msgid_hdr, sender, recipients, subject, draft_id, flag_msgid, flag_kind) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-                    params![
-                        op_id,
-                        row.account_id,
-                        row.identity_id,
-                        i64::try_from(size).unwrap_or(i64::MAX),
-                        row.msgid_hdr,
-                        message.from.email,
-                        recipients,
-                        message.subject,
-                        draft_id,
-                        flag_msgid,
-                        flag_kind
-                    ],
-                )
-                .map_err(sql)?;
-            if inserted == 0 {
+            let queued = insert_outbox(
+                tx,
+                &outbox,
+                &tmp,
+                &OutboxRow {
+                    op_id: &op_id,
+                    account: row.account_id,
+                    identity_id: row.identity_id,
+                    size,
+                    msgid: &row.msgid_hdr,
+                    sender: &message.from.email,
+                    recipients: &recipients,
+                    subject: &message.subject,
+                    draft_id: Some(draft_id),
+                    flag: flag_msgid.as_deref().zip(flag_kind),
+                },
+            )?;
+            let Some(id) = queued else {
                 let state: String = tx
                     .query_row("SELECT state FROM outbox WHERE op_id = ?1", [&op_id], |r| {
                         r.get(0)
@@ -831,15 +1014,7 @@ impl<F: ConnectorFactory> Engine<F> {
                         created: false,
                     },
                 ));
-            }
-            let id = tx.last_insert_rowid();
-            let name = outbox_file(id);
-            fs::rename(&tmp, outbox.join(&name)).map_err(store_err)?;
-            tx.execute(
-                "UPDATE outbox SET mime_file = ?2 WHERE id = ?1",
-                params![id, name],
-            )
-            .map_err(sql)?;
+            };
             tx.execute(
                 "INSERT OR IGNORE INTO op_seen (op_id, account_id) VALUES (?1, ?2)",
                 params![op_id, row.account_id],
@@ -904,7 +1079,7 @@ impl<F: ConnectorFactory> Engine<F> {
     }
 
     async fn cancel_impl(&self, id: i64) -> ComposeResult<()> {
-        let file = write(self.stores(), move |tx| {
+        let (file, linked) = write(self.stores(), move |tx| {
             let row: Option<(String, String, Option<i64>, Option<String>)> = tx
                 .query_row(
                     "SELECT op_id, state, draft_id, mime_file FROM outbox WHERE id = ?1",
@@ -923,20 +1098,31 @@ impl<F: ConnectorFactory> Engine<F> {
             }
             tx.execute("DELETE FROM outbox WHERE id = ?1", [id])
                 .map_err(sql)?;
-            tx.execute("DELETE FROM op_seen WHERE op_id = ?1", [&op_id])
-                .map_err(sql)?;
+            let linked = match op_id.split_once(DERIVED_OP_SEPARATOR) {
+                None => {
+                    tx.execute("DELETE FROM op_seen WHERE op_id = ?1", [&op_id])
+                        .map_err(sql)?;
+                    None
+                }
+                Some((parent, _)) => Some(parent.to_owned()),
+            };
             if let Some(draft) = draft {
                 tx.execute("UPDATE draft SET queued = 0 WHERE id = ?1", [draft])
                     .map_err(sql)?;
             }
-            Ok(file)
+            Ok((file, linked))
         })
-        .await?
-        .map(|name| self.inner.stores.outbox.join(name));
-        if let Some(path) = file {
+        .await?;
+        if let Some(path) = file.map(|name| self.inner.stores.outbox.join(name)) {
             let _ = fs::remove_file(path);
         }
         self.emit_outbox(id, None).await;
+        #[cfg(feature = "calendar")]
+        if let Some(parent) = linked {
+            self.calendar_reply_cancelled(parent).await;
+        }
+        #[cfg(not(feature = "calendar"))]
+        let _ = linked;
         Ok(())
     }
 

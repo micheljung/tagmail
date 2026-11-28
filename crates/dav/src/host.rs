@@ -62,7 +62,7 @@ fn is_ip(host: &str) -> bool {
 
 /// One spelling per host: lowercase, IDNA punycode, no trailing dot, IPv6
 /// in brackets.
-fn normalize_host(host: &str) -> String {
+pub fn normalize_host(host: &str) -> String {
     let host = host.trim_end_matches('.');
     let bracketed;
     let input = if host.contains(':') && !host.starts_with('[') {

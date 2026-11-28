@@ -1,4 +1,7 @@
 export type {
+	AutoApplyDto,
+	CalendarTargetDto,
+	StoredEventDto,
 	InvitationAttendeeDto,
 	InvitationDto,
 	InvitationEventDto,

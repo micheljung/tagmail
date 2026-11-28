@@ -333,3 +333,26 @@ async fn removing_the_account_purges_its_calendars() {
     assert_eq!(f.caldav().await, CaldavConfig::default());
     f.engine.shutdown().await;
 }
+
+#[tokio::test]
+async fn confirm_host_compares_idn_and_ipv6_spellings() {
+    for (pending, typed) in [
+        ("dav.xn--bcher-kva.example", "Dav.B\u{fc}cher.example."),
+        ("[::1]", "::1"),
+    ] {
+        let f = fixture().await;
+        f.connector.discovers(Ok(Discovery::NeedsConfirmation {
+            host: pending.into(),
+            url: url::Url::parse(&format!("https://{pending}/dav/")).unwrap(),
+        }));
+        f.engine.discover(ACCOUNT).await.unwrap();
+        f.connector.discovers(Ok(found()));
+        let dto = f.engine.confirm_host(ACCOUNT, typed.into()).await.unwrap();
+        assert_eq!(dto.status, CaldavStatusDto::Ok, "{typed}");
+        assert_eq!(
+            f.connector.asked()[1].confirmed_host.as_deref(),
+            Some(pending)
+        );
+        f.engine.shutdown().await;
+    }
+}

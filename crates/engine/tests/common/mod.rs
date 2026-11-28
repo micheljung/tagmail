@@ -4,6 +4,8 @@
 #![allow(dead_code)]
 
 pub mod cal_fixture;
+#[cfg(feature = "caldav-tests")]
+pub mod cal_flow;
 pub mod cal_users;
 
 use std::future::Future;
@@ -85,7 +87,7 @@ pub async fn mailpit(path: &str) -> Vec<u8> {
     response[split + 4..].to_vec()
 }
 
-fn encode(s: &str) -> String {
+pub fn encode(s: &str) -> String {
     s.bytes()
         .map(|b| {
             if b.is_ascii_alphanumeric() || b == b'-' || b == b'.' {
@@ -388,6 +390,11 @@ impl Fixture {
         fail_after: Option<usize>,
     ) -> Running {
         self.start_with(capability_override, fail_after, None).await
+    }
+
+    /// The fixture's data directory.
+    pub fn dir(&self) -> &std::path::Path {
+        self.dir.path()
     }
 
     /// Where the engine keeps queued messages.

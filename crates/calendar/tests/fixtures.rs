@@ -455,3 +455,77 @@ fn schemeless_and_uppercase_mailto_addresses_are_authoritative() {
     assert!(!bob.matches("x@evil.example"));
     assert!(bob.matches("bob@example.org"));
 }
+
+fn standup_starts() -> [OffsetDateTime; 4] {
+    [
+        datetime!(2026-12-08 9:00 UTC),
+        datetime!(2026-12-15 10:00 UTC),
+        datetime!(2026-12-22 9:00 UTC),
+        datetime!(2026-12-29 9:00 UTC),
+    ]
+}
+
+const DECEMBER: std::ops::Range<OffsetDateTime> =
+    datetime!(2026-12-01 0:00 UTC)..datetime!(2027-01-01 0:00 UTC);
+
+#[test]
+fn an_override_replaces_its_instance() {
+    let cal = calendar("google_recurring_override.ics");
+    let expansion = cal.expand(DECEMBER);
+    let starts: Vec<_> = expansion.occurrences.iter().map(|o| o.start).collect();
+    assert_eq!(starts, standup_starts());
+    assert_eq!(expansion.occurrences[1].event, 1);
+    assert_eq!(
+        expansion.recurrence_ids[1].as_deref(),
+        Some("TZID=Europe/Zurich:20261215T100000")
+    );
+    assert!(!expansion.truncated);
+}
+
+#[test]
+fn an_override_with_a_higher_sequence_still_replaces_its_instance() {
+    let source = String::from_utf8(fixture("google_recurring_override.ics")).unwrap();
+    let at = source.rfind("SEQUENCE:0").unwrap();
+    let bumped = format!(
+        "{}SEQUENCE:1{}",
+        &source[..at],
+        &source[at + "SEQUENCE:0".len()..]
+    );
+    let cal = parse(bumped.as_bytes()).unwrap();
+    assert_eq!(cal.events[1].sequence, 1);
+
+    let expansion = cal.expand(DECEMBER);
+    let starts: Vec<_> = expansion.occurrences.iter().map(|o| o.start).collect();
+    assert_eq!(starts, standup_starts());
+    assert_eq!(expansion.occurrences[1].event, 1);
+    assert_eq!(expansion.recurrence_ids.len(), 4);
+    assert!(!expansion.truncated);
+}
+
+#[test]
+fn an_override_with_a_higher_sequence_pairs_in_the_shared_pass() {
+    let source = String::from_utf8(fixture("google_recurring_override.ics")).unwrap();
+    let at = source.rfind("SEQUENCE:0").unwrap();
+    let bumped = format!(
+        "{}SEQUENCE:1{}",
+        &source[..at],
+        &source[at + "SEQUENCE:0".len()..]
+    );
+    let filler: String = (0..100)
+        .map(|i| {
+            format!(
+                "BEGIN:VEVENT\r\nUID:filler-{i}\r\nDTSTAMP:20261110T120000Z\r\n\
+                 DTSTART:20270101T090000Z\r\nRRULE:FREQ=DAILY;COUNT=2\r\nEND:VEVENT\r\n"
+            )
+        })
+        .collect();
+    let shared = bumped.replacen("BEGIN:VEVENT", &format!("{filler}BEGIN:VEVENT"), 1);
+    let cal = parse(shared.as_bytes()).unwrap();
+
+    let starts: Vec<_> = cal
+        .occurrences(DECEMBER)
+        .into_iter()
+        .map(|o| o.start)
+        .collect();
+    assert_eq!(starts, standup_starts());
+}

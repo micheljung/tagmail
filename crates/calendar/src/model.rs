@@ -157,7 +157,29 @@ pub struct Occurrence {
     pub end: OffsetDateTime,
 }
 
+impl Method {
+    /// The iCalendar METHOD value, e.g. `REPLY`.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Method::Publish => "PUBLISH",
+            Method::Request => "REQUEST",
+            Method::Reply => "REPLY",
+            Method::Add => "ADD",
+            Method::Cancel => "CANCEL",
+            Method::Refresh => "REFRESH",
+            Method::Counter => "COUNTER",
+            Method::DeclineCounter => "DECLINECOUNTER",
+            Method::Other(value) => value,
+        }
+    }
+}
+
 impl Organizer {
+    /// Whether `address` is this organizer's own email address, see [`is_email_address`].
+    pub fn is_address(&self, address: &str) -> bool {
+        is_email_address(&self.address, self.address_is_email, address)
+    }
+
     /// Whether the RFC 5322 From `address` is this organizer, see [`calendar_user_is`].
     pub fn matches(&self, address: &str) -> bool {
         calendar_user_is(
@@ -170,6 +192,11 @@ impl Organizer {
 }
 
 impl Attendee {
+    /// Whether `address` is this attendee's own email address, see [`is_email_address`].
+    pub fn is_address(&self, address: &str) -> bool {
+        is_email_address(&self.address, self.address_is_email, address)
+    }
+
     /// Whether the RFC 5322 From `address` is this attendee, see [`calendar_user_is`].
     pub fn matches(&self, address: &str) -> bool {
         calendar_user_is(
@@ -200,6 +227,13 @@ fn calendar_user_is(
         return address.eq_ignore_ascii_case(from);
     }
     email.is_some_and(|email| email.trim().eq_ignore_ascii_case(from))
+}
+
+/// Case-insensitive match against an email calendar address only: never via
+/// the `EMAIL` parameter or an iMIP alias, so changes that are applied
+/// without asking cannot be steered by a sender-chosen parameter.
+fn is_email_address(address: &str, address_is_email: bool, other: &str) -> bool {
+    address_is_email && !is_imip_alias(address) && address.eq_ignore_ascii_case(other.trim())
 }
 
 fn is_imip_alias(address: &str) -> bool {

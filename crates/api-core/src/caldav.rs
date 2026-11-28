@@ -4,12 +4,14 @@
 
 use std::fmt;
 
-use tagmail_core::AccountId;
+use tagmail_core::{AccountId, MessageRowId};
 
 use crate::api::{Api, Response};
-use crate::calendar_dto::CaldavDiscoveryDto;
+use crate::calendar_dto::{CaldavDiscoveryDto, RsvpPartstatDto};
+use crate::mime::reduce::CalendarParts;
 use crate::routes::RouteId;
 use crate::store::{BoxFuture, Store, StoreError};
+use crate::writes::{Submitted, WriteResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CalendarError {
@@ -47,6 +49,42 @@ pub trait CalendarService: Send + Sync + 'static {
 
     /// Called after the settings were saved.
     fn settings_changed(&self, account: AccountId);
+
+    /// Queues an RSVP, import or apply of the invitation in a message.
+    fn submit(&self, request: CalRequest) -> BoxFuture<WriteResult<Submitted>>;
+
+    /// The calendar op `op_id` names if it was submitted before; a conflict
+    /// when a mail op or a discarded op used it.
+    fn existing(&self, op_id: String) -> BoxFuture<WriteResult<Option<crate::ops_dto::OpDto>>>;
+}
+
+/// A validated `POST /api/calendar/{rsvp,import,apply}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalRequest {
+    pub op_id: String,
+    pub account: AccountId,
+    pub message: MessageRowId,
+    pub source: CalendarParts,
+    pub action: CalAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CalAction {
+    Rsvp {
+        partstat: RsvpPartstatDto,
+        identity_id: Option<i64>,
+        allow_organizer_change: bool,
+        send_reply: bool,
+    },
+    Import {
+        part: Option<u32>,
+        /// (account, calendar href); `None` for the invitation's target.
+        calendar: Option<(AccountId, String)>,
+    },
+    Apply {
+        /// The owner accepts that the update names another organizer.
+        allow_organizer_change: bool,
+    },
 }
 
 pub(crate) fn feature_disabled() -> Response {
@@ -85,6 +123,9 @@ impl<S: Store> Api<S> {
             RouteId::ConfirmCaldavHost => self.confirm_caldav_host(params[0], body).await,
             RouteId::Calendars => self.list_calendars().await,
             RouteId::UpdateCalendar => self.update_calendar(body).await,
+            RouteId::CalendarRsvp | RouteId::CalendarImport | RouteId::CalendarApply => {
+                self.calendar_op(route, body).await
+            }
             _ => unreachable!("not a calendar route: {route:?}"),
         };
         match served {
@@ -103,13 +144,15 @@ mod handlers {
         valid_host,
     };
     use crate::calendar_dto::{
-        CaldavSettingsDto, CaldavSettingsInputDto, CalendarPatchDto, CalendarsDto, ConfirmHostDto,
-        SchedulingDto, SchedulingOverrideDto,
+        CalApplyDto, CalImportDto, CalRsvpDto, CaldavSettingsDto, CaldavSettingsInputDto,
+        CalendarPatchDto, CalendarsDto, ConfirmHostDto, SchedulingDto, SchedulingOverrideDto,
     };
     use crate::compose::parse_row_id;
+    use crate::routes::RouteId;
     use crate::store::{CaldavSettingsUpdate, CalendarPatch, Store, StoreError};
+    use crate::writes::{Submitted, WriteError, valid_op_id, write_error};
 
-    use super::{CalendarError, CalendarService};
+    use super::{CalAction, CalRequest, CalendarError, CalendarService};
 
     const MAX_URL_LEN: usize = 2048;
     const MAX_HREF_LEN: usize = 2048;
@@ -166,6 +209,21 @@ mod handlers {
             return Err(invalid("url", "not a valid CalDAV URL"));
         }
         Ok(url)
+    }
+
+    /// A host as discovery names it: a name (IDN allowed; the engine
+    /// compares IDNA spellings), an IPv4 or a bracketed IPv6 address.
+    fn confirmable_host(host: &str) -> bool {
+        let bare = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(host);
+        valid_host(bare)
+            || (!bare.is_ascii()
+                && bare.len() <= MAX_URL_LEN
+                && bare.trim_end_matches('.').split('.').all(|label| {
+                    !label.is_empty() && label.chars().all(|c| c.is_alphanumeric() || c == '-')
+                }))
     }
 
     fn check_text(field: &str, value: Option<String>, max: usize) -> Checked<Option<String>> {
@@ -311,13 +369,99 @@ mod handlers {
                 Ok(dto) => dto,
                 Err(e) => return Ok(bad_request(format!("invalid confirm-host JSON: {e}"))),
             };
-            let host = dto.host.trim().to_ascii_lowercase();
-            if !valid_host(&host) {
+            let host = dto.host.trim().to_lowercase();
+            if !confirmable_host(&host) {
                 return Ok(invalid("host", "not a host name or IP address"));
             }
             Ok(match service.confirm_host(id, host).await {
                 Ok(dto) => Response::json(200, &dto),
                 Err(e) => calendar_error(e),
+            })
+        }
+
+        /// `POST /api/calendar/{rsvp,import,apply}`: the message's calendar
+        /// parts go to the engine with the request.
+        pub(super) async fn calendar_op(
+            &self,
+            route: RouteId,
+            body: &[u8],
+        ) -> Result<Response, StoreError> {
+            let service = match self.calendar_service() {
+                Ok(s) => s,
+                Err(resp) => return Ok(resp),
+            };
+            let parsed = match route {
+                RouteId::CalendarRsvp => serde_json::from_slice::<CalRsvpDto>(body).map(|d| {
+                    let action = CalAction::Rsvp {
+                        partstat: d.partstat,
+                        identity_id: d.identity_id,
+                        allow_organizer_change: d.allow_organizer_change.unwrap_or(false),
+                        send_reply: d.send_reply.unwrap_or(true),
+                    };
+                    Some((d.op_id, d.message_id, action))
+                }),
+                RouteId::CalendarImport => serde_json::from_slice::<CalImportDto>(body).map(|d| {
+                    let calendar = match (d.account_id, d.calendar_href) {
+                        (Some(account), Some(href)) => Some((AccountId(account), href)),
+                        (None, None) => None,
+                        _ => return None,
+                    };
+                    let action = CalAction::Import {
+                        part: d.part_id,
+                        calendar,
+                    };
+                    Some((d.op_id, d.message_id, action))
+                }),
+                _ => serde_json::from_slice::<CalApplyDto>(body).map(|d| {
+                    let action = CalAction::Apply {
+                        allow_organizer_change: d.allow_organizer_change.unwrap_or(false),
+                    };
+                    Some((d.op_id, d.message_id, action))
+                }),
+            };
+            let (op_id, message_id, action) = match parsed {
+                Ok(Some(parsed)) => parsed,
+                Ok(None) => {
+                    return Ok(invalid(
+                        "calendarHref",
+                        "give accountId and calendarHref together",
+                    ));
+                }
+                Err(e) => return Ok(bad_request(format!("invalid calendar op JSON: {e}"))),
+            };
+            if !valid_op_id(&op_id) {
+                return Ok(write_error(WriteError::invalid(
+                    "opId",
+                    "1 to 64 characters of letters, digits, '-', '_' or '.'",
+                )));
+            }
+            match service.existing(op_id.clone()).await {
+                Ok(Some(op)) => return Ok(Response::json(200, &op)),
+                Ok(None) => {}
+                Err(e) => return Ok(write_error(e)),
+            }
+            let record = match self.record(&message_id).await? {
+                Ok(r) => r,
+                Err(resp) => return Ok(resp),
+            };
+            if !record.has_calendar {
+                return Ok(crate::invitation::card::no_invitation());
+            }
+            let source = match self.calendar_source_of(&record).await? {
+                Ok(source) => source,
+                Err(resp) => return Ok(resp),
+            };
+            let request = CalRequest {
+                op_id,
+                account: record.account_id,
+                message: record.id,
+                source,
+                action,
+            };
+            Ok(match service.submit(request).await {
+                Ok(Submitted::Created(op)) => Response::json(202, &op),
+                Ok(Submitted::Existing(op)) => Response::json(200, &op),
+                Err(e) => write_error(e),
             })
         }
 
@@ -358,6 +502,15 @@ mod handlers {
         use super::*;
 
         #[test]
+        fn confirmable_hosts_include_ipv6_and_idn() {
+            assert!(confirmable_host("dav.other.example"));
+            assert!(confirmable_host("[::1]"));
+            assert!(confirmable_host("dav.b\u{fc}cher.example"));
+            assert!(!confirmable_host("bad host"));
+            assert!(!confirmable_host("dav/evil"));
+        }
+
+        #[test]
         fn urls_must_be_https_unless_insecure_is_allowed() {
             assert!(check_url("https://dav.example.com/rpc/".into(), false).is_ok());
             assert!(check_url("https://[::1]:8443/".into(), false).is_ok());
@@ -366,6 +519,8 @@ mod handlers {
             for bad in [
                 "ftp://dav.example.com/",
                 "https://user@dav.example.com/",
+                "https://user:secret@dav.example.com/",
+                "https://dav.example.com\\@evil.example/",
                 "https:///path",
                 "https://bad host/",
                 "dav.example.com",

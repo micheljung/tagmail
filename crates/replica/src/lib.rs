@@ -4,6 +4,8 @@
 
 pub mod apply;
 pub mod bootstrap;
+pub mod cal_intents;
+pub mod calendar;
 pub mod client;
 pub mod compose;
 pub mod db;

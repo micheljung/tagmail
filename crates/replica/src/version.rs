@@ -3,6 +3,7 @@
 
 use tagmail_api_core::API_VERSION;
 use tagmail_api_core::dto::{ApiVersion, VersionDto};
+use tagmail_core::ChangeFilter;
 
 use crate::client::{ClientResult, ServerClient};
 
@@ -36,9 +37,21 @@ pub fn check(client: ApiVersion, server: &VersionDto) -> Compat {
     }
 }
 
-/// Asks the server; run before a bootstrap and on every reconnect.
-pub async fn probe(client: &ServerClient) -> ClientResult<Compat> {
-    Ok(check(API_VERSION, &client.version().await?))
+/// Whether this build and `server` both have calendars: the replica's
+/// effective include set (appointments plan Decision e).
+pub fn calendar(server: &VersionDto) -> bool {
+    cfg!(feature = "calendar")
+        && server
+            .features
+            .iter()
+            .any(|f| f == ChangeFilter::INCLUDE_CALENDAR)
+}
+
+/// Asks the server; run before a bootstrap and on every reconnect. Also
+/// says whether calendars are included.
+pub async fn probe(client: &ServerClient) -> ClientResult<(Compat, bool)> {
+    let server = client.version().await?;
+    Ok((check(API_VERSION, &server), calendar(&server)))
 }
 
 #[cfg(test)]
@@ -101,10 +114,21 @@ mod tests {
         let client = ServerClient::new(&url, None).unwrap();
         assert_eq!(
             probe(&client).await.unwrap(),
-            Compat::UpdateRequired {
-                server: v(1, 0),
-                min_client: v(1, 0),
-            }
+            (
+                Compat::UpdateRequired {
+                    server: v(1, 0),
+                    min_client: v(1, 0),
+                },
+                false
+            )
         );
+    }
+
+    #[test]
+    fn calendars_need_the_server_feature() {
+        let mut new = server(API_VERSION, v(1, 0));
+        assert!(!calendar(&new));
+        new.features = vec!["calendar".into()];
+        assert_eq!(calendar(&new), cfg!(feature = "calendar"));
     }
 }

@@ -4,17 +4,21 @@
 
 mod error;
 mod expand;
+mod itip;
 mod model;
 mod parse;
 mod tz;
+mod window;
 
-pub use error::{EventError, ParseError};
+pub use error::{EventError, ItipError, ParseError};
 pub use expand::Expansion;
+pub use itip::{apply_cancel, apply_update, for_import, reply, schedule_status, set_my_partstat};
 pub use model::{
     Attendee, Calendar, Event, EventStatus, EventTime, Frequency, Method, Occurrence, Organizer,
     ParticipationRole, ParticipationStatus, Recurrence, WeekdayNum,
 };
 pub use parse::parse;
+pub use window::{Instance, Summary, WINDOW_DAYS, Window};
 
 impl Calendar {
     /// Re-serialises the parsed object, keeping unknown properties,

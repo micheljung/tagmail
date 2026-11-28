@@ -74,7 +74,7 @@ pub(crate) fn now_secs() -> i64 {
 
 /// Submission order of ops; strictly increasing within the process and
 /// close to wall-clock milliseconds across restarts.
-fn next_seq() -> i64 {
+pub(crate) fn next_seq() -> i64 {
     static LAST: AtomicI64 = AtomicI64::new(0);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -89,7 +89,7 @@ fn next_seq() -> i64 {
     }
 }
 
-fn backoff(attempts: u32) -> Duration {
+pub(crate) fn backoff(attempts: u32) -> Duration {
     RETRY_BASE
         .saturating_mul(1 << attempts.min(16))
         .min(RETRY_MAX)
@@ -122,6 +122,8 @@ impl Stored {
             label: self.op.label.as_ref().map(|l| l.key.to_string()),
             mailbox_id,
             created_at: self.created_at,
+            domain: tagmail_api_core::ops_dto::OpDomainDto::Mail,
+            calendar: None,
         }
     }
 }
@@ -331,14 +333,17 @@ async fn reproject(ctx: &Ctx, email_ids: &BTreeSet<EmailId>, events: Vec<OpDto>)
 impl<F: ConnectorFactory> Engine<F> {
     pub(crate) fn ctx(&self, account: AccountId) -> Ctx {
         let stores = &self.inner.stores;
-        Ctx::new(
+        let ctx = Ctx::new(
             stores.cache.clone(),
             stores.blobs.clone(),
             stores.feed.clone(),
             account,
         )
         .with_overlays(self.inner.overlays.clone())
-        .with_blob_writes(self.blob_writes(account))
+        .with_blob_writes(self.blob_writes(account));
+        #[cfg(feature = "calendar")]
+        let ctx = ctx.with_invites(self.inner.calendar.invite_hook());
+        ctx
     }
 
     pub(crate) fn wake(&self, account: AccountId) -> std::sync::Arc<Notify> {
@@ -426,21 +431,28 @@ impl<F: ConnectorFactory> Engine<F> {
 
     pub(crate) async fn queue_op(&self, req: OpRequest) -> WriteResult<Submitted> {
         let id = req.op_id.clone();
-        let seen: bool = self
+        let seen: Option<String> = self
             .inner
             .stores
             .config
             .read(move |c| {
                 Ok(
-                    c.query_row("SELECT 1 FROM op_seen WHERE op_id = ?1", [id], |_| Ok(()))
-                        .optional()?
-                        .is_some(),
+                    c.query_row("SELECT kind FROM op_seen WHERE op_id = ?1", [id], |r| {
+                        r.get(0)
+                    })
+                    .optional()?,
                 )
             })
             .await
             .map_err(WriteError::internal)?;
-        if seen {
-            return self.existing(req.op_id).await;
+        match seen.as_deref() {
+            None => {}
+            Some(crate::compose::MAIL_OP) => return self.existing(req.op_id).await,
+            Some(_) => {
+                return Err(WriteError::Conflict(
+                    "this op id was used by a calendar op".to_owned(),
+                ));
+            }
         }
         let (account, email_ids) = self.targets(&req).await?;
         let label = match &req.label {

@@ -32,7 +32,7 @@ pub use client::{Client, MULTIGET_BATCH};
 pub use discover::discover;
 pub use env::DiscoveryEnv;
 pub use error::{DavError, Result, UidConflictKind};
-pub use host::{host_allowed, registrable_domain};
+pub use host::{host_allowed, normalize_host, registrable_domain};
 pub use href::{normalize_href, same_resource};
 pub use model::{
     CalendarInfo, ClientOptions, DiscoveredAccount, Discovery, DiscoveryTarget, MultigetItem,

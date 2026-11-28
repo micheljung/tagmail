@@ -13,7 +13,7 @@ use tagmail_api_core::{AccountRegistry, BoxFuture, NewAccount, OpRequest};
 use tagmail_core::ops::OpKind;
 use tagmail_core::{AccountId, SpecialUse, ThreadId};
 use tagmail_imap::{Flag, PoolConfig};
-use tagmail_store::rusqlite::params;
+use tagmail_store::rusqlite::{OptionalExtension, params};
 use tagmail_store::{ChangeOp, Changes, ConfigDb, Entity, MasterKey, Vault};
 use tempfile::TempDir;
 use tokio::time::Instant;
@@ -612,7 +612,12 @@ async fn removing_an_account_purges_its_rows_and_reports_them() {
             .await,
         1
     );
-    let Changes::Page { changes, .. } = f.stores.cache.changes_since(head, 1000).await.unwrap()
+    let Changes::Page { changes, .. } = f
+        .stores
+        .cache
+        .changes_since(head, 1000, tagmail_core::ChangeFilter::WithCalendar)
+        .await
+        .unwrap()
     else {
         panic!("gone");
     };
@@ -946,29 +951,43 @@ async fn label_added_in_another_account_is_registered_there() {
             .flags_of("INBOX", uid)
             .contains(&"$label_Shared".to_owned())
     );
-    let row = f
-        .stores
-        .config
-        .read(|c| {
-            Ok(c.query_row(
-                "SELECT display_name, color FROM label_registry \
-                 WHERE account_id = 2 AND label_key = 'shared'",
-                [],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
-            )?)
-        })
-        .await
-        .unwrap();
-    assert_eq!(row, ("Shared".to_owned(), Some("#00aa00".to_owned())));
-    let Changes::Page { changes, .. } = f.stores.cache.changes_since(head, 1000).await.unwrap()
-    else {
-        panic!("gone");
+    let row = || async {
+        f.stores
+            .config
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT display_name, color FROM label_registry \
+                     WHERE account_id = 2 AND label_key = 'shared'",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+                )
+                .optional()?)
+            })
+            .await
+            .unwrap()
     };
-    let label: serde_json::Value = changes
-        .iter()
-        .filter(|c| c.entity == Entity::Label && c.entity_id == 0)
-        .find_map(|c| serde_json::from_str(c.payload.as_deref()?).ok())
-        .expect("label upsert");
+    eventually("registered", || async { row().await.is_some() }).await;
+    assert_eq!(
+        row().await,
+        Some(("Shared".to_owned(), Some("#00aa00".to_owned())))
+    );
+    let label = || async {
+        let Changes::Page { changes, .. } = f
+            .stores
+            .cache
+            .changes_since(head, 1000, tagmail_core::ChangeFilter::WithCalendar)
+            .await
+            .unwrap()
+        else {
+            panic!("gone");
+        };
+        changes
+            .iter()
+            .filter(|c| c.entity == Entity::Label && c.entity_id == 0)
+            .find_map(|c| serde_json::from_str::<serde_json::Value>(c.payload.as_deref()?).ok())
+    };
+    eventually("label upsert", || async { label().await.is_some() }).await;
+    let label = label().await.unwrap();
     assert_eq!(label["key"], "shared");
     assert_eq!(label["accountIds"], serde_json::json!([1, 2]));
     f.engine.shutdown().await;

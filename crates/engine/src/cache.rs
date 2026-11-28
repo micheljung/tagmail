@@ -328,6 +328,9 @@ pub struct W<'a> {
     arrivals: Vec<Arrival>,
     candidates: Arc<Mutex<InboxCandidates>>,
     candidate_changes: CandidateChanges,
+    /// Record recent invitations in `cal_inbox`.
+    invites: bool,
+    invited: bool,
 }
 
 impl<'a> W<'a> {
@@ -346,7 +349,34 @@ impl<'a> W<'a> {
             arrivals: Vec::new(),
             candidates: Arc::default(),
             candidate_changes: CandidateChanges::default(),
+            invites: false,
+            invited: false,
         }
+    }
+
+    pub fn with_invites(mut self, invites: bool) -> W<'a> {
+        self.invites = invites;
+        self
+    }
+
+    /// Whether this transaction added `cal_inbox` rows.
+    pub fn invited(&self) -> bool {
+        self.invited
+    }
+
+    /// Queues a message with a calendar part for the calendar runner
+    /// (appointments plan §3.1), unless it arrived too long ago.
+    fn queue_invite(&mut self, m: &NewMessage) -> Result<()> {
+        let oldest = self.now_ms / MS_PER_SEC - crate::calendar_hook::INVITE_MAX_AGE_SECS;
+        if !self.invites || m.received < oldest {
+            return Ok(());
+        }
+        self.invited |= self.conn.execute(
+            "INSERT OR IGNORE INTO cal_inbox (account_id, email_id, internal_date) \
+             VALUES (?1, ?2, ?3)",
+            params![self.account, m.email_id.as_str(), m.received],
+        )? > 0;
+        Ok(())
     }
 
     pub fn with_candidates(mut self, candidates: Arc<Mutex<InboxCandidates>>) -> W<'a> {
@@ -868,8 +898,9 @@ pub fn parse_addresses(json: Option<&str>) -> Vec<AddressDto> {
 fn insert_message(w: &mut W<'_>, m: &NewMessage) -> Result<i64> {
     w.conn.execute(
         "INSERT INTO message (account_id, email_id, msgid_hdr, in_reply_to, date, subject_norm, \
-         from_json, to_json, cc_json, subject, snippet, size, has_attachment, has_calendar) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+         from_json, to_json, cc_json, subject, snippet, size, has_attachment, has_calendar, \
+         received) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             w.account,
             m.email_id.as_str(),
@@ -885,6 +916,7 @@ fn insert_message(w: &mut W<'_>, m: &NewMessage) -> Result<i64> {
             m.size,
             m.has_attachment,
             m.has_calendar,
+            m.received,
         ],
     )?;
     let id = w.conn.last_insert_rowid();
@@ -944,11 +976,13 @@ pub fn add_messages(w: &mut W<'_>, mailbox: i64, fetched: &[Fetched]) -> Result<
                         params![id, m.snippet],
                     )?;
                 }
-                if m.has_calendar {
-                    w.conn.execute(
+                if m.has_calendar
+                    && w.conn.execute(
                         "UPDATE message SET has_calendar = 1 WHERE id = ?1 AND has_calendar = 0",
                         [id],
-                    )?;
+                    )? > 0
+                {
+                    w.queue_invite(m)?;
                 }
                 if unseen_recent
                     && w.live_inbox()? == Some(mailbox)
@@ -962,6 +996,9 @@ pub fn add_messages(w: &mut W<'_>, mailbox: i64, fetched: &[Fetched]) -> Result<
             }
             None => {
                 let id = insert_message(w, m)?;
+                if m.has_calendar {
+                    w.queue_invite(m)?;
+                }
                 if unseen_recent {
                     if w.live_inbox()? == Some(mailbox) {
                         w.push_arrival(id, m)?;

@@ -10,22 +10,23 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use tagmail_calendar::{EventStatus, ParticipationStatus};
+pub(crate) use tagmail_calendar::Window;
 use tagmail_core::AccountId;
 use tagmail_dav::{CalendarInfo, DavError, MultigetItem, ResourceRef};
 use tagmail_store::CacheDb;
 use tagmail_store::calendar::{self, CaldavStatus, CalendarRow, EventRow, InstanceRow};
-use time::{Date, OffsetDateTime, Time};
+use time::OffsetDateTime;
 use tokio::sync::{Notify, watch};
 use url::Url;
 
-use super::{CalAccount, CalDav, DavConnector};
+use super::invite::{self, MailAccess};
+use super::{CalAccount, CalDav, DavConnector, executor};
 use crate::supervisor::{Stores, jitter};
 
 /// Time between two polls of every account.
 pub(crate) const POLL_INTERVAL: Duration = Duration::from_secs(5 * 60);
-/// Days before and after today whose instances are kept in the cache.
-pub(crate) const WINDOW_DAYS: i64 = 400;
+/// Time between two refreshes of the authserv-id suggestions.
+const SUGGESTION_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 /// Resources fetched by one multiget and written in one transaction.
 const MULTIGET_BATCH: usize = tagmail_dav::MULTIGET_BATCH;
 /// Recurring events re-expanded per transaction when the window slides.
@@ -39,28 +40,6 @@ const FULL_LISTING_THRESHOLD: usize = 500;
 /// `sync-collection` answers that mean the report cannot be used on this
 /// calendar: bad request, forbidden, not implemented.
 const REPORT_UNUSABLE_STATUS: [u16; 3] = [400, 403, 501];
-
-/// The cached span of instances, Unix seconds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Window {
-    pub start: OffsetDateTime,
-    pub end: OffsetDateTime,
-}
-
-impl Window {
-    pub(crate) fn around(today: Date) -> Window {
-        let midnight = OffsetDateTime::new_utc(today, Time::MIDNIGHT);
-        let days = time::Duration::days(WINDOW_DAYS);
-        Window {
-            start: midnight - days,
-            end: midnight + days,
-        }
-    }
-
-    fn end_ts(&self) -> i64 {
-        self.end.unix_timestamp()
-    }
-}
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SyncError {
@@ -86,25 +65,6 @@ fn unix(t: OffsetDateTime) -> i64 {
     t.unix_timestamp()
 }
 
-fn status_text(status: EventStatus) -> &'static str {
-    match status {
-        EventStatus::Tentative => "TENTATIVE",
-        EventStatus::Confirmed => "CONFIRMED",
-        EventStatus::Cancelled => "CANCELLED",
-    }
-}
-
-fn partstat_text(partstat: &ParticipationStatus) -> String {
-    match partstat {
-        ParticipationStatus::NeedsAction => "NEEDS-ACTION".to_owned(),
-        ParticipationStatus::Accepted => "ACCEPTED".to_owned(),
-        ParticipationStatus::Declined => "DECLINED".to_owned(),
-        ParticipationStatus::Tentative => "TENTATIVE".to_owned(),
-        ParticipationStatus::Delegated => "DELEGATED".to_owned(),
-        ParticipationStatus::Other(other) => other.clone(),
-    }
-}
-
 /// A calendar object resource ready for `cache.db`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Parsed {
@@ -121,24 +81,20 @@ fn instances(
     window: &Window,
     href: &str,
 ) -> (Vec<InstanceRow>, Option<i64>) {
-    let expansion = cal.expand(window.start..window.end);
-    if expansion.truncated {
+    let (rows, truncated, edge) = cal.instances(window);
+    if truncated {
         tracing::warn!(
             href,
             "recurrence expansion was truncated; instances may be missing"
         );
     }
-    let recurring = cal.events.iter().any(|e| e.recurrence.is_some());
-    let edge = (recurring && (expansion.truncated || expansion.continues)).then(|| window.end_ts());
-    let rows = expansion
-        .occurrences
-        .iter()
-        .zip(expansion.recurrence_ids)
-        .map(|(o, recurrence_id)| InstanceRow {
-            start: unix(o.start),
-            end: unix(o.end),
-            recurrence_id,
-            all_day: cal.events[o.event].start.all_day,
+    let rows = rows
+        .into_iter()
+        .map(|i| InstanceRow {
+            start: i.start,
+            end: i.end,
+            recurrence_id: i.recurrence_id,
+            all_day: i.all_day,
         })
         .collect();
     (rows, edge)
@@ -160,31 +116,20 @@ pub(crate) fn parse(
             return None;
         }
     };
-    let master = cal.events.iter().find(|e| e.recurrence_id.is_none());
-    let main = master.or_else(|| cal.events.first())?;
-    let is_recurring = cal.events.iter().any(|e| e.recurrence.is_some());
-    let end_of = |e: &tagmail_calendar::Event| unix(e.end.as_ref().unwrap_or(&e.start).instant);
+    let summary = cal.summary(me)?;
     let (instances, window_edge) = instances(&cal, window, href);
     let event = EventRow {
         href: href.to_owned(),
         etag,
-        uid: main.uid.clone(),
-        sequence: master.map_or(0, |m| m.sequence),
-        dtstamp: master.and_then(|m| m.dtstamp).map(unix),
-        status: main.status.map(|s| status_text(s).to_owned()),
-        my_partstat: main
-            .attendees
-            .iter()
-            .find(|a| me.iter().any(|m| a.matches(m)))
-            .map(|a| partstat_text(&a.partstat)),
-        organizer: main.organizer.as_ref().map(|o| o.address.clone()),
-        is_recurring,
-        first_start: cal.events.iter().map(|e| unix(e.start.instant)).min(),
-        last_end: if is_recurring {
-            None
-        } else {
-            cal.events.iter().map(end_of).max()
-        },
+        uid: summary.uid,
+        sequence: summary.sequence,
+        dtstamp: summary.dtstamp,
+        status: summary.status,
+        my_partstat: summary.my_partstat,
+        organizer: summary.organizer,
+        is_recurring: summary.is_recurring,
+        first_start: summary.first_start,
+        last_end: summary.last_end,
         window_edge,
     };
     Some(Parsed {
@@ -612,18 +557,13 @@ pub(crate) struct Runner {
     pub connector: Arc<dyn DavConnector>,
     pub removing: Removing,
     pub broken: BrokenReports,
+    pub mail: Arc<dyn MailAccess>,
+    /// Wakes [`invitations`] after each poll.
+    pub inbox: Arc<Notify>,
 }
 
 impl Runner {
-    async fn sync_one(
-        &mut self,
-        id: AccountId,
-        window: Window,
-        now: i64,
-    ) -> SyncResult<AccountSync> {
-        let account = super::load(&self.stores, id)
-            .await?
-            .ok_or(crate::Error::NoAccount(id.0))?;
+    fn connect(&self, account: &CalAccount) -> SyncResult<Box<dyn CalDav>> {
         let host = account
             .config
             .confirmed_host
@@ -637,7 +577,19 @@ impl Runner {
                     .and_then(|u| u.host_str().map(str::to_owned))
             })
             .ok_or(DavError::NoCalendarHome)?;
-        let dav = self.connector.connect(&account.login, &host)?;
+        Ok(self.connector.connect(&account.login, &host)?)
+    }
+
+    async fn sync_one(
+        &mut self,
+        id: AccountId,
+        window: Window,
+        now: i64,
+    ) -> SyncResult<AccountSync> {
+        let account = super::load(&self.stores, id)
+            .await?
+            .ok_or(crate::Error::NoAccount(id.0))?;
+        let dav = self.connect(&account)?;
         sync_account(
             &self.stores.cache,
             &self.removing,
@@ -650,8 +602,51 @@ impl Runner {
         .await
     }
 
+    /// Runs the calendar ops that are due.
+    pub(crate) async fn run_ops(&mut self) {
+        let ops = match executor::due(&self.stores).await {
+            Ok(ops) => ops,
+            Err(e) => {
+                tracing::error!(error = %e, "cannot read calendar ops");
+                return;
+            }
+        };
+        let mut targets: Vec<AccountId> = ops.iter().map(|o| o.target).collect();
+        targets.sort_unstable();
+        targets.dedup();
+        for target in targets {
+            let of_target: Vec<_> = ops.iter().filter(|o| o.target == target).cloned().collect();
+            if removing(&self.removing, target) {
+                executor::defer(&self.stores, of_target, "the account is being removed").await;
+                continue;
+            }
+            let account = match super::load(&self.stores, target).await {
+                Ok(Some(account)) => account,
+                Ok(None) => {
+                    executor::defer(&self.stores, of_target, "no such account").await;
+                    continue;
+                }
+                Err(e) => {
+                    executor::defer(&self.stores, of_target, &e.to_string()).await;
+                    continue;
+                }
+            };
+            let dav = match self.connect(&account) {
+                Ok(dav) => dav,
+                Err(e) => {
+                    executor::defer(&self.stores, of_target, &e.to_string()).await;
+                    continue;
+                }
+            };
+            if executor::run_account(&self.stores, dav.as_ref(), &account, of_target).await {
+                self.mail.outbox_queued();
+            }
+        }
+    }
+
     /// One poll of every account, then the window slide.
     pub(crate) async fn poll(&mut self) {
+        self.run_ops().await;
         let now = OffsetDateTime::now_utc();
         let window = Window::around(now.date());
         let accounts = match self.stores.config.read(calendar::caldav_accounts).await {
@@ -696,24 +691,84 @@ impl Runner {
         if written > 0 {
             shrink(&self.stores.cache).await;
         }
+        self.inbox.notify_one();
     }
 }
 
-/// Polls until `stop`, every [`POLL_INTERVAL`] (jittered) or when woken.
-/// A stop also cancels a poll in progress.
-pub(crate) async fn run(mut runner: Runner, wake: Arc<Notify>, mut stop: watch::Receiver<bool>) {
+/// Processes queued invitations after each poll and refreshes the
+/// authserv-id suggestions, beside the runner: reading an uncached
+/// invitation waits for the account's IMAP worker, which must not hold up
+/// calendar ops. Wakes the runner's `ops` when it queued an apply.
+pub(crate) async fn invitations(
+    stores: Stores,
+    mail: Arc<dyn MailAccess>,
+    inbox: Arc<Notify>,
+    ops: Arc<Notify>,
+    mut stop: watch::Receiver<bool>,
+) {
+    let mut suggested: Option<tokio::time::Instant> = None;
+    loop {
+        tokio::select! {
+            _ = stop.wait_for(|stop| *stop) => return,
+            () = inbox.notified() => {}
+        }
+        let work = async {
+            let pass = invite::process_inbox(&stores, mail.as_ref()).await;
+            if pass.queued {
+                ops.notify_one();
+            }
+            if pass.more {
+                inbox.notify_one();
+            }
+            if suggested.is_none_or(|at| at.elapsed() >= SUGGESTION_INTERVAL) {
+                suggested = Some(tokio::time::Instant::now());
+                invite::refresh_suggestions(&stores, mail.as_ref()).await;
+            }
+        };
+        tokio::select! {
+            _ = stop.wait_for(|stop| *stop) => return,
+            () = work => {}
+        }
+    }
+}
+
+/// Polls until `stop`, every [`POLL_INTERVAL`] (jittered) or when `wake`d;
+/// `ops` and a retried op that is due run the ops alone, without a poll. A
+/// stop also cancels a poll in progress.
+pub(crate) async fn run(
+    mut runner: Runner,
+    wake: Arc<Notify>,
+    ops: Arc<Notify>,
+    mut stop: watch::Receiver<bool>,
+) {
+    executor::recover(&runner.stores).await;
+    let mut next_poll = tokio::time::Instant::now();
     loop {
         if *stop.borrow() {
             return;
         }
-        tokio::select! {
-            () = runner.poll() => {}
-            _ = stop.wait_for(|stop| *stop) => return,
+        if tokio::time::Instant::now() >= next_poll {
+            tokio::select! {
+                () = runner.poll() => {}
+                _ = stop.wait_for(|stop| *stop) => return,
+            }
+            next_poll = tokio::time::Instant::now() + jitter(POLL_INTERVAL);
+        } else {
+            tokio::select! {
+                () = runner.run_ops() => {}
+                _ = stop.wait_for(|stop| *stop) => return,
+            }
         }
+        let until_op = executor::next_due(&runner.stores).await.map(|at| {
+            let wait = at.saturating_sub(crate::executor::now_secs()).max(0);
+            tokio::time::Instant::now() + Duration::from_secs(wait.unsigned_abs())
+        });
+        let sleep_until = until_op.map_or(next_poll, |op| op.min(next_poll));
         tokio::select! {
             _ = stop.wait_for(|stop| *stop) => return,
-            () = wake.notified() => {}
-            () = tokio::time::sleep(jitter(POLL_INTERVAL)) => {}
+            () = wake.notified() => next_poll = tokio::time::Instant::now(),
+            () = ops.notified() => {}
+            () = tokio::time::sleep_until(sleep_until) => {}
         }
     }
 }
@@ -723,6 +778,7 @@ mod tests {
     use tagmail_dav::SyncPage;
     use tagmail_store::calendar::CaldavConfig;
     use tempfile::TempDir;
+    use time::Date;
     use time::macros::date;
     use zeroize::Zeroizing;
 

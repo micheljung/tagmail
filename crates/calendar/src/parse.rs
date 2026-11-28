@@ -103,9 +103,16 @@ fn event(component: &ICalendarComponent, index: usize, zones: &Zones) -> Result<
         .filter(|uid| !uid.trim().is_empty())
         .ok_or(EventError::MissingUid { index })?
         .to_string();
+    let recurrence_id = |default_tzid| {
+        component
+            .property(&ICalendarProperty::RecurrenceId)
+            .and_then(|entry| time_of(entry, default_tzid, zones))
+    };
+    // An instance CANCEL may omit DTSTART (RFC 5546 §3.2.5); it starts at its RECURRENCE-ID.
     let start = component
         .property(&ICalendarProperty::Dtstart)
-        .and_then(|entry| time_of(entry, None, zones));
+        .and_then(|entry| time_of(entry, None, zones))
+        .or_else(|| recurrence_id(None));
     let Some(start) = start else {
         return Err(EventError::InvalidStart { uid });
     };
@@ -116,9 +123,7 @@ fn event(component: &ICalendarComponent, index: usize, zones: &Zones) -> Result<
     let start_tzid = start.tzid.as_deref();
 
     Ok(Event {
-        recurrence_id: component
-            .property(&ICalendarProperty::RecurrenceId)
-            .and_then(|entry| time_of(entry, start_tzid, zones)),
+        recurrence_id: recurrence_id(start_tzid),
         sequence: component
             .property(&ICalendarProperty::Sequence)
             .and_then(|entry| entry.values.first())
@@ -235,7 +240,7 @@ fn uri_scheme(value: &str) -> Option<&str> {
     before_at.then(|| &value[..colon])
 }
 
-fn organizer(entry: &ICalendarEntry) -> Option<Organizer> {
+pub(crate) fn organizer(entry: &ICalendarEntry) -> Option<Organizer> {
     let (address, address_is_email) = address(entry)?;
     Some(Organizer {
         address,
@@ -245,7 +250,7 @@ fn organizer(entry: &ICalendarEntry) -> Option<Organizer> {
     })
 }
 
-fn attendee(entry: &ICalendarEntry) -> Option<Attendee> {
+pub(crate) fn attendee(entry: &ICalendarEntry) -> Option<Attendee> {
     let (address, address_is_email) = address(entry)?;
     Some(Attendee {
         address,

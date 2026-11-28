@@ -39,6 +39,7 @@
     }
   ],
   "method": "cancel",
+  "organizerChanged": false,
   "outdated": false,
   "scheduling": null,
   "senderAuth": "untrusted_config",

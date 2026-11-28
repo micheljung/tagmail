@@ -4,7 +4,7 @@ use std::ops::Range;
 use calcard::common::timezone::Tz;
 use calcard::icalendar::dates::TimeOrDelta;
 use calcard::icalendar::{
-    ICalendar, ICalendarComponent, ICalendarComponentType, ICalendarProperty,
+    ICalendar, ICalendarComponent, ICalendarComponentType, ICalendarEntry, ICalendarProperty,
 };
 use chrono::{DateTime, NaiveDateTime};
 use time::OffsetDateTime;
@@ -240,6 +240,10 @@ impl Calendar {
     /// `keep` selects; every other component is replaced by an empty one so
     /// component ids stay valid. calcard's scan budget is per call, which
     /// makes it per copy.
+    ///
+    /// calcard pairs an override with its series only when their SEQUENCEs
+    /// are equal, but organizers raise an override's SEQUENCE on their own
+    /// (RFC 5546 §3.2.2), so each override is given its master's here.
     fn masked(&self, keep: &impl Fn(&Event) -> bool) -> ICalendar {
         let kept: HashSet<u32> = self
             .events
@@ -247,6 +251,26 @@ impl Calendar {
             .zip(&self.components)
             .filter(|(event, _)| keep(event))
             .map(|(_, id)| *id)
+            .collect();
+        let mut master_sequence: HashMap<&str, Option<&ICalendarEntry>> = HashMap::new();
+        for (event, id) in self.events.iter().zip(&self.components) {
+            if event.recurrence_id.is_none() && kept.contains(id) && self.recurs(*id) {
+                master_sequence
+                    .entry(event.uid.as_str())
+                    .or_insert_with(|| {
+                        self.raw
+                            .components
+                            .get(*id as usize)
+                            .and_then(|master| master.property(&ICalendarProperty::Sequence))
+                    });
+            }
+        }
+        let overrides: HashMap<u32, Option<&ICalendarEntry>> = self
+            .events
+            .iter()
+            .zip(&self.components)
+            .filter(|(event, id)| event.recurrence_id.is_some() && kept.contains(id))
+            .filter_map(|(event, id)| Some((*id, *master_sequence.get(event.uid.as_str())?)))
             .collect();
         let components = self
             .raw
@@ -262,7 +286,15 @@ impl Calendar {
                         | ICalendarComponentType::Daylight
                 );
                 let selected = u32::try_from(id).is_ok_and(|id| kept.contains(&id));
-                if structural || selected {
+                let paired = u32::try_from(id).ok().and_then(|id| overrides.get(&id));
+                if let Some(sequence) = paired {
+                    let mut component = component.clone();
+                    component
+                        .entries
+                        .retain(|entry| entry.name != ICalendarProperty::Sequence);
+                    component.entries.extend(sequence.cloned());
+                    component
+                } else if structural || selected {
                     component.clone()
                 } else {
                     ICalendarComponent {

@@ -6,7 +6,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use serde::Serialize;
-use tagmail_core::{AccountId, ChangeCursor, ThreadId};
+use tagmail_core::{AccountId, ChangeCursor, ChangeFilter, ThreadId};
 
 use crate::compose::{parse_row_id, valid_address};
 use crate::dto::{
@@ -22,7 +22,7 @@ use crate::store::{
 };
 use crate::writes::WriteService;
 
-pub const API_VERSION: ApiVersion = ApiVersion { major: 1, minor: 3 };
+pub const API_VERSION: ApiVersion = ApiVersion { major: 1, minor: 4 };
 pub const MIN_CLIENT: ApiVersion = ApiVersion { major: 1, minor: 0 };
 /// Optional features of this build, as `VersionDto.features` reports them.
 pub const FEATURES: &[&str] = &[
@@ -306,7 +306,10 @@ impl<S: Store> Api<S> {
                 | RouteId::DiscoverCaldav
                 | RouteId::ConfirmCaldavHost
                 | RouteId::Calendars
-                | RouteId::UpdateCalendar => self.calendar_route(id, &params, req.body).await,
+                | RouteId::UpdateCalendar
+                | RouteId::CalendarRsvp
+                | RouteId::CalendarImport
+                | RouteId::CalendarApply => self.calendar_route(id, &params, req.body).await,
             },
             Err(Miss::MethodNotAllowed) => Ok(Response::error(
                 405,
@@ -455,14 +458,20 @@ impl<S: Store> Api<S> {
                 }
             },
         };
-        Ok(match self.store.changes_since(since, limit).await? {
-            ChangePage::Gone => Response::json(410, &gone_error()),
-            ChangePage::Page {
-                changes,
-                next,
-                more,
-            } => Response::json(200, &change_page_dto(changes, next, more)),
-        })
+        Ok(
+            match self
+                .store
+                .changes_since(since, limit, change_filter(query))
+                .await?
+            {
+                ChangePage::Gone => Response::json(410, &gone_error()),
+                ChangePage::Page {
+                    changes,
+                    next,
+                    more,
+                } => Response::json(200, &change_page_dto(changes, next, more)),
+            },
+        )
     }
 
     fn engine(&self) -> Result<&Arc<dyn AccountRegistry>, Response> {
@@ -638,6 +647,19 @@ pub(crate) fn query_param(query: &str, name: &str) -> Option<String> {
     form_urlencoded::parse(query.as_bytes())
         .find(|(k, _)| k == name)
         .map(|(_, v)| v.into_owned())
+}
+
+/// The change filter an `include=` query asks for, e.g. `include=calendar`;
+/// clients that send none never see calendar entities.
+pub fn change_filter(query: &str) -> ChangeFilter {
+    let calendar = form_urlencoded::parse(query.as_bytes())
+        .filter(|(k, _)| k == "include")
+        .any(|(_, v)| v.split(',').any(|i| i == ChangeFilter::INCLUDE_CALENDAR));
+    if calendar {
+        ChangeFilter::WithCalendar
+    } else {
+        ChangeFilter::Mail
+    }
 }
 
 pub(crate) fn valid_host(host: &str) -> bool {
@@ -912,5 +934,18 @@ mod tests {
             Some("00000000000000ab:3")
         );
         assert_eq!(query_param("a=1", "b"), None);
+    }
+
+    #[test]
+    fn include_calendar_selects_the_calendar_filter() {
+        assert_eq!(change_filter("since=x"), ChangeFilter::Mail);
+        assert_eq!(change_filter("include=mail"), ChangeFilter::Mail);
+        for q in [
+            "include=calendar",
+            "since=x&include=mail,calendar",
+            "include=x&include=calendar",
+        ] {
+            assert_eq!(change_filter(q), ChangeFilter::WithCalendar, "{q}");
+        }
     }
 }

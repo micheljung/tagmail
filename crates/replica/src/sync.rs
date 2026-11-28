@@ -30,6 +30,8 @@ pub const SWEEP_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 const CLOSE_WAIT: Duration = Duration::from_secs(5);
 const CLOSE_POLL: Duration = Duration::from_millis(20);
 const EVENT_BUFFER: usize = 64;
+/// Why queued calendar writes fail once the server drops calendars.
+pub const CALENDAR_DISABLED: &str = "Calendar disabled on the server";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settings {
@@ -81,6 +83,10 @@ pub struct Replica {
     settings: Mutex<Settings>,
     store: RwLock<Option<Arc<SqliteStore>>>,
     cursor: Mutex<Option<ChangeCursor>>,
+    /// Whether the installed replica holds calendar records, from its meta.
+    calendar: AtomicBool,
+    /// The effective include set of the last version probe.
+    calendar_wanted: AtomicBool,
     feed: Arc<ChangeFeed>,
     phase: watch::Sender<Phase>,
     events: broadcast::Sender<ReplicaEvent>,
@@ -102,14 +108,14 @@ impl Replica {
         if durable.bind_server(client.server())? == Binding::Changed {
             tracing::warn!(server = %client.server(), "paired with another server; earlier unsent changes stay local");
         }
-        let (store, cursor) = match db::open(&layout, Expected::current(), None)? {
+        let (store, cursor, calendar) = match db::open(&layout, Expected::current(), None)? {
             Opened::Ready(dbs) => {
                 let (store, meta) = dbs.into_store().await?;
-                (Some(Arc::new(store)), Some(meta.cursor))
+                (Some(Arc::new(store)), Some(meta.cursor), meta.calendar)
             }
             Opened::NeedsBootstrap(why) => {
                 tracing::info!(?why, "replica needs a bootstrap");
-                (None, None)
+                (None, None, false)
             }
         };
         let head = match &store {
@@ -133,6 +139,8 @@ impl Replica {
             settings: Mutex::new(settings),
             store: RwLock::new(store),
             cursor: Mutex::new(cursor),
+            calendar: AtomicBool::new(calendar),
+            calendar_wanted: AtomicBool::new(calendar),
             feed,
             phase: watch::channel(Phase::Starting).0,
             events: broadcast::channel(EVENT_BUFFER).0,
@@ -201,6 +209,11 @@ impl Replica {
 
     pub fn server_cursor(&self) -> Option<ChangeCursor> {
         *self.cursor.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether the replica holds calendar records and pulls their changes.
+    pub fn calendar(&self) -> bool {
+        self.calendar.load(Ordering::Acquire)
     }
 
     fn set_phase(&self, phase: Phase) {
@@ -279,13 +292,7 @@ impl Replica {
     /// One connection: gate, bootstrap if needed, catch up, then pull on
     /// every doorbell until the stream ends.
     async fn session(&self) -> Result<()> {
-        if let Compat::UpdateRequired { server, min_client } = version::probe(&self.client).await? {
-            self.set_phase(Phase::UpdateRequired { server, min_client });
-            return Err(Error::UpdateRequired);
-        }
-        if self.store().is_none() {
-            self.rebootstrap().await?;
-        }
+        self.gate().await?;
         self.sync_once().await?;
         let cursor = self
             .server_cursor()
@@ -301,6 +308,52 @@ impl Replica {
         Ok(())
     }
 
+    /// Checks the server version and brings the replica to the effective
+    /// include set: a first bootstrap carries it, a wider one is backfilled
+    /// by a bootstrap, a narrower one purges calendar records.
+    pub async fn gate(&self) -> Result<()> {
+        let (compat, calendar) = version::probe(&self.client).await?;
+        if let Compat::UpdateRequired { server, min_client } = compat {
+            self.set_phase(Phase::UpdateRequired { server, min_client });
+            return Err(Error::UpdateRequired);
+        }
+        self.calendar_wanted.store(calendar, Ordering::Release);
+        if self.store().is_none() {
+            return self.rebootstrap().await;
+        }
+        match (self.calendar(), calendar) {
+            (false, true) => self.rebootstrap().await,
+            (true, false) => self.drop_calendar().await,
+            _ => Ok(()),
+        }
+    }
+
+    /// Purges calendar records once the server no longer offers them.
+    async fn drop_calendar(&self) -> Result<()> {
+        let _guard = self.sync_lock.lock().await;
+        let Some(store) = self.store() else {
+            return Ok(());
+        };
+        store
+            .config()
+            .write(|tx| crate::calendar::purge_config(tx))
+            .await?;
+        let epoch = store.cache().epoch();
+        let head = store
+            .cache()
+            .write(move |tx| {
+                crate::calendar::purge_cache(tx)?;
+                db::set_include(tx, false)?;
+                tagmail_store::changes::head(tx, epoch)
+            })
+            .await?;
+        self.calendar.store(false, Ordering::Release);
+        self.feed.publish(head);
+        let failed = self.durable.fail_cal_intents(CALENDAR_DISABLED)?;
+        drop(_guard);
+        self.log_cal(failed).await
+    }
+
     /// Pulls everything new, sweeps when due and starts a prefetch.
     pub async fn sync_once(&self) -> Result<()> {
         let _guard = self.sync_lock.lock().await;
@@ -308,7 +361,14 @@ impl Replica {
             return Err(Error::Client(ClientError::Gone));
         };
         let settings = self.settings();
-        let pulled = pull::pull(&self.client, &store, since, settings.window_days).await?;
+        let pulled = pull::pull(
+            &self.client,
+            &store,
+            since,
+            settings.window_days,
+            self.calendar(),
+        )
+        .await?;
         if let Some(cursor) = pulled.cursor {
             *self.cursor.lock().unwrap_or_else(|e| e.into_inner()) = Some(cursor);
         }
@@ -326,6 +386,11 @@ impl Replica {
         let start = window::window_start(now(), settings.window_days);
         if self.sweep_due() {
             window::sweep(&store, start).await?;
+            let today = now();
+            store
+                .cache()
+                .write(move |tx| crate::calendar::slide(tx, today))
+                .await?;
         }
         self.spawn_prefetch(store, start, settings.raw_cap_bytes);
         drop(_guard);
@@ -362,8 +427,10 @@ impl Replica {
         let old_dir = self.layout.replica();
         self.set_phase(Phase::Bootstrapping { records: 0 });
         let settings = self.settings();
+        let calendar = self.calendar_wanted.load(Ordering::Acquire);
         let snapshot =
-            bootstrap::import_snapshot(&self.client, &self.layout, settings.window_days).await?;
+            bootstrap::import_snapshot(&self.client, &self.layout, settings.window_days, calendar)
+                .await?;
         self.set_phase(Phase::Bootstrapping {
             records: snapshot.records,
         });
@@ -384,6 +451,7 @@ impl Replica {
             .unwrap_or_else(|e| e.into_inner())
             .replace(Arc::new(store));
         *self.cursor.lock().unwrap_or_else(|e| e.into_inner()) = Some(meta.cursor);
+        self.calendar.store(meta.calendar, Ordering::Release);
         self.feed.publish(head);
         *self.last_sweep.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
         let _ = self.events.send(ReplicaEvent::Replaced);

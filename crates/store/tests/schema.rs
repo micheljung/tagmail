@@ -631,7 +631,7 @@ async fn config_v5_gives_identityless_accounts_a_default() {
 
 #[test]
 fn schema_constants_count_the_migrations() {
-    assert_eq!((CONFIG_SCHEMA, CACHE_SCHEMA), (9, 6));
+    assert_eq!((CONFIG_SCHEMA, CACHE_SCHEMA), (10, 7));
 }
 
 #[tokio::test]
@@ -813,6 +813,75 @@ async fn config_v8_ties_push_subscriptions_to_their_session() {
         .await
         .unwrap();
     assert_eq!(left, ["https://push.example/b1"]);
+    integrity(&db).await;
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn config_v10_keeps_existing_cal_ops() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("config.db");
+    {
+        let conn = open_raw(&path);
+        for sql in [
+            include_str!("../migrations/config/V1__init.sql"),
+            include_str!("../migrations/config/V2__image_sender.sql"),
+            include_str!("../migrations/config/V3__compose.sql"),
+            include_str!("../migrations/config/V4__outbox_file.sql"),
+            include_str!("../migrations/config/V5__multi_account.sql"),
+            include_str!("../migrations/config/V6__default_identity.sql"),
+            include_str!("../migrations/config/V7__draft_client_id.sql"),
+            include_str!("../migrations/config/V8__push_subscription.sql"),
+            include_str!("../migrations/config/V9__caldav.sql"),
+        ] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", 9).unwrap();
+        conn.execute_batch(
+            "INSERT INTO account (id, name, imap_host, imap_port, imap_tls, smtp_host, \
+             smtp_port, smtp_tls, username, secret_ct, secret_nonce) \
+             VALUES (1, 'a', 'h', 993, 'tls', 'h', 465, 'tls', 'u', x'00', x'00'); \
+             INSERT INTO caldav_trust (account_id, authserv_id) VALUES (1, 'mx.example.com'); \
+             INSERT INTO cal_op (op_id, account_id, target_account_id, uid, kind, partstat, \
+             reply_op_id, state) VALUES ('o1', 1, 1, 'u1', 'rsvp', 'ACCEPTED', 'o1#reply', 'failed');",
+        )
+        .unwrap();
+    }
+    let db = ConfigDb::open(&path).unwrap();
+    assert_eq!(user_version(&db).await, CONFIG_SCHEMA);
+    let row = db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT c.state, c.reply_op_id, c.op_seq, c.reply_cancelled, c.attendee, \
+                 t.authserv_id, t.suggestion FROM cal_op c, caldav_trust t WHERE c.op_id = 'o1'",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, bool>(3)?,
+                        r.get::<_, Option<String>>(4)?,
+                        r.get::<_, String>(5)?,
+                        r.get::<_, Option<String>>(6)?,
+                    ))
+                },
+            )?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        row,
+        (
+            "failed".to_owned(),
+            "o1#reply".to_owned(),
+            0,
+            false,
+            None,
+            "mx.example.com".to_owned(),
+            None
+        )
+    );
     integrity(&db).await;
     db.close().await.unwrap();
 }

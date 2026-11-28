@@ -127,6 +127,18 @@ pub enum EntityDto {
     Op,
     /// A label rename or delete job (`LabelJobDto.id`); deleted when done.
     LabelJob,
+    /// A cached calendar; only with `include=calendar`.
+    Calendar,
+    /// A cached calendar object resource; only with `include=calendar`.
+    Event,
+    /// A calendar write's status: `upsert` carries an `OpDto`; `id` is the
+    /// op's seq. Only with `include=calendar`.
+    CalOp,
+    /// A due reminder; only with `include=calendar`.
+    Reminder,
+    /// An entity this client does not know; skipped.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]

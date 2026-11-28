@@ -115,7 +115,7 @@ pub trait WriteService: Send + Sync + 'static {
     fn label_jobs(&self) -> BoxFuture<WriteResult<Vec<LabelJobDto>>>;
 }
 
-fn write_error(e: WriteError) -> Response {
+pub fn write_error(e: WriteError) -> Response {
     match e {
         WriteError::NotFound(m) => Response::error(404, "not_found", m),
         WriteError::Invalid { field, message } => Response::json(
@@ -145,7 +145,7 @@ fn parse<T: DeserializeOwned>(body: &[u8]) -> Result<T, Response> {
     serde_json::from_slice(body).map_err(|e| bad_request(format!("invalid JSON: {e}")))
 }
 
-fn valid_op_id(id: &str) -> bool {
+pub fn valid_op_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= MAX_OP_ID_LEN
         && id
@@ -161,7 +161,9 @@ pub(crate) fn op_request(dto: NewOpDto) -> Result<OpRequest, Response> {
             "1 to 64 characters of letters, digits, '-', '_' or '.'",
         );
     }
-    let kind = OpKind::from(dto.kind);
+    let Ok(kind) = OpKind::try_from(dto.kind) else {
+        return invalid("kind", "calendar ops are submitted through /api/calendar");
+    };
     let thread_ids = dto.thread_ids.unwrap_or_default();
     let email_ids = dto.email_ids.unwrap_or_default();
     if thread_ids.is_empty() && email_ids.is_empty() {
@@ -534,8 +536,9 @@ mod tests {
         for k in OpKind::ALL {
             let json = serde_json::to_string(&OpKindDto::from(k)).unwrap();
             assert_eq!(json, format!("\"{}\"", k.as_str()));
-            assert_eq!(OpKind::from(OpKindDto::from(k)), k);
+            assert_eq!(OpKind::try_from(OpKindDto::from(k)), Ok(k));
         }
+        assert!(OpKind::try_from(OpKindDto::CalRsvp).is_err());
     }
 
     #[test]

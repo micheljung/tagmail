@@ -2,6 +2,8 @@
 //! two years lists the same views and, online, answers the benchmark
 //! queries with the server's hits, out-of-window ones included.
 
+#[cfg(feature = "calendar")]
+mod calendar_seed;
 mod fixture;
 
 use fixture::{DAY, Stack, get, ids, now, search_path};
@@ -230,4 +232,41 @@ async fn a_100k_replica_matches_the_server() {
     let open = get(&router, &format!("/api/messages/{OLD_RAW}/render")).await;
     assert_eq!(open.status, 200, "{}", String::from_utf8_lossy(&open.body));
     assert!(String::from_utf8_lossy(&open.body).contains("from the archive"));
+
+    #[cfg(feature = "calendar")]
+    calendar_parity(&stack, &replica).await;
+}
+
+/// 2 calendars × 500 events: the replica, which expands them itself,
+/// lists the server's instances for a past, a current and a future range.
+#[cfg(feature = "calendar")]
+async fn calendar_parity(stack: &fixture::Stack, replica: &tagmail_replica::Replica) {
+    use tagmail_api_core::calendar_dto::CalendarTargetDto;
+
+    const EVENTS: usize = 500;
+    const CALENDARS: [&str; 2] = ["/cal/work/", "/cal/home/"];
+    let server = stack.server().store();
+    let today = now();
+    calendar_seed::seed(server, stack.account, &CALENDARS, EVENTS, today).await;
+    replica.gate().await.unwrap();
+    assert!(replica.calendar());
+    let local = replica.store().unwrap();
+    let work = vec![CalendarTargetDto {
+        account_id: stack.account,
+        calendar_href: CALENDARS[0].into(),
+    }];
+    let window = tagmail_calendar::Window::around_unix(today);
+    for (range, calendars) in [
+        (window.start_ts()..today, Vec::new()),
+        (today..window.end_ts(), work),
+        (window.start_ts()..window.end_ts(), Vec::new()),
+    ] {
+        let theirs = server
+            .events_in(range.clone(), calendars.clone())
+            .await
+            .unwrap();
+        let ours = local.events_in(range.clone(), calendars).await.unwrap();
+        assert!(!theirs.is_empty(), "{range:?}");
+        assert_eq!(ours, theirs, "{range:?}");
+    }
 }

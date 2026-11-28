@@ -9,17 +9,20 @@ use std::time::Duration;
 use futures_util::stream;
 use reqwest::Method as HttpMethod;
 use tagmail_api_core::api::{API_CSP, CURSOR_HEADER, JSON, OCTET_STREAM};
+use tagmail_api_core::calendar_dto::{AutoApplyDto, SenderAuthDto};
 use tagmail_api_core::compose::{
     Compose, MAX_UPLOAD, NewUpload, clean_content_type, clean_file_name, error_response,
 };
 use tagmail_api_core::dto::ApiErrorDto;
 use tagmail_api_core::routes::{self, RouteId};
 use tagmail_api_core::store::View;
+use tagmail_api_core::writes::Submitted;
 use tagmail_api_core::{
     Api, Method, PARTIAL_HEADER, Request, Response, Store, id_index, offline_error,
 };
-use tagmail_core::ThreadId;
+use tagmail_core::{MessageRowId, ThreadId};
 
+use crate::cal_intents::CalKind;
 use crate::client::ClientError;
 use crate::compose::DesktopCompose;
 use crate::store::{DesktopImages, DesktopRegistry, ReplicaStore};
@@ -61,9 +64,23 @@ fn server_only(route: RouteId) -> bool {
             | RouteId::UpdateCaldavSettings
             | RouteId::DiscoverCaldav
             | RouteId::ConfirmCaldavHost
-            | RouteId::Calendars
             | RouteId::UpdateCalendar
     )
+}
+
+/// Routes served from calendar records, while the replica holds them.
+fn calendar_read(route: RouteId) -> bool {
+    matches!(route, RouteId::Calendars)
+}
+
+/// Calendar writes, queued as intents while the replica holds calendars.
+fn calendar_write(route: RouteId) -> Option<CalKind> {
+    match route {
+        RouteId::CalendarRsvp => Some(CalKind::Rsvp),
+        RouteId::CalendarImport => Some(CalKind::Import),
+        RouteId::CalendarApply => Some(CalKind::Apply),
+        _ => None,
+    }
 }
 
 fn http_method(m: Method) -> HttpMethod {
@@ -136,10 +153,24 @@ impl Router {
             return self.upload(req.body, content_type).await;
         }
         let route = route_of(req);
-        if let Some((route, _)) = &route
-            && server_only(*route)
-        {
-            return self.pass_through(req).await;
+        if let Some((route, id)) = &route {
+            let calendar = self.replica.calendar();
+            if server_only(*route) || (calendar_read(*route) && !calendar) {
+                return self.pass_through(req).await;
+            }
+            if let Some(kind) = calendar_write(*route) {
+                if !calendar {
+                    return self.pass_through(req).await;
+                }
+                return match self.replica.submit_cal(kind, req.body).await {
+                    Ok(Submitted::Created(op)) => Response::json(202, &op),
+                    Ok(Submitted::Existing(op)) => Response::json(200, &op),
+                    Err(e) => tagmail_api_core::writes::write_error(e),
+                };
+            }
+            if *route == RouteId::Invitation {
+                return self.invitation(req, id).await;
+            }
         }
         let api = match self.api() {
             Ok(api) => api,
@@ -160,6 +191,40 @@ impl Router {
             && !self.replica.client().is_online()
         {
             return offline_error(OLDER_MESSAGE);
+        }
+        resp
+    }
+
+    /// The server judges the sender and auto-apply, so the card comes from
+    /// it while online. Offline, a cached message's card is built locally
+    /// without those verdicts.
+    async fn invitation(&self, req: Request<'_>, id: &str) -> Response {
+        if self.replica.client().is_online() {
+            return self.pass_through(req).await;
+        }
+        let api = match self.api() {
+            Ok(api) => api,
+            Err(resp) => return resp,
+        };
+        let cached = match id.parse::<i64>() {
+            Ok(id) => api.store().calendar_source(MessageRowId(id)).await,
+            Err(_) => return api.handle(req).await,
+        };
+        match cached {
+            Ok(Some(_)) => {}
+            Ok(None) => return offline_error(NEEDS_CONNECTION),
+            Err(e) => {
+                tracing::error!(error = %e, "reading an invitation offline");
+                return Response::error(500, "internal", "internal error");
+            }
+        }
+        let mut resp = api.handle(req).await;
+        if resp.status == 200
+            && let Ok(mut card) = serde_json::from_slice::<serde_json::Value>(&resp.body)
+        {
+            card["senderAuth"] = serde_json::to_value(SenderAuthDto::Unknown).unwrap_or_default();
+            card["autoApply"] = serde_json::to_value(AutoApplyDto::None).unwrap_or_default();
+            resp.body = serde_json::to_vec(&card).unwrap_or(resp.body);
         }
         resp
     }

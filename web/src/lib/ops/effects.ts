@@ -124,7 +124,7 @@ export function inverseOf(
 			const box = mailboxOf(view);
 			return box === null ? null : [{ ...base, kind: 'move', mailboxId: box }];
 		}
-		case 'delete':
+		default:
 			return null;
 	}
 }
@@ -183,6 +183,8 @@ export function describeDone(intent: OpIntent, names: Names): string {
 			return `Reported ${what} as spam`;
 		case 'delete':
 			return `Deleted ${what} forever`;
+		default:
+			return 'Calendar updated';
 	}
 }
 
@@ -215,5 +217,7 @@ export function describeIntent(intent: OpIntent, names: Names): string {
 			return `Report ${what} as spam`;
 		case 'delete':
 			return `Delete ${what} forever`;
+		default:
+			return 'Change calendar';
 	}
 }

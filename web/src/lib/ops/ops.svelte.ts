@@ -1,5 +1,6 @@
 import type { ChangesDto, ThreadRowDto } from '@tagmail/api-types';
-import type { NewOpDto, OpDto, OpStatusDto, ViewId } from '../transport';
+import { describeCalendarOp } from '../calendar/opState';
+import type { CalOpInfoDto, NewOpDto, OpDto, OpStatusDto, ViewId } from '../transport';
 import {
 	describeDone,
 	describeIntent,
@@ -81,6 +82,8 @@ export interface TrackedOp {
 	serverKnown: boolean;
 	/** Its effects are showing in this tab. */
 	applied: boolean;
+	/** Set for calendar ops. */
+	calendar: CalOpInfoDto | null;
 	createdAt: number;
 	removed: { list: OpList; entries: Removed[] }[];
 }
@@ -118,6 +121,7 @@ export class OpsStore {
 	readonly #host: OpsHost;
 	readonly #ops = new Map<string, TrackedOp>();
 	readonly #settled = new Set<(op: TrackedOp) => void>();
+	readonly #calendarDone = new Set<(op: TrackedOp) => void>();
 
 	constructor(host: OpsHost) {
 		this.#host = host;
@@ -127,6 +131,33 @@ export class OpsStore {
 	onSettled(fn: (op: TrackedOp) => void): () => void {
 		this.#settled.add(fn);
 		return () => this.#settled.delete(fn);
+	}
+
+	/** Called when a calendar op is done, so cards can reload what it changed. */
+	onCalendarDone(fn: (op: TrackedOp) => void): () => void {
+		this.#calendarDone.add(fn);
+		return () => this.#calendarDone.delete(fn);
+	}
+
+	newOpId(): string {
+		return this.#host.uuid?.() ?? crypto.randomUUID();
+	}
+
+	/** The newest unconfirmed calendar op on the event `uid`. */
+	calendarOp(uid: string): TrackedOp | undefined {
+		void this.version;
+		let found: TrackedOp | undefined;
+		for (const op of this.#ops.values()) if (op.calendar?.uid === uid) found = { ...op };
+		return found;
+	}
+
+	/** Starts following a calendar op the server accepted. */
+	track(dto: OpDto): void {
+		const known = this.#ops.get(dto.opId);
+		if (known) return this.#update(known, dto);
+		if (dto.status === 'done') {
+			for (const fn of this.#calendarDone) fn(this.#tracked(dto));
+		} else this.#adopt(dto);
 	}
 
 	get(opId: string): TrackedOp | undefined {
@@ -180,6 +211,7 @@ export class OpsStore {
 	}
 
 	describe(op: TrackedOp): string {
+		if (op.calendar) return describeCalendarOp(op.intent.kind, op.calendar);
 		return describeIntent(op.intent, this.#host.names());
 	}
 
@@ -189,7 +221,7 @@ export class OpsStore {
 		options: { view?: ViewId | null; origins?: Origins; undoOf?: TrackedOp; quiet?: boolean } = {}
 	): TrackedOp {
 		const op: TrackedOp = {
-			opId: this.#host.uuid?.() ?? crypto.randomUUID(),
+			opId: this.newOpId(),
 			intent,
 			view: options.view ?? null,
 			origins: options.origins,
@@ -197,6 +229,7 @@ export class OpsStore {
 			error: null,
 			serverKnown: false,
 			applied: false,
+			calendar: null,
 			createdAt: Date.now(),
 			removed: []
 		};
@@ -235,7 +268,7 @@ export class OpsStore {
 		if (!op || op.status !== 'failed') return;
 		op.status = 'sending';
 		op.error = null;
-		this.#activate(op);
+		if (!op.calendar) this.#activate(op);
 		this.#host.notify.dismissKey(`op:${op.opId}`);
 		this.version++;
 		if (!op.serverKnown) return this.#send(op, 0);
@@ -273,17 +306,7 @@ export class OpsStore {
 				known.serverKnown = true;
 				continue;
 			}
-			this.#ops.set(dto.opId, {
-				opId: dto.opId,
-				intent: intentOf(dto),
-				view: null,
-				status: dto.status,
-				error: dto.error ?? null,
-				serverKnown: true,
-				applied: false,
-				createdAt: dto.createdAt * 1000,
-				removed: []
-			});
+			this.#ops.set(dto.opId, this.#tracked(dto));
 		}
 		this.version++;
 	}
@@ -291,7 +314,7 @@ export class OpsStore {
 	/** Change feed: `op` entities carry the executor's verdict. */
 	changes(page: ChangesDto): void {
 		for (const change of page.changes) {
-			if (change.entity !== 'op') continue;
+			if (change.entity !== 'op' && change.entity !== 'cal_op') continue;
 			const payload = (change.payload ?? {}) as OpChange;
 			const op = payload.opId ? this.#ops.get(payload.opId) : undefined;
 			if (change.op.kind === 'delete') {
@@ -301,6 +324,13 @@ export class OpsStore {
 			if (!payload.opId || !payload.status) continue;
 			if (!op) {
 				if (payload.status !== 'done' && payload.kind) this.#adopt(payload as OpDto);
+				else if (payload.calendar) {
+					for (const fn of this.#calendarDone) fn(this.#tracked(payload as OpDto));
+				}
+				continue;
+			}
+			if (op.calendar) {
+				this.#update(op, payload as OpDto);
 				continue;
 			}
 			op.serverKnown = true;
@@ -313,17 +343,32 @@ export class OpsStore {
 
 	/** An op another tab or device started: listed, its effect is in the server's rows. */
 	#adopt(dto: OpDto): void {
-		this.#ops.set(dto.opId, {
+		this.#ops.set(dto.opId, this.#tracked(dto));
+		this.version++;
+	}
+
+	#tracked(dto: OpDto): TrackedOp {
+		return {
 			opId: dto.opId,
 			intent: intentOf(dto),
 			view: null,
 			status: dto.status,
-			error: dto.error,
+			error: dto.error ?? null,
 			serverKnown: true,
 			applied: false,
+			calendar: dto.calendar,
 			createdAt: dto.createdAt * 1000,
 			removed: []
-		});
+		};
+	}
+
+	/** A calendar op's verdict is shown in the panel and its card, not as a toast. */
+	#update(op: TrackedOp, dto: OpDto): void {
+		op.serverKnown = true;
+		op.calendar = dto.calendar ?? op.calendar;
+		if (dto.status === 'done') return this.#done(op);
+		op.status = dto.status;
+		op.error = dto.status === 'failed' ? dto.error : null;
 		this.version++;
 	}
 
@@ -356,6 +401,7 @@ export class OpsStore {
 	#ack(op: TrackedOp, ack: OpDto): void {
 		if (!this.#ops.has(op.opId)) return;
 		op.serverKnown = true;
+		if (op.calendar) return this.#update(op, ack);
 		if (ack.status === 'done') return this.#done(op);
 		if (ack.status === 'failed') {
 			return this.#fail(op, ack.error ?? 'The mail server refused the change');
@@ -377,6 +423,7 @@ export class OpsStore {
 		this.#ops.delete(op.opId);
 		this.version++;
 		if (wasApplied) for (const fn of this.#settled) fn(op);
+		if (op.calendar) for (const fn of this.#calendarDone) fn(op);
 	}
 
 	#fail(op: TrackedOp, e: unknown): void {

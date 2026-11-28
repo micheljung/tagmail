@@ -10,10 +10,12 @@ use reqwest::Method;
 use tagmail_api_core::dto::{AddressDto, ChangeDto, ChangeOpDto, ChangesDto, EntityDto};
 use tagmail_api_core::replica_dto::{MAX_ROWS_IDS, ReplicaRowsDto};
 use tagmail_api_core::sqlite_store::SqliteStore;
-use tagmail_core::ChangeCursor;
+use tagmail_core::{ChangeCursor, ChangeFilter};
 use tagmail_store::changes::{self, ChangeOp, Entity, NewChange};
 
 use crate::apply;
+use crate::bootstrap::INCLUDE_CALENDAR;
+use crate::calendar;
 use crate::client::ServerClient;
 use crate::db;
 use crate::error::{Error, Result};
@@ -41,6 +43,8 @@ struct Plan {
     labels: BTreeSet<i64>,
     threads: BTreeSet<i64>,
     messages: BTreeSet<i64>,
+    calendars: BTreeSet<i64>,
+    events: BTreeSet<i64>,
     /// Mailboxes of `bulk` changes with the disjoint UID ranges they
     /// added, `None` for all of the mailbox.
     bulk: BTreeMap<i64, Option<Vec<[u32; 2]>>>,
@@ -53,6 +57,9 @@ impl Plan {
     fn new(changes: &[ChangeDto], writes: &mut Vec<ChangeDto>) -> Plan {
         let mut plan = Plan::default();
         for c in changes {
+            if matches!(c.entity, EntityDto::Unknown | EntityDto::Reminder) {
+                continue;
+            }
             let Some(entity) = local_entity(c.entity) else {
                 writes.push(c.clone());
                 continue;
@@ -105,12 +112,15 @@ impl Plan {
             EntityDto::Label => &mut self.labels,
             EntityDto::Thread => &mut self.threads,
             EntityDto::Message => &mut self.messages,
+            EntityDto::Calendar => &mut self.calendars,
+            EntityDto::Event => &mut self.events,
             _ => return None,
         })
     }
 
-    /// Rows requests of at most [`MAX_ROWS_IDS`] ids per kind.
-    fn requests(&self, window_days: u32) -> Vec<ReplicaRowsDto> {
+    /// Rows requests of at most [`MAX_ROWS_IDS`] ids per kind; `calendar`
+    /// adds the accounts' calendar settings.
+    fn requests(&self, window_days: u32, calendar: bool) -> Vec<ReplicaRowsDto> {
         let sets = [
             &self.accounts,
             &self.identities,
@@ -118,6 +128,8 @@ impl Plan {
             &self.labels,
             &self.threads,
             &self.messages,
+            &self.calendars,
+            &self.events,
         ];
         let chunk = |ids: &BTreeSet<i64>, i: usize| -> Vec<i64> {
             ids.iter()
@@ -142,6 +154,13 @@ impl Plan {
                 mailbox: None,
                 uids: None,
                 window_days: Some(window_days),
+                calendars: chunk(&self.calendars, i),
+                events: chunk(&self.events, i),
+                include: if calendar {
+                    vec![ChangeFilter::INCLUDE_CALENDAR.to_owned()]
+                } else {
+                    Vec::new()
+                },
             })
             .collect()
     }
@@ -166,7 +185,7 @@ fn bulk_uids(payload: Option<&serde_json::Value>) -> Option<[u32; 2]> {
     serde_json::from_value(payload?.get("uids")?.clone()).ok()
 }
 
-/// `op`, `outbox` and label jobs are not replica rows.
+/// `op`, `outbox`, `cal_op` and label jobs are not replica rows.
 fn local_entity(entity: EntityDto) -> Option<Entity> {
     Some(match entity {
         EntityDto::Account => Entity::Account,
@@ -175,23 +194,33 @@ fn local_entity(entity: EntityDto) -> Option<Entity> {
         EntityDto::Message => Entity::Message,
         EntityDto::Label => Entity::Label,
         EntityDto::Identity => Entity::Identity,
-        EntityDto::Outbox | EntityDto::Op | EntityDto::LabelJob => return None,
+        EntityDto::Calendar => Entity::Calendar,
+        EntityDto::Event => Entity::Event,
+        EntityDto::Outbox
+        | EntityDto::Op
+        | EntityDto::LabelJob
+        | EntityDto::CalOp
+        | EntityDto::Reminder
+        | EntityDto::Unknown => return None,
     })
 }
 
 /// Pulls pages from `since` until the server has no more. A 410 surfaces
-/// as [`crate::ClientError::Gone`]: bootstrap again.
+/// as [`crate::ClientError::Gone`]: bootstrap again. `calendar` pulls
+/// calendar changes too.
 pub async fn pull(
     client: &ServerClient,
     store: &SqliteStore,
     mut since: ChangeCursor,
     window_days: u32,
+    calendar: bool,
 ) -> Result<Pulled> {
     let mut out = Pulled::default();
     let own = own_addresses(store).await?;
+    let include = if calendar { INCLUDE_CALENDAR } else { "" };
     loop {
         let page: ChangesDto = client
-            .get_json(&format!("api/changes?since={since}&limit={PAGE}"))
+            .get_json(&format!("api/changes?since={since}&limit={PAGE}{include}"))
             .await?;
         let next: ChangeCursor = page
             .next
@@ -204,7 +233,7 @@ pub async fn pull(
             blobs: store.blobs(),
         };
         let mut imported = Imported::default();
-        for request in plan.requests(window_days) {
+        for request in plan.requests(window_days, calendar) {
             let part = rows(client, &target, &request).await?;
             imported.threads.extend(part.threads);
             imported.arrivals.extend(part.arrivals);
@@ -293,6 +322,8 @@ async fn finish(
                     EntityDto::Mailbox => apply::delete_mailbox(tx, *id)?,
                     EntityDto::Label => apply::delete_label(tx, *id)?,
                     EntityDto::Account => apply::delete_account_cache(tx, &blobs, *id)?,
+                    EntityDto::Calendar => calendar::delete_calendar(tx, *id)?,
+                    EntityDto::Event => calendar::delete_event(tx, *id)?,
                     _ => {}
                 }
             }
@@ -362,7 +393,7 @@ mod tests {
         assert_eq!(plan.log.len(), 5);
         assert_eq!(plan.merges, vec![(5, 6)]);
         assert_eq!(plan.bulk, BTreeMap::from([(9, None)]));
-        let requests = plan.requests(90);
+        let requests = plan.requests(90, false);
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].messages, vec![1]);
         assert_eq!(requests[0].threads, vec![6]);
@@ -400,12 +431,34 @@ mod tests {
     }
 
     #[test]
+    fn calendar_changes_request_rows_and_unknown_ones_are_skipped() {
+        let mut writes = Vec::new();
+        let changes = [
+            change(EntityDto::Calendar, 2, ChangeOpDto::Upsert),
+            change(EntityDto::Event, 7, ChangeOpDto::Upsert),
+            change(EntityDto::Event, 8, ChangeOpDto::Delete),
+            change(EntityDto::CalOp, 3, ChangeOpDto::Upsert),
+            change(EntityDto::Reminder, 4, ChangeOpDto::Upsert),
+            change(EntityDto::Unknown, 5, ChangeOpDto::Upsert),
+        ];
+        let plan = Plan::new(&changes, &mut writes);
+
+        assert_eq!(writes.len(), 1, "cal_op goes to the intents");
+        assert_eq!(plan.log.len(), 3);
+        assert_eq!(plan.deletes, vec![(EntityDto::Event, 8)]);
+        let requests = plan.requests(90, true);
+        assert_eq!(requests[0].calendars, vec![2]);
+        assert_eq!(requests[0].events, vec![7]);
+        assert_eq!(requests[0].include, vec!["calendar".to_owned()]);
+    }
+
+    #[test]
     fn plan_chunks_large_id_sets() {
         let changes: Vec<ChangeDto> = (0..(MAX_ROWS_IDS as i64 * 2 + 1))
             .map(|id| change(EntityDto::Message, id, ChangeOpDto::Upsert))
             .chain([change(EntityDto::Thread, 1, ChangeOpDto::Upsert)])
             .collect();
-        let requests = Plan::new(&changes, &mut Vec::new()).requests(90);
+        let requests = Plan::new(&changes, &mut Vec::new()).requests(90, false);
 
         assert_eq!(requests.len(), 3);
         assert!(requests.iter().all(|r| r.messages.len() <= MAX_ROWS_IDS));

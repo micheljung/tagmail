@@ -21,6 +21,7 @@ use tagmail_core::{
 };
 use tagmail_store::changes::{self, ChangeOp, Entity, NewChange};
 
+use crate::cal_intents::CalIntent;
 use crate::client::ClientError;
 use crate::error::{Error, Result};
 use crate::intents::{Intent, IntentState, SENT_RECHECK_SECS};
@@ -131,6 +132,8 @@ fn op_dto(conn: &Connection, i: &Intent) -> tagmail_store::Result<OpDto> {
             .map(|l| LabelKey::of(l).as_str().to_owned()),
         mailbox_id,
         created_at: i.created_at,
+        domain: tagmail_api_core::ops_dto::OpDomainDto::Mail,
+        calendar: None,
     })
 }
 
@@ -146,7 +149,7 @@ fn op_change(conn: &Connection, i: &Intent) -> tagmail_store::Result<NewChange> 
     })
 }
 
-fn backoff(attempts: u32) -> i64 {
+pub(crate) fn backoff(attempts: u32) -> i64 {
     (RETRY_BASE_SECS << attempts.min(16)).min(RETRY_MAX_SECS)
 }
 
@@ -270,6 +273,8 @@ impl Replica {
                 label: i.label.clone(),
                 mailbox_id: None,
                 created_at: i.created_at,
+                domain: tagmail_api_core::ops_dto::OpDomainDto::Mail,
+                calendar: None,
             });
         };
         store
@@ -290,17 +295,26 @@ impl Replica {
         for i in intents {
             out.push(self.op_dto(i).await?);
         }
+        let cal = self.durable().cal_intents(states).map_err(internal)?;
+        out.extend(cal.iter().map(CalIntent::op_dto));
+        out.sort_by_key(|op| op.seq);
         Ok(out)
     }
 
     pub async fn get_op(&self, op_id: String) -> WriteResult<OpDto> {
-        match self.durable().intent(&op_id).map_err(internal)? {
-            Some(i) => self.op_dto(i).await,
+        if let Some(i) = self.durable().intent(&op_id).map_err(internal)? {
+            return self.op_dto(i).await;
+        }
+        match self.durable().cal_intent(&op_id).map_err(internal)? {
+            Some(i) => Ok(i.op_dto()),
             None => Err(WriteError::NotFound(format!("no op {op_id}"))),
         }
     }
 
     pub async fn retry_op(&self, op_id: String) -> WriteResult<OpDto> {
+        if let Some(i) = self.durable().cal_intent(&op_id).map_err(internal)? {
+            return self.retry_cal(i).await;
+        }
         if !self.durable().retry_intent(&op_id).map_err(internal)? {
             return Err(WriteError::Conflict(
                 "only failed ops can be retried".into(),
@@ -319,6 +333,9 @@ impl Replica {
     }
 
     pub async fn discard_op(&self, op_id: String) -> WriteResult<()> {
+        if let Some(i) = self.durable().cal_intent(&op_id).map_err(internal)? {
+            return self.discard_cal(i).await;
+        }
         let i = self
             .durable()
             .intent(&op_id)
@@ -404,6 +421,10 @@ impl Replica {
         if !changed.is_empty() {
             self.refresh_overlay(Some(changed.clone()), changed).await?;
         }
+        let stop = match stop {
+            None => self.flush_cal().await?,
+            stop => stop,
+        };
         let stop = match stop {
             None => match self.flush_compose().await {
                 Err(Error::Client(e)) => Some(e),
@@ -491,7 +512,7 @@ impl Replica {
         if !changed.is_empty() {
             self.refresh_overlay(Some(changed.clone()), changed).await?;
         }
-        Ok(())
+        self.apply_server_cal_ops(writes).await
     }
 }
 

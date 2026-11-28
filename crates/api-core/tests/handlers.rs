@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -6,6 +7,7 @@ use tagmail_api_core::dto::{
     AccountDto, AccountStateDto, AccountTestDto, ChangeDto, ChangeOpDto, EntityDto, LabelDto,
     MailboxDto, SpecialUseDto, TestStepDto, ThreadRowDto,
 };
+use tagmail_api_core::events::COALESCE;
 use tagmail_api_core::id_index;
 use tagmail_api_core::mime::reduce::CalendarParts;
 use tagmail_api_core::ops_dto::{
@@ -21,7 +23,8 @@ use tagmail_api_core::{
 use tagmail_api_core::{Submitted, WriteError, WriteResult, WriteService};
 use tagmail_core::query::parse;
 use tagmail_core::{
-    AccountId, CacheEpoch, ChangeCursor, LabelKey, MailboxRowId, MessageRowId, ThreadId,
+    AccountId, CacheEpoch, ChangeCursor, ChangeFilter, LabelKey, MailboxRowId, MessageRowId,
+    ThreadId,
 };
 
 const EPOCH: CacheEpoch = CacheEpoch(0xabc);
@@ -33,7 +36,7 @@ struct MemStore {
     mailbox: Vec<(i64, Vec<i64>)>,
     rows: Vec<ThreadRowDto>,
     log: Mutex<Vec<ChangeDto>>,
-    min_seq: i64,
+    min_seq: AtomicI64,
     accounts: Mutex<Vec<(AccountSummary, NewAccount)>>,
     /// Labels a [`LabelWrites`] keeps; empty: one fixed label.
     labels: Arc<Mutex<Vec<LabelDto>>>,
@@ -42,20 +45,28 @@ struct MemStore {
 }
 
 impl MemStore {
+    fn min_seq(&self) -> i64 {
+        self.min_seq.load(Ordering::Relaxed)
+    }
+
     fn cursor(&self) -> ChangeCursor {
         let log = self.log.lock().unwrap();
         ChangeCursor {
             epoch: EPOCH,
-            seq: log.last().map_or(self.min_seq, |c| c.seq),
+            seq: log.last().map_or(self.min_seq(), |c| c.seq),
         }
     }
 
     fn append(&self, id: i64) -> ChangeCursor {
+        self.append_entity(EntityDto::Thread, id)
+    }
+
+    fn append_entity(&self, entity: EntityDto, id: i64) -> ChangeCursor {
         let mut log = self.log.lock().unwrap();
-        let seq = log.last().map_or(self.min_seq, |c| c.seq) + 1;
+        let seq = log.last().map_or(self.min_seq(), |c| c.seq) + 1;
         log.push(ChangeDto {
             seq,
-            entity: EntityDto::Thread,
+            entity,
             id,
             op: ChangeOpDto::Upsert,
             payload: Some(json!({ "lastDate": 1 })),
@@ -123,18 +134,36 @@ impl Store for MemStore {
         })
     }
 
-    async fn changes_since(&self, since: ChangeCursor, limit: usize) -> StoreResult<ChangePage> {
+    async fn changes_since(
+        &self,
+        since: ChangeCursor,
+        limit: usize,
+        filter: ChangeFilter,
+    ) -> StoreResult<ChangePage> {
         let head = self.cursor();
-        if since.epoch != EPOCH || since.seq < self.min_seq || since.seq > head.seq {
+        if since.epoch != EPOCH || since.seq < self.min_seq() || since.seq > head.seq {
             return Ok(ChangePage::Gone);
         }
+        let calendar = [
+            EntityDto::Calendar,
+            EntityDto::Event,
+            EntityDto::CalOp,
+            EntityDto::Reminder,
+        ];
         let log = self.log.lock().unwrap();
-        let after: Vec<_> = log.iter().filter(|c| c.seq > since.seq).cloned().collect();
+        let after: Vec<_> = log
+            .iter()
+            .filter(|c| c.seq > since.seq && (filter.calendar() || !calendar.contains(&c.entity)))
+            .cloned()
+            .collect();
         let more = after.len() > limit;
         let changes: Vec<_> = after.into_iter().take(limit).collect();
         let next = ChangeCursor {
             epoch: EPOCH,
-            seq: changes.last().map_or(since.seq, |c| c.seq),
+            seq: match changes.last() {
+                Some(last) if more => last.seq,
+                _ => head.seq,
+            },
         };
         Ok(ChangePage::Page {
             changes,
@@ -415,7 +444,7 @@ async fn version_reports_api_and_min_client() {
     let resp = get(&api, "/api/version").await;
     assert_eq!(resp.status, 200);
     let body = json_body(&resp);
-    assert_eq!(body["api"], json!({ "major": 1, "minor": 3 }));
+    assert_eq!(body["api"], json!({ "major": 1, "minor": 4 }));
     assert_eq!(body["minClient"], json!({ "major": 1, "minor": 0 }));
     let features = if cfg!(feature = "calendar") {
         json!(["calendar"])
@@ -551,7 +580,7 @@ async fn threads_rejects_bad_id_lists() {
 #[tokio::test]
 async fn changes_pages_and_reports_gone() {
     let store = MemStore {
-        min_seq: 10,
+        min_seq: AtomicI64::new(10),
         ..MemStore::default()
     };
     for id in 0..3 {
@@ -912,7 +941,7 @@ async fn event_session_resumes_coalesces_and_resets() {
         epoch: EPOCH,
         seq: 1,
     };
-    let mut session = EventSession::open(store.clone(), &feed, Some(resume))
+    let mut session = EventSession::open(store.clone(), &feed, Some(resume), ChangeFilter::Mail)
         .await
         .unwrap()
         .unwrap();
@@ -961,8 +990,43 @@ async fn event_session_rejects_stale_resume() {
         epoch: CacheEpoch(7),
         seq: 0,
     };
-    let opened = EventSession::open(store, &feed, Some(stale)).await.unwrap();
+    let opened = EventSession::open(store, &feed, Some(stale), ChangeFilter::Mail)
+        .await
+        .unwrap();
     assert_eq!(opened.err(), Some(OpenError::Gone));
+}
+
+#[tokio::test(start_paused = true)]
+async fn empty_filtered_page_advances_session_cursor() {
+    let store = Arc::new(MemStore::default());
+    let feed = ChangeFeed::new(store.cursor());
+    let mut session = EventSession::open(store.clone(), &feed, None, ChangeFilter::Mail)
+        .await
+        .unwrap()
+        .unwrap();
+
+    let waiting = tokio::spawn(async move {
+        let event = session.next().await.unwrap().unwrap();
+        (event, session)
+    });
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    store.append_entity(EntityDto::Event, 1);
+    let tail = store.append_entity(EntityDto::Calendar, 2);
+    feed.publish(tail);
+    tokio::time::sleep(COALESCE * 3).await;
+    store.min_seq.store(tail.seq, Ordering::Relaxed);
+    let mail = store.append(3);
+    feed.publish(mail);
+    let (event, _) = waiting.await.unwrap();
+    match &event {
+        Event::Changes(c) => {
+            assert_eq!(c.changes.len(), 1);
+            assert_eq!(c.changes[0].entity, EntityDto::Thread);
+            assert_eq!(c.changes[0].seq, mail.seq);
+        }
+        e => panic!("{e:?}"),
+    }
+    assert_eq!(event.id(), Some(mail.to_string().as_str()));
 }
 
 /// Records the write requests it gets and answers from fixed data.
@@ -984,6 +1048,8 @@ fn op_dto(id: &str, status: OpStatusDto) -> OpDto {
         label: None,
         mailbox_id: None,
         created_at: 1,
+        domain: tagmail_api_core::ops_dto::OpDomainDto::Mail,
+        calendar: None,
     }
 }
 

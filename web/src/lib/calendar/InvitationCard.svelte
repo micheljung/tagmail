@@ -1,5 +1,6 @@
 <script lang="ts">
-	import { ApiError, api } from '../transport';
+	import { ops } from '../stores';
+	import { ApiError, api, type CalendarDto, type OpDto, type RsvpPartstatDto } from '../transport';
 	import { errorText } from '../ui/errors';
 	import Icon from '../ui/Icon.svelte';
 	import {
@@ -11,26 +12,182 @@
 		senderWarning,
 		visibleAttendees
 	} from './invitation';
-	import type { InvitationAttendeeDto, InvitationDto, InvitationEventDto } from './types';
+	import { calendarNote } from './opState';
+	import type {
+		InvitationAttendeeDto,
+		InvitationDto,
+		InvitationEventDto,
+		PartstatDto
+	} from './types';
 
-	let { messageId }: { messageId: number } = $props();
+	let { messageId, accountId }: { messageId: number; accountId: number } = $props();
 
 	let invitation = $state<InvitationDto | null>(null);
 	let error = $state<string | null>(null);
 	let expanded = $state<Record<number, boolean>>({});
+	let calendars = $state<CalendarDto[]>([]);
+	let selectedKey = $state<string | null>(null);
+	let choice = $state<RsvpPartstatDto | null>(null);
+	let reverting = $state(false);
+	let replyOnly = $state(false);
+	let busy = $state(false);
+	let actionError = $state<string | null>(null);
+	let takeover = $state<{ label: string; run: () => void } | null>(null);
+	let takeoverDialog = $state<HTMLDialogElement>();
+	const takeoverTitle = $props.id();
+
+	const RSVP_ACTIONS: { partstat: RsvpPartstatDto; label: string; style: string }[] = [
+		{ partstat: 'accepted', label: 'Accept', style: 'primary' },
+		{ partstat: 'tentative', label: 'Tentative', style: '' },
+		{ partstat: 'declined', label: 'Decline', style: 'danger' }
+	];
+
+	const ANSWERS: Partial<Record<PartstatDto, string>> = {
+		accepted: 'You accepted',
+		tentative: 'You tentatively accepted',
+		declined: 'You declined'
+	};
+
+	const calendarKey = (c: Pick<CalendarDto, 'accountId' | 'href'>) => `${c.accountId}\n${c.href}`;
+
+	async function fetchInvitation(signal?: AbortSignal): Promise<void> {
+		try {
+			invitation = await api.invitation(messageId, signal);
+		} catch (e) {
+			if (!signal?.aborted) error = failureText(e);
+		}
+	}
 
 	$effect(() => {
 		const controller = new AbortController();
 		invitation = null;
 		error = null;
-		api
-			.invitation(messageId, controller.signal)
-			.then((dto) => (invitation = dto))
-			.catch((e: unknown) => {
-				if (!controller.signal.aborted) error = failureText(e);
-			});
+		choice = null;
+		replyOnly = false;
+		actionError = null;
+		void fetchInvitation(controller.signal);
 		return () => controller.abort();
 	});
+
+	$effect(() => {
+		if (invitation?.method !== 'publish' && invitation?.method !== 'none') return;
+		const controller = new AbortController();
+		api
+			.calendars(controller.signal)
+			.then((list) => (calendars = list))
+			.catch(() => (calendars = []));
+		return () => controller.abort();
+	});
+
+	$effect(() =>
+		ops.onCalendarDone((op) => {
+			if (!invitation?.events.some((e) => e.uid === op.calendar?.uid)) return;
+			if (op.intent.kind === 'cal.rsvp') replyOnly = op.calendar?.calendarHref === null;
+			else choice = null;
+			void fetchInvitation();
+		})
+	);
+
+	const writable = $derived(calendars.filter((c) => c.writable));
+	const destination = $derived.by(() => {
+		const target = invitation?.target;
+		if (selectedKey) return writable.find((c) => calendarKey(c) === selectedKey);
+		if (target) {
+			return writable.find(
+				(c) => c.accountId === target.accountId && c.href === target.calendarHref
+			);
+		}
+		return writable[0];
+	});
+	const canImport = $derived(!!invitation?.target || !!destination);
+
+	function importRequest(opId: string): Parameters<typeof api.importInvitation>[0] {
+		const explicit = selectedKey || !invitation?.target ? destination : undefined;
+		return {
+			opId,
+			messageId: String(messageId),
+			...(explicit ? { accountId: explicit.accountId, calendarHref: explicit.href } : {})
+		};
+	}
+
+	async function submit(send: (opId: string) => Promise<OpDto>): Promise<void> {
+		busy = true;
+		actionError = null;
+		replyOnly = false;
+		try {
+			ops.track(await send(ops.newOpId()));
+		} catch (e) {
+			choice = null;
+			actionError = errorText(e);
+		} finally {
+			busy = false;
+		}
+	}
+
+	const allowance = () => (invitation?.organizerChanged ? { allowOrganizerChange: true } : {});
+
+	function confirmed(label: string, run: () => void): void {
+		if (invitation?.organizerChanged) takeover = { label, run };
+		else run();
+	}
+
+	function reply(partstat: RsvpPartstatDto): void {
+		confirmed('Send reply', () => {
+			choice = partstat;
+			reverting = false;
+			void submit((opId) =>
+				api.rsvp({ opId, messageId: String(messageId), partstat, ...allowance() })
+			);
+		});
+	}
+
+	function revert(partstat: RsvpPartstatDto): void {
+		confirmed('Revert', () => {
+			choice = null;
+			reverting = true;
+			void submit((opId) =>
+				api.rsvp({
+					opId,
+					messageId: String(messageId),
+					partstat,
+					sendReply: false,
+					...allowance()
+				})
+			);
+		});
+	}
+
+	const addToCalendar = () => void submit((opId) => api.importInvitation(importRequest(opId)));
+
+	const updateCalendar = () =>
+		confirmed('Update calendar', () => {
+			void submit((opId) =>
+				api.applyInvitation({ opId, messageId: String(messageId), ...allowance() })
+			);
+		});
+
+	function proceed(): void {
+		const run = takeover?.run;
+		takeover = null;
+		run?.();
+	}
+
+	$effect(() => {
+		if (!takeoverDialog) return;
+		if (takeover && !takeoverDialog.open) takeoverDialog.showModal();
+		else if (!takeover && takeoverDialog.open) takeoverDialog.close();
+	});
+
+	const resendable = (p: PartstatDto | null | undefined): p is RsvpPartstatDto =>
+		p === 'accepted' || p === 'tentative' || p === 'declined';
+	const revertible = (p: PartstatDto | null | undefined): p is RsvpPartstatDto =>
+		p === 'needs_action' || resendable(p);
+
+	const PENDING_TEXT: Record<string, string> = {
+		'cal.rsvp': 'Sending reply…',
+		'cal.import': 'Adding to calendar…',
+		'cal.apply': 'Updating calendar…'
+	};
 
 	const SILENT_CODES = new Set(['no_invitation', 'feature_disabled']);
 	const FAILURES: Record<string, string> = {
@@ -64,6 +221,10 @@
 		{@const when = eventWhen(event)}
 		{@const repeat = recurrenceSummary(event.recurrence)}
 		{@const people = visibleAttendees(event.attendees, !!expanded[index])}
+		{@const op = ops.calendarOp(event.uid)}
+		{@const working = busy || (!!op && op.status !== 'failed')}
+		{@const note = op?.calendar ? calendarNote(op.status, op.calendar) : null}
+		{@const answer = working || replyOnly ? choice : (invitation.stored?.partstat ?? null)}
 		<section class="card" class:cancelled={cancelled(event)} aria-label="Calendar invitation">
 			{#if invitation.outdated}
 				<p class="banner warn" role="status">
@@ -77,6 +238,11 @@
 			{/if}
 			{#if warning}
 				<p class="banner warn" role="alert"><Icon name="alert" size={16} />{warning}</p>
+			{/if}
+			{#if invitation.organizerChanged}
+				<p class="banner warn" role="alert">
+					<Icon name="alert" size={16} />The organizer of this event changed — check before updating
+				</p>
 			{/if}
 			<div class="head">
 				<span class="badge" aria-hidden="true"><Icon name="calendar" size={20} /></span>
@@ -144,17 +310,81 @@
 			{#if event.description}
 				<p class="description">{@render linked(event.description)}</p>
 			{/if}
-			{#if !cancelled(event)}
+			{#if !cancelled(event) || invitation.autoApply !== 'none'}
 				<div class="actions">
-					{#if invitation.method === 'request'}
-						<button class="btn primary" disabled>Accept</button>
-						<button class="btn" disabled>Tentative</button>
-						<button class="btn danger" disabled>Decline</button>
-					{:else if invitation.method === 'publish' || invitation.method === 'none'}
-						<button class="btn primary" disabled>Add to calendar</button>
+					{#if invitation.method === 'request' && !cancelled(event)}
+						{#each RSVP_ACTIONS as action (action.partstat)}
+							<button
+								class="btn {action.style}"
+								class:active={answer === action.partstat}
+								aria-pressed={answer === action.partstat}
+								disabled={working}
+								onclick={() => reply(action.partstat)}
+							>
+								{action.label}
+							</button>
+						{/each}
+					{:else if (invitation.method === 'publish' || invitation.method === 'none') && !cancelled(event)}
+						{#if writable.length > 1}
+							<select
+								class="picker"
+								aria-label="Calendar"
+								value={destination ? calendarKey(destination) : ''}
+								disabled={working}
+								onchange={(e) => (selectedKey = e.currentTarget.value)}
+							>
+								{#each writable as c (calendarKey(c))}
+									<option value={calendarKey(c)}>{c.displayName ?? c.href}</option>
+								{/each}
+							</select>
+						{/if}
+						<button class="btn primary" disabled={working || !canImport} onclick={addToCalendar}>
+							Add to calendar
+						</button>
 					{/if}
-					{#if invitation.target === null && (invitation.method === 'request' || invitation.method === 'publish' || invitation.method === 'none')}
-						<span class="hint">Calendar not set up</span>
+					{#if invitation.autoApply === 'manual'}
+						<button class="btn" disabled={working} onclick={updateCalendar}>
+							{cancelled(event) ? 'Mark cancelled in calendar' : 'Update calendar'}
+						</button>
+					{/if}
+					{#if invitation.autoApply === 'applied'}
+						<span class="state"><Icon name="check" size={16} />Applied</span>
+					{:else if invitation.autoApply === 'pending'}
+						<span class="state">Will be applied</span>
+					{/if}
+				</div>
+				<div class="feedback" role="status">
+					{#if op && op.status !== 'failed'}
+						<span>{(!reverting && PENDING_TEXT[op.intent.kind]) || 'Saving…'}</span>
+					{:else if note}
+						<span class="problem">{note.text}. See Unsynced changes.</span>
+					{:else if op?.error}
+						<span class="problem">{op.error}</span>
+					{:else if replyOnly}
+						<span>Reply sent; not saved to a calendar</span>
+					{:else if invitation.stored?.replyState === 'cancelled' && !working}
+						{@const partstat = invitation.stored.partstat}
+						{@const prior = invitation.stored.revertPartstat}
+						<span class="problem">
+							Reply not sent
+							{#if invitation.method === 'request' && resendable(partstat)}
+								<button class="link" onclick={() => reply(partstat)}>Send reply again</button>
+							{/if}
+							{#if invitation.method === 'request' && revertible(prior) && prior !== partstat}
+								<button class="link" onclick={() => revert(prior)}>Revert</button>
+							{/if}
+						</span>
+					{:else if invitation.stored && invitation.method !== 'request'}
+						<span>In your calendar</span>
+					{:else if answer && ANSWERS[answer]}
+						<span>{ANSWERS[answer]}</span>
+					{/if}
+					{#if actionError}<span class="problem">{actionError}</span>{/if}
+					{#if invitation.target === null}
+						<span>
+							No calendar set up.
+							<a href="/settings/accounts/{accountId}#caldav-title">Set up CalDAV</a>
+						</span>
 					{/if}
 				</div>
 			{/if}
@@ -166,6 +396,22 @@
 		</p>
 	{/if}
 {/if}
+
+<dialog
+	bind:this={takeoverDialog}
+	aria-labelledby={takeoverTitle}
+	onclose={() => (takeover = null)}
+>
+	<h2 id={takeoverTitle}>Continue with a different organizer?</h2>
+	<p>
+		This update names {invitation?.events[0]?.organizer?.email ?? 'another organizer'} as the organizer,
+		not the one your calendar has. Only continue if you trust this sender.
+	</p>
+	<div class="dialog-actions">
+		<button class="btn" type="button" onclick={() => (takeover = null)}>Cancel</button>
+		<button class="btn primary" type="button" onclick={proceed}>{takeover?.label}</button>
+	</div>
+</dialog>
 
 {#snippet linked(text: string)}
 	{#each linkify(text) as segment, i (i)}
@@ -341,10 +587,50 @@
 		border-top: 1px solid var(--line);
 	}
 
-	.hint {
+	.btn.active {
+		border-color: var(--accent);
+		background: var(--accent-soft);
+		color: var(--accent);
+	}
+
+	.btn.primary.active {
+		background: var(--accent);
+		color: var(--accent-ink);
+	}
+
+	.picker {
+		max-width: 100%;
+		height: 36px;
+		padding: 0 8px;
+		border: 1px solid var(--line-strong);
+		border-radius: var(--radius);
+		background: var(--surface);
+		color: var(--ink);
+	}
+
+	.state {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
 		margin-left: 4px;
 		color: var(--muted);
+		font-size: 13px;
+	}
+
+	.feedback {
+		display: grid;
+		gap: 2px;
+		padding: 0 14px 10px;
+		color: var(--muted);
 		font-size: 12.5px;
+	}
+
+	.feedback:not(:has(span)) {
+		display: none;
+	}
+
+	.problem {
+		color: var(--danger);
 	}
 
 	.note {
@@ -364,6 +650,42 @@
 		border-color: transparent;
 		background: var(--danger-soft);
 		color: var(--danger);
+	}
+
+	dialog {
+		width: min(460px, calc(100vw - 32px));
+		padding: 20px 24px;
+		border: 1px solid var(--line);
+		border-radius: var(--radius-lg);
+		background: var(--surface-raised);
+		color: var(--ink);
+		box-shadow: var(--shadow-lg);
+	}
+
+	dialog::backdrop {
+		background: rgb(8 10 14 / 0.45);
+	}
+
+	@media (prefers-color-scheme: dark) {
+		dialog::backdrop {
+			background: rgb(0 0 0 / 0.7);
+		}
+	}
+
+	dialog h2 {
+		margin: 0 0 8px;
+		font-size: 18px;
+		font-weight: 650;
+	}
+
+	dialog p {
+		overflow-wrap: anywhere;
+	}
+
+	.dialog-actions {
+		display: flex;
+		justify-content: flex-end;
+		gap: 8px;
 	}
 
 	@media (max-width: 720px) {

@@ -240,8 +240,12 @@ async fn bulk_windows_carry_the_uid_range_they_added() {
     }
     assert_eq!(sync_box(&t, &mut s, "INBOX").await, Progress::Done);
 
-    let tagmail_store::Changes::Page { changes, .. } =
-        t.ctx.cache.changes_since(head, 10_000).await.unwrap()
+    let tagmail_store::Changes::Page { changes, .. } = t
+        .ctx
+        .cache
+        .changes_since(head, 10_000, tagmail_core::ChangeFilter::WithCalendar)
+        .await
+        .unwrap()
     else {
         panic!("gone");
     };
@@ -376,7 +380,12 @@ async fn external_changes_are_applied_per_capability_path() {
         assert!(!row("b1@x").3, "{tag}");
         assert!(row("a2@x").3, "expunged message is tombstoned ({tag})");
 
-        let changes = t.ctx.cache.changes_since(head, 1000).await.unwrap();
+        let changes = t
+            .ctx
+            .cache
+            .changes_since(head, 1000, tagmail_core::ChangeFilter::WithCalendar)
+            .await
+            .unwrap();
         let tagmail_store::Changes::Page { changes, .. } = changes else {
             panic!("gone");
         };

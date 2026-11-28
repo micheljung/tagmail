@@ -12,7 +12,7 @@ workspace = true
 
 [features]
 default = ["calendar"]
-calendar = ["tagmail-api-core/calendar"]
+calendar = ["tagmail-api-core/calendar", "dep:tagmail-calendar", "dep:time"]
 
 [dependencies]
 base64.workspace = true
@@ -26,9 +26,11 @@ rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tagmail-api-core = { workspace = true, features = ["sqlite"] }
+tagmail-calendar = { workspace = true, optional = true }
 tagmail-core.workspace = true
 tagmail-store.workspace = true
 thiserror.workspace = true
+time = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing.workspace = true
 url.workspace = true

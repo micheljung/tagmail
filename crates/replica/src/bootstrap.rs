@@ -15,6 +15,9 @@ use crate::db::{self, Layout, ReplicaMeta};
 use crate::error::{Error, Result};
 use crate::import::{RecordReader, Target, import};
 
+/// The query suffix that asks the server for calendar records.
+pub(crate) const INCLUDE_CALENDAR: &str = "&include=calendar";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     /// The import, for [`Layout::install`].
@@ -26,19 +29,22 @@ pub struct Snapshot {
 
 /// Imports a snapshot into a new directory; install it with
 /// [`Layout::install`]. On error the import is removed and the current
-/// replica is untouched.
+/// replica is untouched. `calendar` asks for calendar records and is
+/// committed into the import's meta.
 pub async fn import_snapshot(
     client: &ServerClient,
     layout: &Layout,
     window_days: u32,
+    calendar: bool,
 ) -> Result<Snapshot> {
     let tmp = layout.fresh_replica()?;
     let (cache, config, blobs) = db::create(&tmp)?;
     let blobs = Arc::new(blobs);
     let result = async {
+        let include = if calendar { INCLUDE_CALENDAR } else { "" };
         let builder = client.request(
             Method::GET,
-            &format!("api/replica/snapshot?windowDays={window_days}"),
+            &format!("api/replica/snapshot?windowDays={window_days}{include}"),
         )?;
         let resp = client.send(builder).await?;
         let mut reader = RecordReader::new(resp.bytes_stream());
@@ -60,6 +66,7 @@ pub async fn import_snapshot(
             snapshot_format: header.format,
             server_epoch,
             cursor,
+            calendar,
         };
         cache
             .write(move |tx| {
@@ -124,6 +131,7 @@ mod tests {
             snippet: None,
             size: 10,
             has_attachment: false,
+            has_calendar: false,
             tombstoned_at: None,
             locations: vec![LocationRecord {
                 mailbox_id: 10,
@@ -243,7 +251,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let layout = Layout::new(dir.path());
 
-        let snap = import_snapshot(&client, &layout, 30).await.unwrap();
+        let snap = import_snapshot(&client, &layout, 30, false).await.unwrap();
         layout.install(&snap.dir).unwrap();
 
         assert_eq!(snap.meta.cursor.seq, 7);
@@ -274,10 +282,12 @@ mod tests {
         let client = ServerClient::new(&url, None).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let layout = Layout::new(dir.path());
-        let snap = import_snapshot(&client, &layout, 90).await.unwrap();
+        let snap = import_snapshot(&client, &layout, 90, false).await.unwrap();
         layout.install(&snap.dir).unwrap();
 
-        let err = import_snapshot(&client, &layout, 90).await.unwrap_err();
+        let err = import_snapshot(&client, &layout, 90, false)
+            .await
+            .unwrap_err();
 
         assert!(matches!(err, Error::Incomplete(_)), "{err:?}");
         assert_eq!(replica_dirs(&layout), 1);
@@ -300,7 +310,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            import_snapshot(&client, &layout, 90),
+            import_snapshot(&client, &layout, 90, false),
         )
         .await
         .expect("the import gives up on its own");
