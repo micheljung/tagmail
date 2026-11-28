@@ -1078,7 +1078,7 @@ impl<F: ConnectorFactory> Engine<F> {
         .await
     }
 
-    async fn cancel_impl(&self, id: i64) -> ComposeResult<()> {
+    pub(crate) async fn cancel_impl(&self, id: i64) -> ComposeResult<()> {
         let (file, linked) = write(self.stores(), move |tx| {
             let row: Option<(String, String, Option<i64>, Option<String>)> = tx
                 .query_row(

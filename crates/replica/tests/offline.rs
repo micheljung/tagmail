@@ -374,6 +374,35 @@ async fn server_failed(stack: &Stack, op_id: &str) -> Value {
     }
 }
 
+/// Flushes until the server took `op_id`: a transient error defers it,
+/// and the next round sends it again at once.
+#[cfg(feature = "calendar")]
+async fn flush_until_sent(replica: &Replica, op_id: &str) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Err(e) = replica.flush().await {
+            tracing::debug!(error = %e, "flush failed; trying again");
+        }
+        let intent = replica.durable().cal_intent(op_id).unwrap().unwrap();
+        if intent.state != IntentState::Pending {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never flushed: {intent:?}"
+        );
+        replica
+            .durable()
+            .conn()
+            .execute(
+                "UPDATE cal_intent SET next_at = NULL WHERE op_id = ?1",
+                [op_id],
+            )
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
 /// An invitation answered offline: queued once, flushed once.
 #[cfg(feature = "calendar")]
 async fn queued_rsvp(stack: &mut Stack, replica: &Replica, router: &Router) {
@@ -397,7 +426,7 @@ async fn queued_rsvp(stack: &mut Stack, replica: &Replica, router: &Router) {
         IntentState::Pending
     );
     stack.restart().await;
-    replica.flush().await.unwrap();
+    flush_until_sent(replica, "rsvp-1").await;
 }
 
 #[cfg(feature = "calendar")]
@@ -448,7 +477,7 @@ async fn calendar_read_offline_and_rsvp_flushed_once() {
         .conn()
         .execute("UPDATE cal_intent SET state = 'pending'", [])
         .unwrap();
-    replica.flush().await.unwrap();
+    flush_until_sent(&replica, "rsvp-1").await;
     let (_, again) = server_op(&stack, "rsvp-1").await;
     assert_eq!(
         again["seq"], first["seq"],
@@ -467,6 +496,93 @@ async fn calendar_read_offline_and_rsvp_flushed_once() {
             .unwrap()
             .state,
         IntentState::Pending
+    );
+    stack.stop().await;
+}
+
+#[cfg(feature = "calendar")]
+#[tokio::test]
+async fn calendar_edit_offline_is_queued_and_flushed_once() {
+    let mut stack = Stack::start().await;
+    calendar_seed::seed(
+        stack.server().store(),
+        stack.account,
+        &["/cal/work/"],
+        1,
+        now(),
+    )
+    .await;
+    let replica = stack.replica().await;
+    replica.gate().await.unwrap();
+    let router = Router::new(replica.clone());
+
+    stack.stop().await;
+    replica.client().link().mark_down();
+    let event_path = format!(
+        "/api/calendar/events/{}/%2Fcal%2Fwork%2F0.ics",
+        stack.account
+    );
+    let detail = get(&router, &event_path).await;
+    assert_eq!(detail.status, 200, "{}", body(&detail));
+    assert!(json(&detail)["fields"]["start"].is_string());
+    let edit = json!({
+        "opId": "edit-1",
+        "kind": "put",
+        "accountId": stack.account,
+        "calendarHref": "/cal/work/",
+        "event": {
+            "summary": "Planning",
+            "location": null,
+            "description": null,
+            "start": "2099-12-01T09:00:00",
+            "end": "2099-12-01T10:00:00",
+            "allDay": false,
+            "tzid": "Europe/Zurich",
+            "attendees": [{ "email": "ann@example.com" }],
+            "alarms": [15],
+        },
+    });
+    let queued = post(&router, "/api/calendar/ops", edit.clone()).await;
+    assert_eq!(queued.status, 202, "{}", body(&queued));
+    assert_eq!(json(&queued)["kind"], "cal.put");
+    assert_eq!(json(&queued)["status"], "pending");
+    let again = post(&router, "/api/calendar/ops", edit).await;
+    assert_eq!(again.status, 200, "{}", body(&again));
+    replica.flush().await.unwrap();
+    stack.restart().await;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while stack.owner_get("/api/calendars").await["calendars"] != json!([]) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the restart keeps the calendars"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    calendar_seed::seed(
+        stack.server().store(),
+        stack.account,
+        &["/cal/work/"],
+        1,
+        now(),
+    )
+    .await;
+    flush_until_sent(&replica, "edit-1").await;
+
+    let flushed = replica.durable().cal_intent("edit-1").unwrap().unwrap();
+    assert!(flushed.on_server, "{flushed:?}");
+    let (status, _) = server_op(&stack, "edit-1").await;
+    assert_eq!(status, 200);
+    assert_eq!(server_outbox_items(&stack, "edit-1#request").await, 1);
+    replica
+        .durable()
+        .conn()
+        .execute("UPDATE cal_intent SET state = 'pending'", [])
+        .unwrap();
+    flush_until_sent(&replica, "edit-1").await;
+    assert_eq!(
+        server_outbox_items(&stack, "edit-1#request").await,
+        1,
+        "a replayed edit sends one REQUEST"
     );
     stack.stop().await;
 }

@@ -409,6 +409,25 @@ pub struct UpdateCheck<'a> {
     pub now: i64,
     /// The account has a calendar to write to.
     pub has_target: bool,
+    /// For a REPLY: what it answers and what the calendar holds.
+    pub reply: Option<ReplyCheck>,
+}
+
+/// A REPLY to an event of mine (AC 19).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyCheck {
+    /// The PARTSTAT the attendee answers with, upper case.
+    pub partstat: String,
+    /// The stored event's ORGANIZER is one of my addresses.
+    pub organized: bool,
+    /// The attendee's stored PARTSTAT; `None` when the event does not
+    /// list them.
+    pub stored_partstat: Option<String>,
+    /// A newer REPLY of this attendee for this instance is applied.
+    pub superseded: bool,
+    /// The instance is known to be one of the series; else only an
+    /// explicit apply writes it.
+    pub certain: bool,
 }
 
 /// The answer of [`decide`].
@@ -432,6 +451,7 @@ pub fn decide(check: &UpdateCheck<'_>) -> UpdateDecision {
     let cancel = match check.method {
         Some(Method::Request) => false,
         Some(Method::Cancel) => true,
+        Some(Method::Reply) => return decided(decide_reply(check), false),
         _ => return decided(AutoApplyDto::None, false),
     };
     let Some(stored) = check.stored else {
@@ -467,6 +487,57 @@ pub fn decide(check: &UpdateCheck<'_>) -> UpdateDecision {
         },
         organizer_changed,
     )
+}
+
+/// `applied` when the attendee's PARTSTAT is stored already, `pending`
+/// when the runner sets it (an event I organize that lists the attendee,
+/// verified sender, recent), `manual` otherwise; `none` for a REPLY to
+/// an event I do not organize.
+fn decide_reply(check: &UpdateCheck<'_>) -> AutoApplyDto {
+    let Some(reply) = check.reply.as_ref().filter(|_| check.stored.is_some()) else {
+        return AutoApplyDto::None;
+    };
+    let Some(stored) = reply
+        .stored_partstat
+        .as_deref()
+        .filter(|_| reply.organized && !reply.superseded)
+    else {
+        return AutoApplyDto::None;
+    };
+    if stored.eq_ignore_ascii_case(&reply.partstat) {
+        return AutoApplyDto::Applied;
+    }
+    let recent = check
+        .received
+        .is_some_and(|r| r >= check.now - AUTO_APPLY_MAX_AGE_SECS);
+    if check.sender == SenderAuthDto::Verified && recent && check.has_target && reply.certain {
+        AutoApplyDto::Pending
+    } else {
+        AutoApplyDto::Manual
+    }
+}
+
+/// Whether a REPLY of `attendee` for the instance `instance_key` stamped
+/// `dtstamp` is older than one already applied (`stamps`: attendee,
+/// RECURRENCE-ID key, DTSTAMP of applied REPLYs).
+pub fn superseded<'a>(
+    stamps: impl IntoIterator<Item = (&'a str, Option<&'a str>, i64)>,
+    attendee: &str,
+    instance_key: Option<&str>,
+    dtstamp: Option<i64>,
+) -> bool {
+    stamps.into_iter().any(|(a, k, t)| {
+        a.eq_ignore_ascii_case(attendee) && k == instance_key && dtstamp.is_none_or(|d| d < t)
+    })
+}
+
+/// The replying ATTENDEE of a REPLY's VEVENT and its PARTSTAT, upper
+/// case: the only one it names.
+pub fn replying(event: &Event) -> Option<(&str, String)> {
+    match event.attendees.as_slice() {
+        [a] if a.address_is_email => Some((a.address.as_str(), partstat_text(&a.partstat))),
+        _ => None,
+    }
 }
 
 /// Whether every instance of `events` (one UID) has ended at `now`.
@@ -731,6 +802,7 @@ mod tests {
             received: Some(NOW),
             now: NOW,
             has_target: true,
+            reply: None,
         };
         let auto = |c: &UpdateCheck<'_>| decide(c).auto_apply;
         assert_eq!(auto(&check), AutoApplyDto::Pending);
@@ -796,5 +868,93 @@ mod tests {
             }),
             AutoApplyDto::None
         );
+    }
+
+    #[test]
+    fn a_reply_to_my_event_is_applied_once_from_a_verified_attendee() {
+        const NOW: i64 = 10_000_000;
+        let stored = StoredVersion {
+            sequence: 1,
+            dtstamp: Some(100),
+            cancelled: false,
+            partstat: None,
+            organizer: Some("me@example.org".into()),
+        };
+        let reply = ReplyCheck {
+            partstat: "ACCEPTED".into(),
+            organized: true,
+            stored_partstat: Some("NEEDS-ACTION".into()),
+            superseded: false,
+            certain: true,
+        };
+        let check = UpdateCheck {
+            method: Some(&Method::Reply),
+            incoming: IncomingVersion {
+                sequence: 1,
+                dtstamp: Some(200),
+            },
+            organizer: None,
+            overrides_only: false,
+            past: true,
+            stored: Some(&stored),
+            sender: SenderAuthDto::Verified,
+            received: Some(NOW),
+            now: NOW,
+            has_target: true,
+            reply: Some(reply.clone()),
+        };
+        let auto = |c: UpdateCheck<'_>| decide(&c).auto_apply;
+        assert_eq!(auto(check.clone()), AutoApplyDto::Pending);
+        let with = |r: ReplyCheck| UpdateCheck {
+            reply: Some(r),
+            ..check.clone()
+        };
+        assert_eq!(
+            auto(with(ReplyCheck {
+                stored_partstat: Some("ACCEPTED".into()),
+                ..reply.clone()
+            })),
+            AutoApplyDto::Applied
+        );
+        assert_eq!(
+            auto(with(ReplyCheck {
+                organized: false,
+                ..reply.clone()
+            })),
+            AutoApplyDto::None
+        );
+        assert_eq!(
+            auto(with(ReplyCheck {
+                stored_partstat: None,
+                ..reply.clone()
+            })),
+            AutoApplyDto::None
+        );
+        assert_eq!(
+            auto(with(ReplyCheck {
+                superseded: true,
+                ..reply.clone()
+            })),
+            AutoApplyDto::None
+        );
+        assert_eq!(
+            auto(with(ReplyCheck {
+                certain: false,
+                ..reply.clone()
+            })),
+            AutoApplyDto::Manual
+        );
+        for sender in [
+            SenderAuthDto::AddressMismatch,
+            SenderAuthDto::Unauthenticated,
+        ] {
+            assert_eq!(
+                auto(UpdateCheck {
+                    sender,
+                    ..check.clone()
+                }),
+                AutoApplyDto::Manual
+            );
+        }
     }
 }

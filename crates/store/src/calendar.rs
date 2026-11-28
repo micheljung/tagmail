@@ -295,6 +295,45 @@ pub fn set_default_calendar(
     Ok(())
 }
 
+/// The owner's calendar addresses for `account`, lower case: its
+/// identities and its login email. The one definition of "me" for
+/// invitations, replies and edits.
+pub fn my_addresses(conn: &Connection, account: AccountId) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT lower(address) FROM identity WHERE account_id = ?1 \
+         UNION SELECT lower(email) FROM account WHERE id = ?1 AND email IS NOT NULL",
+    )?;
+    Ok(stmt
+        .query_map([account.0], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// The newest REPLY DTSTAMP applied or being applied for each
+/// (lower-case attendee, RECURRENCE-ID key) of `uid`, so an older REPLY that
+/// arrives later is not applied over it. Done ops go after 120 days, while
+/// a REPLY is only applied within 30 days of receipt.
+pub fn reply_stamps(
+    conn: &Connection,
+    targets: &[AccountId],
+    uid: &str,
+) -> Result<Vec<(String, Option<String>, i64)>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT lower(attendee), recurrence_id, max(dtstamp) FROM cal_op \
+         WHERE kind = 'apply' AND uid = ?1 AND target_account_id = ?2 AND dtstamp IS NOT NULL \
+         AND state != 'failed' GROUP BY lower(attendee), recurrence_id",
+    )?;
+    let mut out = Vec::new();
+    for target in targets {
+        out.extend(
+            stmt.query_map(rusqlite::params![uid, target.0], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
+        );
+    }
+    Ok(out)
+}
+
 /// Active accounts with a discovered calendar home, the ones the calendar
 /// runner syncs.
 pub fn caldav_accounts(conn: &Connection) -> Result<Vec<AccountId>> {

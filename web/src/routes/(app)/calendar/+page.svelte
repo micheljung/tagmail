@@ -1,9 +1,12 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import type { CalendarDto, EventInstanceDto } from '@tagmail/api-types';
+	import EventEditor from '#lib/calendar/EventEditor.svelte';
+	import { slotStart, type EditorTarget } from '#lib/calendar/editor.ts';
 	import {
 		VIEWS,
 		addDays,
+		asShown,
 		byDay,
 		calendarColor,
 		dayKey,
@@ -18,13 +21,15 @@
 		type CalendarView
 	} from '#lib/calendar/views.ts';
 	import { APP_NAME } from '#lib/document-title.ts';
-	import { calendars } from '#lib/stores/index.ts';
+	import { calendars, hub, ops } from '#lib/stores/index.ts';
 	import { api } from '#lib/transport/index.ts';
 	import { errorText } from '#lib/ui/errors.ts';
 	import Icon from '#lib/ui/Icon.svelte';
 	import { onMount } from 'svelte';
 
 	const HOUR_PX = 48;
+	/** Floating times are read as UTC; any zone is at most 14 hours from it. */
+	const FLOATING_SLACK = 14 * 3600;
 	const FIRST_HOUR = 7;
 	const MONTH_CHIPS = 3;
 	const LABELS: Record<CalendarView, string> = {
@@ -60,6 +65,8 @@
 	let events = $state<EventInstanceDto[]>([]);
 	let now = $state(new Date());
 	let scroller = $state<HTMLDivElement>();
+	let editing = $state<EditorTarget | null>(null);
+	let revision = $state(0);
 
 	const view = $derived(parseView(page.url.searchParams.get('view')));
 	const date = $derived(parseDate(page.url.searchParams.get('date'), now));
@@ -84,11 +91,29 @@
 			.then(() => (loaded = true))
 			.catch((e: unknown) => (error = errorText(e)));
 		const tick = setInterval(() => (now = new Date()), 60_000);
-		return () => clearInterval(tick);
+		const unsubscribe = hub.subscribe({
+			changes(page) {
+				const touched = page.changes.filter((c) => c.entity === 'event' || c.entity === 'calendar');
+				if (touched.some((c) => c.entity === 'calendar'))
+					void calendars.load().catch(() => undefined);
+				if (touched.length > 0) revision++;
+			},
+			reset() {
+				revision++;
+				return Promise.resolve(undefined);
+			}
+		});
+		const done = ops.onCalendarDone(() => revision++);
+		return () => {
+			clearInterval(tick);
+			unsubscribe();
+			done();
+		};
 	});
 
 	$effect(() => {
 		if (!loaded) return;
+		void revision;
 		const targets = JSON.parse(wanted) as ReturnType<typeof shownCalendars>;
 		if (targets === null) {
 			events = [];
@@ -96,9 +121,9 @@
 		}
 		const ctl = new AbortController();
 		api
-			.calendarEvents(from, to, targets, ctl.signal)
+			.calendarEvents(from - FLOATING_SLACK, to + FLOATING_SLACK, targets, ctl.signal)
 			.then((found) => {
-				events = found;
+				events = asShown(found).filter((e) => e.start < to && (e.end > from || e.start >= from));
 				error = null;
 			})
 			.catch((e: unknown) => {
@@ -111,6 +136,24 @@
 		if (scroller && (view === 'day' || view === 'week'))
 			scroller.scrollTop = FIRST_HOUR * HOUR_PX - 8;
 	});
+
+	function open(e: EventInstanceDto): void {
+		editing = { kind: 'edit', accountId: e.accountId, href: e.href };
+	}
+
+	function create(start: Date, allDay: boolean): void {
+		editing = { kind: 'new', start, allDay };
+	}
+
+	function createAt(e: MouseEvent & { currentTarget: HTMLElement }, d: Date): void {
+		const rect = e.currentTarget.getBoundingClientRect();
+		create(slotStart(d, ((e.clientY - rect.top) / HOUR_PX) * 60), false);
+	}
+
+	function nextHour(): Date {
+		const hour = dayKey(date) === dayKey(now) ? now.getHours() + 1 : 9;
+		return new Date(date.getFullYear(), date.getMonth(), date.getDate(), hour);
+	}
 
 	function link(v: CalendarView, d: Date): string {
 		return `/calendar?view=${v}&date=${dayKey(d)}`;
@@ -147,8 +190,10 @@
 </svelte:head>
 
 {#snippet chip(e: EventInstanceDto)}
-	<span
+	<button
+		type="button"
 		class="chip"
+		onclick={() => open(e)}
 		class:all-day={e.allDay}
 		class:cancelled={e.status === 'cancelled'}
 		class:declined={e.partstat === 'declined'}
@@ -161,7 +206,7 @@
 			</span>{/if}
 		<span class="label">{e.summary ?? 'Untitled'}</span>
 		<span class="sr-only">, {details(e)}</span>
-	</span>
+	</button>
 {/snippet}
 
 <div class="calendar" data-view={view}>
@@ -176,6 +221,14 @@
 			</a>
 			<h1 tabindex="-1">{title}</h1>
 		</div>
+		<button
+			type="button"
+			class="btn primary new"
+			onclick={() => create(nextHour(), false)}
+			disabled={!calendars.calendars.some((c) => c.writable)}
+		>
+			<Icon name="plus" size={18} />New event
+		</button>
 		<nav class="views" aria-label="Calendar view">
 			{#each VIEWS as v (v)}
 				<a href={link(v, date)} aria-current={v === view ? 'page' : undefined}>{LABELS[v]}</a>
@@ -199,18 +252,22 @@
 					<ul>
 						{#each eventsOf(d) as e (instanceKey(e))}
 							{@const c = calendarOfEvent(e)}
-							<li
-								class="item"
-								class:cancelled={e.status === 'cancelled'}
-								style:--c={colorOf(e)}
-								data-event={e.uid}
-							>
-								<span class="when">{when(e)}</span>
-								<span class="what">
-									<strong>{e.summary ?? 'Untitled'}</strong>
-									{#if e.location}<span>{e.location}</span>{/if}
-								</span>
-								<span class="cal">{c?.displayName ?? c?.href ?? ''}</span>
+							<li>
+								<button
+									type="button"
+									class="item"
+									class:cancelled={e.status === 'cancelled'}
+									style:--c={colorOf(e)}
+									data-event={e.uid}
+									onclick={() => open(e)}
+								>
+									<span class="when">{when(e)}</span>
+									<span class="what">
+										<strong>{e.summary ?? 'Untitled'}</strong>
+										{#if e.location}<span>{e.location}</span>{/if}
+									</span>
+									<span class="cal">{c?.displayName ?? c?.href ?? ''}</span>
+								</button>
 							</li>
 						{/each}
 					</ul>
@@ -237,6 +294,13 @@
 							class:today={dayKey(d) === todayKey}
 							data-day={dayKey(d)}
 						>
+							<button
+								type="button"
+								class="blank"
+								tabindex="-1"
+								aria-hidden="true"
+								onclick={() => create(d, true)}
+							></button>
 							<a class="num" href={link('day', d)} aria-label={longDay.format(d)}>{d.getDate()}</a>
 							<div class="chips">
 								{#each list.slice(0, MONTH_CHIPS) as e (instanceKey(e))}
@@ -266,6 +330,13 @@
 				<span class="gutter">All day</span>
 				{#each days as d (dayKey(d))}
 					<div class="slot" data-day={dayKey(d)}>
+						<button
+							type="button"
+							class="blank"
+							tabindex="-1"
+							aria-hidden="true"
+							onclick={() => create(d, true)}
+						></button>
 						{#each eventsOf(d).filter((e) => e.allDay) as e (instanceKey(e))}
 							{@render chip(e)}
 						{/each}
@@ -280,6 +351,13 @@
 				</div>
 				{#each days as d (dayKey(d))}
 					<div class="column" data-day={dayKey(d)}>
+						<button
+							type="button"
+							class="blank"
+							tabindex="-1"
+							aria-hidden="true"
+							onclick={(e) => createAt(e, d)}
+						></button>
 						{#each placeDay(eventsOf(d), d) as p (instanceKey(p.event))}
 							<div
 								class="placed"
@@ -300,6 +378,17 @@
 		</div>
 	{/if}
 </div>
+
+{#if editing}
+	{#key editing}
+		<EventEditor
+			target={editing}
+			onclose={(closed) => {
+				if (editing === closed) editing = null;
+			}}
+		/>
+	{/key}
+{/if}
 
 <style>
 	.calendar {
@@ -408,7 +497,19 @@
 		margin: 0;
 	}
 
+	.chip,
+	.item {
+		font: inherit;
+		text-align: left;
+		cursor: pointer;
+	}
+
 	.chip {
+		position: relative;
+		width: 100%;
+		border-top: 0;
+		border-right: 0;
+		border-bottom: 0;
 		display: flex;
 		align-items: baseline;
 		gap: 6px;
@@ -490,6 +591,10 @@
 	}
 
 	.item {
+		width: 100%;
+		border: 0;
+		background: none;
+		color: var(--ink);
 		display: grid;
 		grid-template-columns: 150px minmax(0, 1fr) auto;
 		align-items: center;
@@ -497,6 +602,30 @@
 		padding: 6px 10px;
 		border-left: 4px solid var(--c);
 		border-radius: 8px;
+	}
+
+	.blank {
+		position: absolute;
+		inset: 0;
+		padding: 0;
+		border: 0;
+		background: none;
+		cursor: copy;
+	}
+
+	.slot,
+	.cell {
+		position: relative;
+	}
+
+	.num,
+	.more,
+	.chips {
+		position: relative;
+	}
+
+	.new {
+		margin-left: auto;
 	}
 
 	.item:hover {

@@ -63,4 +63,16 @@ describe('CalendarsStore', () => {
 		).rejects.toThrow();
 		expect(calendars.calendars[0].color).toBe('#1d7a4f');
 	});
+
+	it('restores only what the failed change touched', async () => {
+		const server = { calendars: [{ ...WORK }], fail: true, listFails: false };
+		const calendars = store(server);
+		await calendars.load();
+		server.listFails = true;
+		const failed = calendars.patch({ accountId: 1, href: WORK.href, color: '#000000' });
+		calendars.calendars[0].visible = false;
+		await expect(failed).rejects.toThrow();
+		expect(calendars.calendars[0].color).toBe('#1d7a4f');
+		expect(calendars.calendars[0].visible).toBe(false);
+	});
 });

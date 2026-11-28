@@ -125,7 +125,8 @@ export function placeDay(events: readonly EventInstanceDto[], day: Date): Placed
 		.map((e) => {
 			const top = e.start <= start ? 0 : wallMinutes(new Date(e.start * 1000));
 			const bottom = e.end >= end ? 24 * 60 : wallMinutes(new Date(e.end * 1000));
-			return { event: e, top, height: Math.max(bottom - top, 0), lane: 0, lanes: 1 };
+			const lasts = Math.min((e.end - e.start) / 60, 24 * 60 - top);
+			return { event: e, top, height: Math.max(bottom - top, lasts, 0), lane: 0, lanes: 1 };
 		})
 		.sort((a, b) => a.top - b.top || b.height - a.height);
 	let cluster: Placed[] = [];
@@ -147,6 +148,27 @@ export function placeDay(events: readonly EventInstanceDto[], day: Date): Placed
 	}
 	close();
 	return placed;
+}
+
+/** Local time of the same wall clock as the UTC reading of Unix seconds `t`. */
+function wallClock(t: number): number {
+	const d = new Date(t * 1000);
+	const local = new Date(
+		d.getUTCFullYear(),
+		d.getUTCMonth(),
+		d.getUTCDate(),
+		d.getUTCHours(),
+		d.getUTCMinutes(),
+		d.getUTCSeconds()
+	);
+	return local.getTime() / 1000;
+}
+
+/** Floating instances carry their wall clock as UTC; shown, it is local time. */
+export function asShown(events: readonly EventInstanceDto[]): EventInstanceDto[] {
+	return events.map((e) =>
+		e.floating ? { ...e, start: wallClock(e.start), end: wallClock(e.end) } : e
+	);
 }
 
 /** The calendar's colour for CSS; the accent when it has none. */

@@ -23,7 +23,7 @@ const PRODID: &str = "-//tagmail//tagmail//EN";
 const ROOT: usize = 0;
 
 /// Parameters only a CalDAV server acts on; they never go out in iMIP.
-const SCHEDULING_PARAMETERS: [ICalendarParameterName; 3] = [
+pub(crate) const SCHEDULING_PARAMETERS: [ICalendarParameterName; 3] = [
     ICalendarParameterName::ScheduleAgent,
     ICalendarParameterName::ScheduleForceSend,
     ICalendarParameterName::ScheduleStatus,
@@ -360,7 +360,7 @@ pub fn schedule_status(
     Ok((!statuses.is_empty()).then(|| statuses.join(",")))
 }
 
-fn index(id: u32) -> usize {
+pub(crate) fn index(id: u32) -> usize {
     usize::try_from(id).expect("component ids index a Vec")
 }
 
@@ -389,7 +389,7 @@ fn instances<'a>(
         .map(|(event, id)| (instance(event.recurrence_id.as_ref()), *id))
 }
 
-fn root_entries(raw: &ICalendar) -> impl Iterator<Item = &ICalendarEntry> {
+pub(crate) fn root_entries(raw: &ICalendar) -> impl Iterator<Item = &ICalendarEntry> {
     raw.components[ROOT]
         .entries
         .iter()
@@ -402,7 +402,7 @@ fn events_mut(raw: &mut ICalendar) -> impl Iterator<Item = &mut ICalendarCompone
         .filter(|component| component.component_type == ICalendarComponentType::VEvent)
 }
 
-fn new_calendar(root: Vec<ICalendarEntry>) -> ICalendar {
+pub(crate) fn new_calendar(root: Vec<ICalendarEntry>) -> ICalendar {
     ICalendar {
         components: vec![ICalendarComponent {
             component_type: ICalendarComponentType::VCalendar,
@@ -413,13 +413,13 @@ fn new_calendar(root: Vec<ICalendarEntry>) -> ICalendar {
 }
 
 /// Appends `component` unattached and returns its id.
-fn push(out: &mut ICalendar, component: ICalendarComponent) -> u32 {
+pub(crate) fn push(out: &mut ICalendar, component: ICalendarComponent) -> u32 {
     out.components.push(component);
     u32::try_from(out.components.len() - 1).expect("calcard caps the component count")
 }
 
 /// Copies component `id` of `source` and its subcomponents into `out`, unattached.
-fn copy_tree(out: &mut ICalendar, source: &ICalendar, id: u32) -> u32 {
+pub(crate) fn copy_tree(out: &mut ICalendar, source: &ICalendar, id: u32) -> u32 {
     let component = &source.components[index(id)];
     let children = component
         .component_ids
@@ -518,6 +518,18 @@ fn cancelled_override(
     master: Option<u32>,
     incoming: &ICalendarComponent,
 ) -> ICalendarComponent {
+    let mut component = instance_override(stored, master, incoming);
+    set_property(&mut component, cancelled());
+    component
+}
+
+/// An override for the instance `incoming` names: my copy of the master
+/// with its instance properties.
+fn instance_override(
+    stored: &Calendar,
+    master: Option<u32>,
+    incoming: &ICalendarComponent,
+) -> ICalendarComponent {
     let mut entries: Vec<ICalendarEntry> = match master {
         Some(master) => stored.raw.components[index(master)]
             .entries
@@ -563,13 +575,11 @@ fn cancelled_override(
                 .with_value(ICalendarDuration::from_seconds(seconds)),
         );
     }
-    let mut component = ICalendarComponent {
+    ICalendarComponent {
         component_type: ICalendarComponentType::VEvent,
         entries,
         component_ids: Vec::new(),
-    };
-    set_property(&mut component, cancelled());
-    component
+    }
 }
 
 fn cancelled() -> ICalendarEntry {
@@ -589,13 +599,13 @@ fn sequence_of(component: &ICalendarComponent) -> i64 {
         .unwrap_or_default()
 }
 
-fn dtstamp(now: OffsetDateTime) -> ICalendarEntry {
+pub(crate) fn dtstamp(now: OffsetDateTime) -> ICalendarEntry {
     ICalendarEntry::new(ICalendarProperty::Dtstamp)
         .with_value(PartialDateTime::from_utc_timestamp(now.unix_timestamp()))
 }
 
 /// Replaces the first property of the entry's name in place, or appends it.
-fn set_property(component: &mut ICalendarComponent, entry: ICalendarEntry) {
+pub(crate) fn set_property(component: &mut ICalendarComponent, entry: ICalendarEntry) {
     match component
         .entries
         .iter()
@@ -619,7 +629,7 @@ fn set_property(component: &mut ICalendarComponent, entry: ICalendarEntry) {
 }
 
 /// Replaces every `name` parameter with one `value`, where the first was.
-fn set_param(
+pub(crate) fn set_param(
     entry: &mut ICalendarEntry,
     name: ICalendarParameterName,
     value: ICalendarParameterValue,
@@ -633,7 +643,7 @@ fn set_param(
     }
 }
 
-fn partstat_value(partstat: &ParticipationStatus) -> ICalendarParameterValue {
+pub(crate) fn partstat_value(partstat: &ParticipationStatus) -> ICalendarParameterValue {
     match partstat {
         ParticipationStatus::NeedsAction => {
             ICalendarParameterValue::Partstat(ICalendarParticipationStatus::NeedsAction)
@@ -656,7 +666,7 @@ fn partstat_value(partstat: &ParticipationStatus) -> ICalendarParameterValue {
 
 /// Adds, ahead of everything else, each VTIMEZONE that a component of `out`
 /// references by TZID and `out` lacks, from the first of `sources` that has it.
-fn add_missing_timezones(out: &mut ICalendar, sources: &[&ICalendar]) {
+pub(crate) fn add_missing_timezones(out: &mut ICalendar, sources: &[&ICalendar]) {
     let present: HashSet<String> = out
         .components
         .iter()

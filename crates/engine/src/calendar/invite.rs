@@ -178,12 +178,23 @@ async fn fetch_parts<S: ImapSession>(
     Ok(Some((assemble(&headers, &leaves), cut)))
 }
 
-/// Calendar addresses of `account`'s identities, with their ids.
-fn identity_addresses(conn: &Connection, account: AccountId) -> ComposeResult<Vec<(i64, String)>> {
-    Ok(identities(conn)?
+/// My calendar addresses for `account` ([`calendar::my_addresses`]),
+/// each with the identity that has it.
+fn identity_addresses(
+    conn: &Connection,
+    account: AccountId,
+) -> ComposeResult<Vec<(Option<i64>, String)>> {
+    let mine = identities(conn)?;
+    Ok(calendar::my_addresses(conn, account)
+        .map_err(store_err)?
         .into_iter()
-        .filter(|i| i.account_id == account.0)
-        .map(|i| (i.id, i.address))
+        .map(|address| {
+            let id = mine
+                .iter()
+                .find(|i| i.account_id == account.0 && i.address.eq_ignore_ascii_case(&address))
+                .map(|i| i.id);
+            (id, address)
+        })
         .collect())
 }
 
@@ -285,47 +296,70 @@ fn write_error(e: ComposeError) -> WriteError {
     }
 }
 
-/// Records `op` with its object `ics`, and for an RSVP that sends one
-/// now, its REPLY; `false` when the op id was used before.
-async fn record(
+/// Records `op` with its object `ics`, for an RSVP that sends one now its
+/// REPLY, and `generated` messages it sends (a REQUEST or CANCEL); `false`
+/// when the op id was used before.
+pub(crate) async fn record(
     stores: &Stores,
     mut op: CalOp,
-    ics: &str,
+    ics: Option<&str>,
     reply: Option<Calendar>,
+    generated: Vec<compose::GeneratedMessage>,
 ) -> ComposeResult<bool> {
     let dir = executor::ics_dir(stores);
+    if op.reply_op_id.is_none() && reply.is_none() {
+        op.reply_op_id = generated.first().map(|m| m.op_id.clone());
+    }
     let keeps_object = op.state != tagmail_core::ops::OpState::Done;
-    let staged = if keeps_object {
-        let (dir, ics) = (dir.clone(), ics.to_owned());
-        let staged = tokio::task::spawn_blocking(move || stage(&dir, &ics))
-            .await
-            .map_err(|e| ComposeError::Internal(Box::new(e)))?
-            .map_err(store_err)?;
-        op.ics_file = Some(format!("{}.ics", op.op_id));
-        Some(staged)
-    } else {
-        None
+    let staged = match ics.filter(|_| keeps_object) {
+        Some(ics) => {
+            let (dir, ics) = (dir.clone(), ics.to_owned());
+            let staged = tokio::task::spawn_blocking(move || stage(&dir, &ics))
+                .await
+                .map_err(|e| ComposeError::Internal(Box::new(e)))?
+                .map_err(store_err)?;
+            op.ics_file = Some(format!("{}.ics", op.op_id));
+            Some(staged)
+        }
+        None => None,
+    };
+    let discard = |staged: &Option<PathBuf>, generated: &[compose::GeneratedMessage]| {
+        if let Some(staged) = staged {
+            let _ = std::fs::remove_file(staged);
+        }
+        for m in generated {
+            m.discard();
+        }
     };
     let reply = match &reply {
         Some(invite) => match executor::write_reply(stores, &op, invite).await {
             Ok(reply) => Some(reply),
             Err(e) => {
-                if let Some(staged) = &staged {
-                    let _ = std::fs::remove_file(staged);
-                }
+                discard(&staged, &generated);
                 return Err(e);
             }
         },
         None => None,
     };
     let outbox = stores.outbox.clone();
-    let (staged_path, queued) = (staged.clone(), reply.clone());
+    let (staged_path, queued, sent) = (staged.clone(), reply.clone(), generated.clone());
     let fresh = compose::write(stores, move |tx| {
         if !executor::insert(tx, &op).map_err(|e| store_err(tagmail_store::Error::from(e)))? {
             return Ok(false);
         }
         if let Some(reply) = &queued {
             executor::queue_reply(tx, &outbox, &op, reply)?;
+        }
+        for m in &sent {
+            if compose::queue_generated(tx, &outbox, m)?.is_none() {
+                m.discard();
+                continue;
+            }
+            tx.execute(
+                "UPDATE outbox SET next_at = ?2 WHERE op_id = ?1",
+                params![m.op_id, executor::HELD],
+            )
+            .map_err(|e| store_err(tagmail_store::Error::from(e)))?;
         }
         if let Some(staged) = &staged_path {
             adopt(&dir, staged, &op).map_err(store_err)?;
@@ -334,9 +368,7 @@ async fn record(
     })
     .await;
     if !matches!(fresh, Ok(true)) {
-        if let Some(staged) = &staged {
-            let _ = std::fs::remove_file(staged);
-        }
+        discard(&staged, &generated);
         if let Some(reply) = &reply {
             reply.discard();
         }
@@ -410,7 +442,7 @@ impl<F: ConnectorFactory> Engine<F> {
                 };
                 let me = addresses
                     .iter()
-                    .filter(|(id, _)| identity_id.is_none_or(|want| want == *id))
+                    .filter(|(id, _)| identity_id.is_none_or(|want| Some(want) == *id))
                     .find(|(_, address)| event.attendees.iter().any(|a| a.is_address(address)));
                 let Some((identity, me)) = me.cloned() else {
                     return Err(invalid(
@@ -431,7 +463,7 @@ impl<F: ConnectorFactory> Engine<F> {
                 let mut op = CalOp::new(req.op_id, account, CalOpKind::Rsvp, event.uid.clone());
                 op.partstat = Some(partstat_text(partstat).to_owned());
                 op.attendee = Some(me);
-                op.identity_id = Some(identity);
+                op.identity_id = identity;
                 op.reply_cancelled = !send_reply;
                 let reply = match &mapped {
                     None => {
@@ -490,31 +522,85 @@ impl<F: ConnectorFactory> Engine<F> {
             } => {
                 let parts = parsed(&req.source, None);
                 let Some((text, cal, event)) = parts.iter().find_map(|(text, c)| {
-                    matches!(c.method, Some(Method::Request | Method::Cancel))
-                        .then(|| main_event(c))
-                        .flatten()
-                        .map(|e| (text.clone(), c, e.clone()))
+                    matches!(
+                        c.method,
+                        Some(Method::Request | Method::Cancel | Method::Reply)
+                    )
+                    .then(|| main_event(c))
+                    .flatten()
+                    .map(|e| (text.clone(), c, e.clone()))
                 }) else {
                     return Err(invalid("messageId", "the message has no update to apply"));
                 };
                 let Some((target, href, _)) = &mapped else {
                     return Err(invalid("messageId", "no_calendar"));
                 };
-                organizer_kept(&stores, *target, cal, &event.uid, allow_organizer_change).await?;
-                let me = addresses
-                    .iter()
-                    .find(|(_, a)| event.attendees.iter().any(|x| x.is_address(a)))
-                    .map(|(_, a)| a.clone());
+                let me = if cal.method == Some(Method::Reply) {
+                    let Some((attendee, _)) = itip_auth::replying(&event) else {
+                        return Err(invalid("messageId", "the reply names no single attendee"));
+                    };
+                    let (target, uid) = (*target, event.uid.clone());
+                    let stored = stores
+                        .cache
+                        .read(move |c| calendar::events_by_uid(c, &[target], &uid))
+                        .await
+                        .map_err(WriteError::internal)?;
+                    let mine = stored
+                        .first()
+                        .and_then(|s| s.event.organizer.as_deref())
+                        .is_some_and(|o| addresses.iter().any(|(_, a)| a.eq_ignore_ascii_case(o)));
+                    if !mine {
+                        return Err(invalid(
+                            "messageId",
+                            "the reply is to an event you do not organize",
+                        ));
+                    }
+                    Some(attendee.to_owned())
+                } else {
+                    organizer_kept(&stores, *target, cal, &event.uid, allow_organizer_change)
+                        .await?;
+                    addresses
+                        .iter()
+                        .find(|(_, a)| event.attendees.iter().any(|x| x.is_address(a)))
+                        .map(|(_, a)| a.clone())
+                };
                 let mut op = CalOp::new(req.op_id, account, CalOpKind::Apply, event.uid.clone());
                 op.target = *target;
                 op.calendar_href = Some(href.clone());
+                if cal.method == Some(Method::Reply) {
+                    let key = event.recurrence_id.as_ref().map(itip_auth::recurrence_key);
+                    let stamp = event.dtstamp.map(OffsetDateTime::unix_timestamp);
+                    let (target, uid) = (*target, event.uid.clone());
+                    let stamps = stores
+                        .config
+                        .read(move |c| calendar::reply_stamps(c, &[target], &uid))
+                        .await
+                        .map_err(WriteError::internal)?;
+                    let attendee = me.clone().unwrap_or_default();
+                    let superseded = itip_auth::superseded(
+                        stamps
+                            .iter()
+                            .map(|(a, k, t)| (a.as_str(), k.as_deref(), *t)),
+                        &attendee,
+                        key.as_deref(),
+                        stamp,
+                    );
+                    if superseded {
+                        return Err(invalid(
+                            "messageId",
+                            "a newer reply from this attendee is applied already",
+                        ));
+                    }
+                    op.dtstamp = stamp;
+                    op.recurrence_id = key;
+                }
                 op.attendee = me;
                 (op, text, None)
             }
         };
         let op_id = op.op_id.clone();
         let replies = reply.is_some();
-        let fresh = record(&stores, op, &ics, reply)
+        let fresh = record(&stores, op, Some(&ics), reply, Vec::new())
             .await
             .map_err(write_error)?;
         if !fresh {
@@ -724,13 +810,17 @@ async fn queue_apply(
         event.sequence,
         event.dtstamp.map(OffsetDateTime::unix_timestamp),
         method.as_str(),
-        None,
+        me.as_deref().filter(|_| *method == Method::Reply),
     );
     let mut op = CalOp::new(id.clone(), account, CalOpKind::Apply, event.uid.clone());
     op.target = target.0;
     op.calendar_href = Some(target.1);
+    if *method == Method::Reply {
+        op.dtstamp = event.dtstamp.map(OffsetDateTime::unix_timestamp);
+        op.recurrence_id = recurrence.clone();
+    }
     op.attendee = me;
-    let fresh = record(stores, op, text, None)
+    let fresh = record(stores, op, Some(text), None, Vec::new())
         .await
         .map_err(|e| crate::Error::Unavailable(e.to_string()))?;
     if fresh {
@@ -810,7 +900,7 @@ async fn inbox_row(
         let Some(method) = cal
             .method
             .as_ref()
-            .filter(|m| matches!(m, Method::Request | Method::Cancel))
+            .filter(|m| matches!(m, Method::Request | Method::Cancel | Method::Reply))
         else {
             continue;
         };
@@ -844,6 +934,37 @@ async fn inbox_row(
                 partstat: s.event.my_partstat.clone(),
                 organizer: s.event.organizer.clone(),
             });
+            let replying = itip_auth::replying(event).filter(|_| *method == Method::Reply);
+            if *method == Method::Reply && replying.is_none() {
+                continue;
+            }
+            let reply = match (&replying, stored.first()) {
+                (Some((attendee, partstat)), Some(copy)) => {
+                    let Ok((ics, stamps)) = reply_state(stores, copy).await else {
+                        return Row::Wait;
+                    };
+                    let instance = event.recurrence_id.as_ref().map(|r| r.instant);
+                    let key = event.recurrence_id.as_ref().map(itip_auth::recurrence_key);
+                    let held = tagmail_calendar::attendee_partstat(&ics, attendee, instance);
+                    Some(itip_auth::ReplyCheck {
+                        superseded: itip_auth::superseded(
+                            stamps
+                                .iter()
+                                .map(|(a, k, t)| (a.as_str(), k.as_deref(), *t)),
+                            attendee,
+                            key.as_deref(),
+                            event.dtstamp.map(OffsetDateTime::unix_timestamp),
+                        ),
+                        partstat: partstat.clone(),
+                        organized: copy.event.organizer.as_deref().is_some_and(|o| {
+                            addresses.iter().any(|(_, a)| a.eq_ignore_ascii_case(o))
+                        }),
+                        stored_partstat: held.as_ref().map(|(p, _)| itip_auth::partstat_text(p)),
+                        certain: held.as_ref().is_none_or(|(_, c)| *c),
+                    })
+                }
+                _ => None,
+            };
             let sender = itip_auth::sender_auth(
                 [(Some(method), event)],
                 &source.headers,
@@ -863,14 +984,18 @@ async fn inbox_row(
                 received: Some(received),
                 now,
                 has_target: true,
+                reply,
             });
             if decision.auto_apply != AutoApplyDto::Pending {
                 continue;
             }
-            let me = addresses
-                .iter()
-                .find(|(_, a)| event.attendees.iter().any(|x| x.is_address(a)))
-                .map(|(_, a)| a.clone());
+            let me = match replying {
+                Some((attendee, _)) => Some(attendee.to_owned()),
+                None => addresses
+                    .iter()
+                    .find(|(_, a)| event.attendees.iter().any(|x| x.is_address(a)))
+                    .map(|(_, a)| a.clone()),
+            };
             let queued = queue_apply(
                 stores,
                 account,
@@ -891,6 +1016,42 @@ async fn inbox_row(
         }
     }
     if applied { Row::Applied } else { Row::Done }
+}
+
+/// The stored text of `copy`, and its [`calendar::reply_stamps`].
+async fn reply_state(
+    stores: &Stores,
+    copy: &calendar::StoredEvent,
+) -> tagmail_store::Result<(Vec<u8>, Vec<(String, Option<String>, i64)>)> {
+    let (account, calendar_href, href) = (
+        copy.account,
+        copy.calendar_href.clone(),
+        copy.event.href.clone(),
+    );
+    let ics = stores
+        .cache
+        .read(move |c| {
+            let id: Option<i64> = c
+                .query_row(
+                    "SELECT e.id FROM cal_event e JOIN calendar k ON k.id = e.calendar_id \
+                     WHERE k.account_id = ?1 AND k.href = ?2 AND e.href = ?3",
+                    params![account.0, calendar_href, href],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            Ok(match id {
+                Some(id) => calendar::event_ics(c, id)?,
+                None => None,
+            })
+        })
+        .await?
+        .unwrap_or_default();
+    let (uid, target) = (copy.event.uid.clone(), copy.account);
+    let stamps = stores
+        .config
+        .read(move |c| calendar::reply_stamps(c, &[target], &uid))
+        .await?;
+    Ok((ics, stamps))
 }
 
 /// What a pass over `cal_inbox` did.

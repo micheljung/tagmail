@@ -3,6 +3,7 @@
 //! and the network; [`tagmail_dav::Client`] implements it.
 
 pub mod alarms;
+mod edit;
 #[cfg(test)]
 mod engine_tests;
 pub(crate) mod executor;
@@ -27,7 +28,7 @@ use tagmail_dav::{
     MultigetItem, PutCondition, Resource, ResourceRef, SchedulingMode, SyncPage, UidMatch,
 };
 use tagmail_store::calendar::{self, CaldavConfig, CaldavStatus, DiscoveryResult, Scheduling};
-use tagmail_store::rusqlite::{Connection, OptionalExtension};
+use tagmail_store::rusqlite::OptionalExtension;
 use tokio::sync::{Notify, watch};
 use tokio::task::JoinHandle;
 use url::Url;
@@ -60,7 +61,12 @@ pub(crate) trait CalDav: Send + Sync {
         ics: &'a str,
         condition: PutCondition,
     ) -> DavFuture<'a, Option<String>>;
-    fn delete<'a>(&'a self, href: &'a Url, etag: Option<&'a str>) -> DavFuture<'a, ()>;
+    fn delete<'a>(
+        &'a self,
+        href: &'a Url,
+        etag: Option<&'a str>,
+        schedule_reply: bool,
+    ) -> DavFuture<'a, ()>;
     /// MOVE, falling back to GET + PUT + DELETE where the server cannot.
     fn move_resource<'a>(
         &'a self,
@@ -113,8 +119,13 @@ impl CalDav for Client {
         Box::pin(async move { Client::put(self, href, ics, condition).await })
     }
 
-    fn delete<'a>(&'a self, href: &'a Url, etag: Option<&'a str>) -> DavFuture<'a, ()> {
-        Box::pin(Client::delete(self, href, etag))
+    fn delete<'a>(
+        &'a self,
+        href: &'a Url,
+        etag: Option<&'a str>,
+        schedule_reply: bool,
+    ) -> DavFuture<'a, ()> {
+        Box::pin(Client::delete(self, href, etag, schedule_reply))
     }
 
     fn move_resource<'a>(
@@ -288,16 +299,6 @@ pub(crate) struct CalAccount {
     pub addresses: Vec<String>,
 }
 
-fn addresses(conn: &Connection, id: AccountId) -> tagmail_store::Result<Vec<String>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT lower(address) FROM identity WHERE account_id = ?1 \
-         UNION SELECT lower(email) FROM account WHERE id = ?1 AND email IS NOT NULL",
-    )?;
-    Ok(stmt
-        .query_map([id.0], |r| r.get(0))?
-        .collect::<tagmail_store::rusqlite::Result<_>>()?)
-}
-
 /// Loads the account with its CalDAV login: the override when set, else
 /// the IMAP login. `None` if the account does not exist.
 pub(crate) async fn load(stores: &Stores, id: AccountId) -> Result<Option<CalAccount>> {
@@ -315,7 +316,7 @@ pub(crate) async fn load(stores: &Stores, id: AccountId) -> Result<Option<CalAcc
                 return Ok(None);
             };
             let config = calendar::load_caldav(c, id)?.unwrap_or_default();
-            Ok(Some((account, config, addresses(c, id)?)))
+            Ok(Some((account, config, calendar::my_addresses(c, id)?)))
         })
         .await?;
     let Some(((imap_host, email, imap_username), config, addresses)) = row else {
@@ -732,6 +733,14 @@ impl<F: ConnectorFactory> CalendarService for Engine<F> {
     ) -> BoxFuture<tagmail_api_core::WriteResult<tagmail_api_core::Submitted>> {
         let engine = self.clone();
         Box::pin(async move { engine.submit_calendar(request).await })
+    }
+
+    fn edit(
+        &self,
+        request: tagmail_api_core::calendar_dto::CalEditDto,
+    ) -> BoxFuture<tagmail_api_core::WriteResult<tagmail_api_core::Submitted>> {
+        let engine = self.clone();
+        Box::pin(async move { engine.submit_edit(request).await })
     }
 
     fn existing(

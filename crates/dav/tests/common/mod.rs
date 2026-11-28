@@ -158,10 +158,13 @@ pub async fn put_get_delete_with_if_match(server: &Server, test: &str) {
     let current = client.get(&href).await.unwrap();
     assert!(current.data.contains("SUMMARY:Second"));
     assert!(matches!(
-        client.delete(&href, Some(&etag)).await,
+        client.delete(&href, Some(&etag), true).await,
         Err(DavError::PreconditionFailed)
     ));
-    client.delete(&href, current.etag.as_deref()).await.unwrap();
+    client
+        .delete(&href, current.etag.as_deref(), true)
+        .await
+        .unwrap();
     assert!(matches!(
         client.get(&href).await,
         Err(DavError::NotFound { .. })
@@ -275,7 +278,10 @@ pub async fn sync_collection_incremental(server: &Server, test: &str, unknown: U
         .await
         .unwrap();
     let first_etag = client.get(&first).await.unwrap().etag;
-    client.delete(&first, first_etag.as_deref()).await.unwrap();
+    client
+        .delete(&first, first_etag.as_deref(), true)
+        .await
+        .unwrap();
 
     let delta = client
         .sync_collection(&calendar, Some(&token))

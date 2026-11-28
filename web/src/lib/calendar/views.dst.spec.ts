@@ -1,6 +1,6 @@
 import type { EventInstanceDto } from '@tagmail/api-types';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { placeDay } from './views';
+import { asShown, placeDay } from './views';
 
 const zone = process.env.TZ;
 
@@ -17,7 +17,8 @@ function instance(startUtc: string, endUtc: string): EventInstanceDto {
 		summary: null,
 		location: null,
 		status: null,
-		partstat: null
+		partstat: null,
+		floating: false
 	};
 }
 
@@ -46,5 +47,19 @@ describe('day placement across DST in Europe/Zurich', () => {
 		const day = new Date(2026, 9, 25);
 		const [nine] = placeDay([instance('2026-10-25T08:00:00Z', '2026-10-25T09:30:00Z')], day);
 		expect([nine.top, nine.height]).toEqual([9 * 60, 90]);
+	});
+
+	it('gives the hour that repeats when clocks go back its length', () => {
+		const day = new Date(2026, 9, 25);
+		const [repeat] = placeDay([instance('2026-10-25T00:30:00Z', '2026-10-25T01:30:00Z')], day);
+		expect([repeat.top, repeat.height]).toEqual([2 * 60 + 30, 60]);
+	});
+
+	it('shows a floating time at its wall clock', () => {
+		const [shown] = asShown([
+			{ ...instance('2026-07-01T09:00:00Z', '2026-07-01T10:00:00Z'), floating: true }
+		]);
+		const start = new Date(shown.start * 1000);
+		expect([start.getHours(), start.getMinutes(), shown.end - shown.start]).toEqual([9, 0, 3600]);
 	});
 });

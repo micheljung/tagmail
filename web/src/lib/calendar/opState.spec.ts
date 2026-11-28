@@ -28,6 +28,22 @@ describe('calendarNote', () => {
 		});
 	});
 
+	it('says the guests were not told when an invitation waits on a rejected edit', () => {
+		expect(
+			calendarNote('failed', info({ conflict: 'server_won', replyOpId: 'e-1#request' }))?.text
+		).toBe("Calendar changed on the server — your edit wasn't saved and guests were not told");
+	});
+
+	it('says guests were not told when a failed edit holds its invitations', () => {
+		const held = info({ replyOpId: 'e-1#cancel', reply: 'queued' });
+		expect(calendarNote('failed', held)?.text).toBe(
+			"Your edit wasn't saved and guests were not told"
+		);
+		expect(calendarNote('done', { ...held, reply: 'cancelled' })?.text).toBe(
+			'Guests were not told about this change'
+		);
+	});
+
 	it('says the reply went out when only the calendar write failed', () => {
 		expect(calendarNote('failed', info({ reply: 'sent' }))?.text).toBe(
 			'Reply sent, not saved to calendar'

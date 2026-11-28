@@ -1305,6 +1305,13 @@ impl Store for SqliteStore {
             .next())
     }
 
+    async fn my_addresses(&self, account: AccountId) -> StoreResult<Vec<String>> {
+        Ok(self
+            .config
+            .read(move |conn| tagmail_store::calendar::my_addresses(conn, account))
+            .await?)
+    }
+
     async fn event_by_uid(&self, account: AccountId, uid: String) -> StoreResult<Vec<CalEventDto>> {
         Ok(self
             .cache
@@ -1319,21 +1326,34 @@ impl Store for SqliteStore {
         uids: Vec<String>,
     ) -> StoreResult<InvitationContext> {
         let of = uids.clone();
-        let (mapped, replies) = self
+        let (mapped, replies, addresses, stamps) = self
             .config
             .read(move |conn| {
+                let mapped = sqlite_calendar::mapped_accounts(conn, account)?;
+                let targets: Vec<AccountId> = mapped.iter().map(|(a, _)| *a).collect();
+                let mut stamps = Vec::new();
+                for uid in &of {
+                    for (a, r, t) in tagmail_store::calendar::reply_stamps(conn, &targets, uid)? {
+                        stamps.push((uid.clone(), a, r, t));
+                    }
+                }
                 Ok((
-                    sqlite_calendar::mapped_accounts(conn, account)?,
+                    mapped,
                     sqlite_calendar::reply_states(conn, account, &of)?,
+                    tagmail_store::calendar::my_addresses(conn, account)?,
+                    stamps,
                 ))
             })
             .await?;
         Ok(self
             .cache
             .read(move |conn| {
-                sqlite_calendar::invitation_context(conn, &mapped, message, &uids, &replies)
+                sqlite_calendar::invitation_context(
+                    conn, &mapped, message, &uids, &replies, addresses,
+                )
             })
-            .await?)
+            .await?
+            .with_reply_stamps(stamps))
     }
 
     async fn mark_deleting(&self, id: AccountId) -> StoreResult<MarkDeleting> {

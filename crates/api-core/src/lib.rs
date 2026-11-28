@@ -10,6 +10,8 @@ pub mod compose;
 pub mod compose_dto;
 pub mod desktop_dto;
 pub mod dto;
+#[cfg(feature = "calendar")]
+pub mod event_fields;
 pub mod events;
 pub mod id_index;
 pub mod identities;

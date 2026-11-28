@@ -70,7 +70,10 @@ fn server_only(route: RouteId) -> bool {
 
 /// Routes served from calendar records, while the replica holds them.
 fn calendar_read(route: RouteId) -> bool {
-    matches!(route, RouteId::Calendars | RouteId::CalendarEvents)
+    matches!(
+        route,
+        RouteId::Calendars | RouteId::CalendarEvents | RouteId::CalendarEvent
+    )
 }
 
 /// Calendar writes, queued as intents while the replica holds calendars.
@@ -79,6 +82,7 @@ fn calendar_write(route: RouteId) -> Option<CalKind> {
         RouteId::CalendarRsvp => Some(CalKind::Rsvp),
         RouteId::CalendarImport => Some(CalKind::Import),
         RouteId::CalendarApply => Some(CalKind::Apply),
+        RouteId::CalendarEdit => Some(CalKind::Edit),
         _ => None,
     }
 }

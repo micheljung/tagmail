@@ -476,10 +476,15 @@ impl Client {
         Ok(etag_header(&response))
     }
 
-    pub async fn delete(&self, href: &Url, etag: Option<&str>) -> Result<()> {
+    /// DELETE; without `schedule_reply` the server is asked not to send the
+    /// attendee's REPLY (RFC 6638 §8.1, `Schedule-Reply: F`).
+    pub async fn delete(&self, href: &Url, etag: Option<&str>, schedule_reply: bool) -> Result<()> {
         let mut req = Req::new(Method::DELETE, href);
         if let Some(etag) = etag {
             req = req.header(header::IF_MATCH, etag)?;
+        }
+        if !schedule_reply {
+            req = req.header(HeaderName::from_static("schedule-reply"), "F")?;
         }
         self.send_ok(req).await?;
         Ok(())
@@ -506,7 +511,7 @@ impl Client {
             return Err(DavError::PreconditionFailed);
         }
         self.put(to, &resource.data, PutCondition::Create).await?;
-        self.delete(from, resource.etag.as_deref()).await
+        self.delete(from, resource.etag.as_deref(), false).await
     }
 
     /// Finds the object holding `uid` in any of `calendars`.

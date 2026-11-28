@@ -451,10 +451,10 @@ async fn put_delete_preconditions() {
             ..
         }
     ));
-    client.delete(&href, Some("\"n1\"")).await.unwrap();
+    client.delete(&href, Some("\"n1\""), true).await.unwrap();
     assert!(matches!(
         client
-            .delete(&url(DAV_HOST, "/cal/work/none.ics"), None)
+            .delete(&url(DAV_HOST, "/cal/work/none.ics"), None, true)
             .await,
         Err(DavError::NotFound { .. })
     ));

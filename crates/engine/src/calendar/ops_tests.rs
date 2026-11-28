@@ -5,7 +5,9 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use tagmail_api_core::calendar_dto::RsvpPartstatDto;
+use tagmail_api_core::calendar_dto::{
+    CalEditDto, CalEditKindDto, EventAttendeeDto, EventFieldsDto, RsvpPartstatDto,
+};
 use tagmail_api_core::compose::Compose;
 use tagmail_api_core::mime::reduce::{CalendarParts, calendar_parts};
 use tagmail_api_core::ops_dto::{CalConflictDto, CalReplyStateDto, OpDto, OpStatusDto};
@@ -862,4 +864,906 @@ async fn unauthenticated_or_untrusted_updates_are_manual() {
     queue_invite(&f).await;
     invite::process_inbox(&f.stores, &mail).await;
     assert!(applies(&f).await.is_empty());
+}
+
+fn fields(summary: &str, start: &str, attendees: &[&str]) -> EventFieldsDto {
+    EventFieldsDto {
+        summary: Some(summary.into()),
+        location: None,
+        description: None,
+        start: format!("2099-12-01T{start}"),
+        end: "2099-12-01T18:00:00".into(),
+        all_day: false,
+        tzid: Some("Europe/Zurich".into()),
+        attendees: attendees
+            .iter()
+            .map(|a| EventAttendeeDto {
+                email: (*a).into(),
+                name: None,
+                partstat: None,
+            })
+            .collect(),
+        alarms: vec![15],
+    }
+}
+
+fn edit(op_id: &str, kind: CalEditKindDto, href: Option<&str>) -> CalEditDto {
+    CalEditDto {
+        op_id: op_id.into(),
+        kind,
+        account_id: ACCOUNT.0,
+        calendar_href: WORK.into(),
+        href: href.map(str::to_owned),
+        etag: None,
+        event: None,
+        dest_calendar_href: None,
+        send_decline: None,
+    }
+}
+
+impl Fixture {
+    async fn edited(&self, request: CalEditDto) -> OpDto {
+        let op_id = request.op_id.clone();
+        created(self.engine.edit(request).await.unwrap());
+        let done = self.settled(&op_id).await;
+        assert_eq!(done.status, OpStatusDto::Done, "{:?}", done.error);
+        done
+    }
+
+    async fn href_of(&self, op_id: &str) -> String {
+        let id = op_id.to_owned();
+        self.stores
+            .config
+            .read(move |c| Ok(executor::load_one(c, &id)?))
+            .await
+            .unwrap()
+            .and_then(|op| op.href)
+            .unwrap()
+    }
+
+    async fn put(&self, op_id: &str, href: Option<&str>, event: EventFieldsDto) -> String {
+        self.edited(CalEditDto {
+            event: Some(event),
+            ..edit(op_id, CalEditKindDto::Put, href)
+        })
+        .await;
+        self.href_of(op_id).await
+    }
+}
+
+#[tokio::test]
+async fn events_are_created_edited_moved_and_deleted() {
+    let f = fixture(Scheduling::default()).await;
+    f.connector.dav.add_calendar(super::fake::OTHER, None, None);
+    f.engine.settings_changed(ACCOUNT);
+    let href = f.put("n-1", None, fields("Lunch", "12:00:00", &[])).await;
+    let (_, stored) = f.connector.dav.resource(&href).unwrap();
+    assert!(stored.contains("SUMMARY:Lunch") && stored.contains("TRIGGER:-PT15M"));
+    assert!(stored.contains("DTSTART;TZID=Europe/Zurich:20991201T120000"));
+    assert!(stored.contains("BEGIN:VTIMEZONE"));
+    assert!(f.outbox_ops().await.is_empty(), "no attendees, no mail");
+
+    f.put("n-2", Some(&href), fields("Long lunch", "12:00:00", &[]))
+        .await;
+    let (_, stored) = f.connector.dav.resource(&href).unwrap();
+    assert!(stored.contains("SUMMARY:Long lunch") && stored.contains("SEQUENCE:1"));
+
+    for _ in 0..POLL_TRIES {
+        if f.engine
+            .edit(CalEditDto {
+                dest_calendar_href: Some(super::fake::OTHER.into()),
+                ..edit("n-3", CalEditKindDto::Move, Some(&href))
+            })
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        tokio::time::sleep(POLL_STEP).await;
+    }
+    assert_eq!(f.settled("n-3").await.status, OpStatusDto::Done);
+    let moved = f.href_of("n-3").await;
+    assert!(moved.starts_with(super::fake::OTHER), "{moved}");
+    assert!(f.connector.dav.resource(&href).is_none());
+
+    let delete = CalEditDto {
+        calendar_href: super::fake::OTHER.into(),
+        ..edit("n-4", CalEditKindDto::Delete, Some(&moved))
+    };
+    f.edited(delete).await;
+    assert!(f.connector.dav.resource(&moved).is_none());
+    assert!(f.outbox_ops().await.is_empty());
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_changed_etag_is_a_conflict() {
+    let f = fixture(Scheduling::default()).await;
+    let href = f.put("c-1", None, fields("Lunch", "12:00:00", &[])).await;
+    let stale = CalEditDto {
+        etag: Some("\"stale\"".into()),
+        event: Some(fields("Mine", "12:00:00", &[])),
+        ..edit("c-2", CalEditKindDto::Put, Some(&href))
+    };
+    let refused = f.engine.edit(stale).await.unwrap_err();
+    assert!(matches!(refused, WriteError::Conflict(_)), "{refused}");
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn invitations_in_client_mode_send_request_and_cancel() {
+    let f = fixture(Scheduling::default()).await;
+    let guests = ["ann@example.com", "bo@example.com"];
+    let href = f
+        .put("i-1", None, fields("Plan", "12:00:00", &guests))
+        .await;
+    let (_, stored) = f.connector.dav.resource(&href).unwrap();
+    assert!(
+        stored.contains(&format!("ORGANIZER;CN=Me:mailto:{ME}")),
+        "{stored}"
+    );
+    assert!(stored.contains("SCHEDULE-AGENT=CLIENT"), "{stored}");
+    assert_eq!(f.outbox_ops().await, ["i-1#request"]);
+
+    f.put("i-2", Some(&href), fields("Plan", "13:00:00", &guests[..1]))
+        .await;
+    let (_, stored) = f.connector.dav.resource(&href).unwrap();
+    assert!(stored.contains("SEQUENCE:1") && !stored.contains("bo@example.com"));
+    assert_eq!(
+        f.outbox_ops().await,
+        ["i-1#request", "i-2#request", "i-2#cancel"]
+    );
+
+    let mut only_alarm = fields("Plan", "13:00:00", &guests[..1]);
+    only_alarm.alarms = vec![30];
+    f.put("i-3", Some(&href), only_alarm).await;
+    assert_eq!(f.outbox_ops().await.len(), 3, "a reminder is mine alone");
+
+    f.edited(edit("i-4", CalEditKindDto::Delete, Some(&href)))
+        .await;
+    assert_eq!(f.outbox_ops().await.last().unwrap(), "i-4#cancel");
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn invitations_in_server_mode_queue_no_outbox() {
+    let f = fixture(server_scheduling()).await;
+    let href = f
+        .put(
+            "s-1",
+            None,
+            fields("Plan", "12:00:00", &["ann@example.com"]),
+        )
+        .await;
+    let (_, stored) = f.connector.dav.resource(&href).unwrap();
+    assert!(!stored.contains("SCHEDULE-AGENT"), "{stored}");
+    f.edited(edit("s-2", CalEditKindDto::Delete, Some(&href)))
+        .await;
+    assert!(f.outbox_ops().await.is_empty());
+    f.engine.shutdown().await;
+}
+
+fn organized(partstat: &str) -> String {
+    format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//test//EN\r\nBEGIN:VEVENT\r\n\
+         UID:{UID}\r\nDTSTAMP:20261101T120000Z\r\nSEQUENCE:0\r\n\
+         DTSTART:20991201T090000Z\r\nDTEND:20991201T100000Z\r\nSUMMARY:Review\r\n\
+         ORGANIZER;CN=Me:mailto:{ME}\r\n\
+         ATTENDEE;PARTSTAT={partstat};RSVP=TRUE:mailto:{BOSS}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    )
+}
+
+fn reply_mail(from: &str, results: Option<&str>) -> CalendarParts {
+    let ics = organized("ACCEPTED")
+        .replace("VERSION:2.0\r\n", "VERSION:2.0\r\nMETHOD:REPLY\r\n")
+        .replace("DTSTAMP:20261101T120000Z", "DTSTAMP:20261102T120000Z");
+    let results = results
+        .map(|r| format!("Authentication-Results: {r}\r\n"))
+        .unwrap_or_default();
+    let raw = format!(
+        "{results}From: <{from}>\r\nTo: {ME}\r\nSubject: Accepted\r\n\
+         Content-Type: text/calendar; method=REPLY\r\n\r\n{ics}"
+    );
+    calendar_parts(raw.as_bytes()).unwrap()
+}
+
+async fn organized_and_synced(f: &Fixture, partstat: &str) {
+    f.connector
+        .dav
+        .put("meet.ics", "\"o1\"", &organized(partstat));
+    f.engine.settings_changed(ACCOUNT);
+    for _ in 0..POLL_TRIES {
+        let n = f
+            .stores
+            .cache
+            .read(
+                |c| Ok(c.query_row("SELECT count(*) FROM cal_event", [], |r| r.get::<_, i64>(0))?),
+            )
+            .await
+            .unwrap();
+        if n == 1 {
+            return;
+        }
+        tokio::time::sleep(POLL_STEP).await;
+    }
+    panic!("the calendar never synced");
+}
+
+#[tokio::test]
+async fn an_incoming_reply_sets_the_attendees_partstat_once() {
+    let f = fixture(Scheduling::default()).await;
+    organized_and_synced(&f, "NEEDS-ACTION").await;
+    f.engine.shutdown().await;
+    for spoofed in [
+        reply_mail("eve@example.com", Some(PASS)),
+        reply_mail(BOSS, None),
+        reply_mail(
+            BOSS,
+            Some("evil.example; dmarc=pass header.from=example.com"),
+        ),
+    ] {
+        let mail = FakeMail(Mutex::new(Some(spoofed)));
+        queue_invite(&f).await;
+        invite::process_inbox(&f.stores, &mail).await;
+    }
+    assert!(applies(&f).await.is_empty());
+
+    let mail = FakeMail(Mutex::new(Some(reply_mail(BOSS, Some(PASS)))));
+    queue_invite(&f).await;
+    invite::process_inbox(&f.stores, &mail).await;
+    let ids = applies(&f).await;
+    assert_eq!(ids.len(), 1);
+    f.engine.start_calendar_on(Arc::new(f.connector.clone()));
+    assert_eq!(f.settled(&ids[0]).await.status, OpStatusDto::Done);
+    let stored = f.connector.dav.resource("/home/work/meet.ics").unwrap().1;
+    assert!(
+        stored.contains(&format!("PARTSTAT=ACCEPTED;RSVP=TRUE:mailto:{BOSS}")),
+        "{stored}"
+    );
+    assert!(f.outbox_ops().await.is_empty());
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_reply_already_stored_queues_nothing() {
+    let f = fixture(Scheduling::default()).await;
+    organized_and_synced(&f, "ACCEPTED").await;
+    f.engine.shutdown().await;
+    let mail = FakeMail(Mutex::new(Some(reply_mail(BOSS, Some(PASS)))));
+    queue_invite(&f).await;
+    invite::process_inbox(&f.stores, &mail).await;
+    assert!(applies(&f).await.is_empty());
+}
+
+/// The editor's fields of the cached event at `href`.
+async fn cached_fields(f: &Fixture, href: &str) -> (EventFieldsDto, Option<String>) {
+    let href = href.to_owned();
+    let (ics, etag) = f
+        .stores
+        .cache
+        .read(move |c| {
+            let (id, etag): (i64, Option<String>) = c.query_row(
+                "SELECT id, etag FROM cal_event WHERE href = ?1",
+                [href],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            Ok((calendar::event_ics(c, id)?.unwrap(), etag))
+        })
+        .await
+        .unwrap();
+    let parsed = tagmail_calendar::parse(&ics).unwrap();
+    (
+        tagmail_api_core::event_fields::fields_dto(&tagmail_calendar::fields(&parsed).unwrap()),
+        etag,
+    )
+}
+
+const MEET: &str = "/home/work/meet.ics";
+
+async fn held_outbox(f: &Fixture) -> Vec<(String, bool)> {
+    f.stores
+        .config
+        .read(|c| {
+            let mut stmt = c.prepare("SELECT op_id, next_at FROM outbox ORDER BY id")?;
+            Ok(stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get::<_, Option<i64>>(1)? == Some(executor::HELD),
+                    ))
+                })?
+                .collect::<tagmail_store::rusqlite::Result<_>>()?)
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn an_invited_event_edit_keeps_its_sequence_so_updates_still_apply() {
+    let f = fixture(Scheduling::default()).await;
+    synced_with_answered_event(&f).await;
+    let (mut fields, _) = cached_fields(&f, MEET).await;
+    fields.summary = Some("My name for it".into());
+    fields.alarms = vec![5];
+    f.put("v-1", Some(MEET), fields.clone()).await;
+    let stored = f.connector.dav.resource(MEET).unwrap().1;
+    assert!(
+        stored.contains("SUMMARY:My name for it") && stored.contains("SEQUENCE:0"),
+        "{stored}"
+    );
+    assert!(stored.contains("DTSTAMP:20261101T120000Z"), "{stored}");
+    assert!(
+        f.outbox_ops().await.is_empty(),
+        "the organizer is told nothing"
+    );
+
+    fields.attendees.push(EventAttendeeDto {
+        email: "friend@example.com".into(),
+        name: None,
+        partstat: None,
+    });
+    let refused = f
+        .engine
+        .edit(CalEditDto {
+            event: Some(fields),
+            ..edit("v-2", CalEditKindDto::Put, Some(MEET))
+        })
+        .await
+        .unwrap_err();
+    assert!(matches!(&refused, WriteError::Invalid { field, .. } if field == "attendees"));
+
+    f.engine.shutdown().await;
+    let update = vevent(1, "20261102T120000Z", "NEEDS-ACTION", Some("REQUEST"));
+    let mail = FakeMail(Mutex::new(Some(message(&update, "REQUEST", Some(PASS)))));
+    queue_invite(&f).await;
+    invite::process_inbox(&f.stores, &mail).await;
+    assert_eq!(
+        applies(&f).await.len(),
+        1,
+        "the organizer's next update is not stale"
+    );
+}
+
+#[tokio::test]
+async fn deleting_an_invited_event_can_send_a_decline() {
+    for (scheduling, decline, replies) in [
+        (Scheduling::default(), true, 1),
+        (Scheduling::default(), false, 0),
+        (server_scheduling(), true, 0),
+    ] {
+        let f = fixture(scheduling).await;
+        synced_with_answered_event(&f).await;
+        f.connector.dav.took();
+        f.edited(CalEditDto {
+            send_decline: Some(decline),
+            ..edit("x-1", CalEditKindDto::Delete, Some(MEET))
+        })
+        .await;
+        assert!(f.connector.dav.resource(MEET).is_none());
+        let deletes: Vec<&str> = f
+            .connector
+            .dav
+            .took()
+            .into_iter()
+            .filter(|c| c.starts_with("delete"))
+            .collect();
+        let asked = if decline {
+            "delete"
+        } else {
+            "delete without reply"
+        };
+        assert_eq!(deletes, [asked], "Schedule-Reply: F unless declining");
+        let outbox = f.outbox_ops().await;
+        assert_eq!(outbox.len(), replies, "{outbox:?}");
+        if replies > 0 {
+            assert_eq!(outbox, ["x-1#reply"]);
+            let raw = f
+                .stores
+                .config
+                .read(|c| {
+                    Ok(c.query_row("SELECT mime_file FROM outbox", [], |r| {
+                        r.get::<_, String>(0)
+                    })?)
+                })
+                .await
+                .unwrap();
+            let mail = std::fs::read_to_string(f.stores.outbox.join(raw)).unwrap();
+            assert!(
+                mail.contains("METHOD:REPLY") && mail.contains("PARTSTAT=DECLINED"),
+                "{mail}"
+            );
+        }
+        f.engine.shutdown().await;
+    }
+}
+
+#[tokio::test]
+async fn invitations_wait_for_the_edit_and_go_once_it_is_written() {
+    let f = fixture(Scheduling::default()).await;
+    f.connector
+        .dav
+        .fail_next("put", DavError::PreconditionFailed);
+    created(
+        f.engine
+            .edit(CalEditDto {
+                event: Some(fields("Plan", "12:00:00", &["ann@example.com"])),
+                ..edit("h-1", CalEditKindDto::Put, None)
+            })
+            .await
+            .unwrap(),
+    );
+    let failed = f.settled("h-1").await;
+    assert_eq!(
+        failed.calendar.as_ref().unwrap().conflict,
+        Some(CalConflictDto::ServerWon)
+    );
+    assert_eq!(
+        failed.calendar.as_ref().unwrap().reply_op_id.as_deref(),
+        Some("h-1#request")
+    );
+    assert_eq!(held_outbox(&f).await, [("h-1#request".to_owned(), true)]);
+
+    WriteService::retry_op(&f.engine, "h-1".into())
+        .await
+        .unwrap();
+    assert_eq!(f.settled("h-1").await.status, OpStatusDto::Done);
+    assert_eq!(held_outbox(&f).await, [("h-1#request".to_owned(), false)]);
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn discarding_a_held_edit_cancels_its_invitations() {
+    let f = fixture(Scheduling::default()).await;
+    f.connector
+        .dav
+        .fail_next("put", DavError::PreconditionFailed);
+    created(
+        f.engine
+            .edit(CalEditDto {
+                event: Some(fields("Plan", "12:00:00", &["ann@example.com"])),
+                ..edit("h-2", CalEditKindDto::Put, None)
+            })
+            .await
+            .unwrap(),
+    );
+    assert_eq!(f.settled("h-2").await.status, OpStatusDto::Failed);
+    WriteService::discard_op(&f.engine, "h-2".into())
+        .await
+        .unwrap();
+    assert!(held_outbox(&f).await.is_empty());
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn white_space_and_reminders_change_nothing_attendees_see() {
+    let f = fixture(Scheduling::default()).await;
+    let href = f
+        .put(
+            "w-1",
+            None,
+            fields("Plan", "12:00:00", &["ann@example.com"]),
+        )
+        .await;
+    let stored = f.connector.dav.resource(&href).unwrap().1;
+    let padded = stored.replace(
+        "SUMMARY:Plan\r\n",
+        "SUMMARY:Plan\r\nDESCRIPTION:Agenda\\n\r\n",
+    );
+    f.connector
+        .dav
+        .put(href.rsplit('/').next().unwrap(), "\"w2\"", &padded);
+    f.engine.settings_changed(ACCOUNT);
+    let mut fields = loop {
+        let (fields, etag) = cached_fields(&f, &href).await;
+        if etag.as_deref() == Some("\"w2\"") {
+            break fields;
+        }
+        tokio::time::sleep(POLL_STEP).await;
+    };
+    assert_eq!(fields.description.as_deref(), Some("Agenda\n"));
+    fields.description = Some("Agenda".into());
+    fields.alarms = vec![30];
+    f.put("w-2", Some(&href), fields).await;
+    let stored = f.connector.dav.resource(&href).unwrap().1;
+    assert!(
+        stored.contains("SEQUENCE:0") && stored.contains("DESCRIPTION:Agenda\\n"),
+        "{stored}"
+    );
+    assert_eq!(f.outbox_ops().await, ["w-1#request"]);
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn guests_without_mail_addresses_are_kept() {
+    let f = fixture(Scheduling::default()).await;
+    let room = super::fake::event("room-1", 0, None).replace(
+        "END:VEVENT",
+        "ATTENDEE;CUTYPE=ROOM:urn:uuid:room-4\r\nEND:VEVENT",
+    );
+    f.connector.dav.put("room.ics", "\"r1\"", &room);
+    f.engine.settings_changed(ACCOUNT);
+    let href = "/home/work/room.ics";
+    let mut fields = loop {
+        if let Ok(found) = f
+            .stores
+            .cache
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM cal_event WHERE href = '/home/work/room.ics'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            && found == 1
+        {
+            break cached_fields(&f, href).await.0;
+        }
+        tokio::time::sleep(POLL_STEP).await;
+    };
+    assert!(fields.attendees.iter().all(|a| a.email.contains('@')));
+    fields.summary = Some("Room booked".into());
+    f.put("r-1", Some(href), fields).await;
+    let stored = f.connector.dav.resource(href).unwrap().1;
+    assert!(
+        stored.contains("ATTENDEE;CUTYPE=ROOM:urn:uuid:room-4"),
+        "{stored}"
+    );
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_repeating_event_with_exceptions_keeps_its_times() {
+    let f = fixture(Scheduling::default()).await;
+    let series = super::fake::event("series-1", 0, Some("FREQ=WEEKLY"))
+        .replace("END:VEVENT", "EXDATE:20261208T090000Z\r\nEND:VEVENT");
+    f.connector.dav.put("series.ics", "\"s1\"", &series);
+    f.engine.settings_changed(ACCOUNT);
+    let href = "/home/work/series.ics";
+    let mut fields = loop {
+        let n = f
+            .stores
+            .cache
+            .read(|c| {
+                Ok(c.query_row(
+                    "SELECT count(*) FROM cal_event WHERE href = '/home/work/series.ics'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        if n == 1 {
+            break cached_fields(&f, href).await.0;
+        }
+        tokio::time::sleep(POLL_STEP).await;
+    };
+    fields.start = fields.start.replace("T09:", "T10:");
+    fields.end = fields.end.replace("T10:", "T11:");
+    let refused = f
+        .engine
+        .edit(CalEditDto {
+            event: Some(fields),
+            ..edit("s-9", CalEditKindDto::Put, Some(href))
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&refused, WriteError::Invalid { field, .. } if field == "start"),
+        "{refused}"
+    );
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn inviting_needs_an_identity_to_send_from() {
+    let f = fixture(Scheduling::default()).await;
+    f.stores
+        .config
+        .write(|tx| Ok(tx.execute("DELETE FROM identity", [])?))
+        .await
+        .unwrap();
+    let refused = f
+        .engine
+        .edit(CalEditDto {
+            event: Some(fields("Plan", "12:00:00", &["ann@example.com"])),
+            ..edit("n-9", CalEditKindDto::Put, None)
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&refused, WriteError::Invalid { message, .. } if message.contains("identity"))
+    );
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn an_older_reply_after_a_newer_one_is_not_applied() {
+    let f = fixture(Scheduling::default()).await;
+    organized_and_synced(&f, "NEEDS-ACTION").await;
+    f.engine.shutdown().await;
+    let mail = FakeMail(Mutex::new(Some(reply_mail(BOSS, Some(PASS)))));
+    queue_invite(&f).await;
+    invite::process_inbox(&f.stores, &mail).await;
+    assert_eq!(applies(&f).await.len(), 1);
+    let older = organized("DECLINED")
+        .replace("VERSION:2.0\r\n", "VERSION:2.0\r\nMETHOD:REPLY\r\n")
+        .replace("DTSTAMP:20261101T120000Z", "DTSTAMP:20261101T130000Z");
+    let raw = format!(
+        "Authentication-Results: {PASS}\r\nFrom: <{BOSS}>\r\nTo: {ME}\r\nSubject: Declined\r\n\
+         Content-Type: text/calendar; method=REPLY\r\n\r\n{older}"
+    );
+    let mail = FakeMail(Mutex::new(Some(calendar_parts(raw.as_bytes()).unwrap())));
+    queue_invite(&f).await;
+    invite::process_inbox(&f.stores, &mail).await;
+    assert_eq!(applies(&f).await.len(), 1);
+}
+
+#[tokio::test]
+async fn edits_of_one_event_run_in_order_through_retries() {
+    let f = fixture(Scheduling::default()).await;
+    f.engine.shutdown().await;
+    let mut put = CalOp::new("o-1".into(), ACCOUNT, CalOpKind::Put, "u-1".into());
+    put.next_at = Some(i64::MAX);
+    let mut failed = CalOp::new("o-4".into(), ACCOUNT, CalOpKind::Put, "u-3".into());
+    failed.state = tagmail_core::ops::OpState::Failed;
+    let ops = [
+        put,
+        CalOp::new("o-2".into(), ACCOUNT, CalOpKind::Move, "u-1".into()),
+        CalOp::new("o-3".into(), ACCOUNT, CalOpKind::Move, "u-2".into()),
+        failed,
+        CalOp::new("o-5".into(), ACCOUNT, CalOpKind::Move, "u-3".into()),
+    ];
+    f.stores
+        .config
+        .write(move |tx| {
+            for op in &ops {
+                executor::insert(tx, op)?;
+            }
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let due: Vec<String> = executor::due(&f.stores)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|o| o.op_id)
+        .collect();
+    assert_eq!(
+        due,
+        ["o-3", "o-5"],
+        "a move waits for a pending put before it, not for a failed one"
+    );
+}
+
+#[tokio::test]
+async fn applying_a_reply_by_hand_needs_my_event() {
+    let f = fixture(Scheduling::default()).await;
+    synced_with_answered_event(&f).await;
+    let reply = vevent(0, "20261102T120000Z", "ACCEPTED", Some("REPLY"));
+    let refused = f
+        .engine
+        .submit(CalRequest {
+            op_id: "m-9".into(),
+            account: ACCOUNT,
+            message: MessageRowId(1),
+            source: message(&reply, "REPLY", Some(PASS)),
+            action: CalAction::Apply {
+                allow_organizer_change: false,
+            },
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&refused, WriteError::Invalid { message, .. } if message.contains("do not organize")),
+        "{refused}"
+    );
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_rerun_after_its_write_landed_is_done() {
+    let f = fixture(Scheduling::default()).await;
+    f.engine.shutdown().await;
+    let written = vevent(1, "20261102T120000Z", "ACCEPTED", None).replace("Review", "Edited");
+    f.connector.dav.put("meet.ics", "\"after\"", &written);
+    let dir = executor::ics_dir(&f.stores);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("c-9.ics"), &written).unwrap();
+    let mut op = CalOp::new("c-9".into(), ACCOUNT, CalOpKind::Put, UID.into());
+    op.calendar_href = Some(WORK.into());
+    op.href = Some(MEET.into());
+    op.if_match = Some("\"before\"".into());
+    op.ics_file = Some("c-9.ics".into());
+    f.stores
+        .config
+        .write(move |tx| Ok(executor::insert(tx, &op)?))
+        .await
+        .unwrap();
+    f.engine.start_calendar_on(Arc::new(f.connector.clone()));
+    let done = f.settled("c-9").await;
+    assert_eq!(done.status, OpStatusDto::Done, "{:?}", done.error);
+    assert_eq!(done.calendar.unwrap().conflict, None);
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_cancelled_invitation_of_an_edit_reads_cancelled() {
+    let f = fixture(Scheduling::default()).await;
+    f.connector
+        .dav
+        .fail_next("put", DavError::PreconditionFailed);
+    created(
+        f.engine
+            .edit(CalEditDto {
+                event: Some(fields("Plan", "12:00:00", &["ann@example.com"])),
+                ..edit("k-1", CalEditKindDto::Put, None)
+            })
+            .await
+            .unwrap(),
+    );
+    let failed = f.settled("k-1").await;
+    assert_eq!(
+        failed.calendar.unwrap().reply,
+        Some(CalReplyStateDto::Queued)
+    );
+    let id = f
+        .engine
+        .outbox()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|o| o.op_id == "k-1#request")
+        .unwrap()
+        .id;
+    f.engine.cancel_impl(id).await.unwrap();
+    assert_eq!(
+        f.op("k-1").await.calendar.unwrap().reply,
+        Some(CalReplyStateDto::Cancelled)
+    );
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn updating_guests_needs_the_organizers_identity() {
+    let f = fixture(Scheduling::default()).await;
+    let href = f
+        .put(
+            "g-1",
+            None,
+            fields("Plan", "12:00:00", &["ann@example.com"]),
+        )
+        .await;
+    f.stores
+        .config
+        .write(|tx| Ok(tx.execute("DELETE FROM identity", [])?))
+        .await
+        .unwrap();
+    let refused = f
+        .engine
+        .edit(CalEditDto {
+            event: Some(fields("Plan", "13:00:00", &["ann@example.com"])),
+            ..edit("g-2", CalEditKindDto::Put, Some(&href))
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&refused, WriteError::Invalid { message, .. } if message.contains(&format!("identity for {ME}"))),
+        "{refused}"
+    );
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_rerun_over_a_changed_copy_is_not_done() {
+    let f = fixture(Scheduling::default()).await;
+    f.engine.shutdown().await;
+    let written = vevent(1, "20261102T120000Z", "ACCEPTED", None)
+        .replace("END:VEVENT", "BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:R\r\nTRIGGER:-PT5M\r\nEND:VALARM\r\nEND:VEVENT");
+    let other = vevent(1, "20261102T120000Z", "ACCEPTED", None)
+        .replace("END:VEVENT", "X-OTHER-CLIENT:changed\r\nEND:VEVENT");
+    f.connector.dav.put("meet.ics", "\"after\"", &other);
+    let dir = executor::ics_dir(&f.stores);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("c-8.ics"), &written).unwrap();
+    let mut op = CalOp::new("c-8".into(), ACCOUNT, CalOpKind::Put, UID.into());
+    op.calendar_href = Some(WORK.into());
+    op.href = Some(MEET.into());
+    op.if_match = Some("\"before\"".into());
+    op.ics_file = Some("c-8.ics".into());
+    f.stores
+        .config
+        .write(move |tx| Ok(executor::insert(tx, &op)?))
+        .await
+        .unwrap();
+    f.engine.start_calendar_on(Arc::new(f.connector.clone()));
+    let failed = f.settled("c-8").await;
+    assert_eq!(
+        failed.calendar.unwrap().conflict,
+        Some(CalConflictDto::ServerWon),
+        "a reminder edit that did not land is not done"
+    );
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn cancelling_one_invitation_of_an_edit_cancels_both() {
+    let f = fixture(Scheduling::default()).await;
+    let guests = ["ann@example.com", "bo@example.com"];
+    let href = f
+        .put("b-1", None, fields("Plan", "12:00:00", &guests))
+        .await;
+    f.connector
+        .dav
+        .fail_next("put", DavError::PreconditionFailed);
+    created(
+        f.engine
+            .edit(CalEditDto {
+                event: Some(fields("Plan", "13:00:00", &guests[..1])),
+                ..edit("b-2", CalEditKindDto::Put, Some(&href))
+            })
+            .await
+            .unwrap(),
+    );
+    f.settled("b-2").await;
+    let held: Vec<_> = held_outbox(&f)
+        .await
+        .into_iter()
+        .filter(|(id, _)| id.starts_with("b-2"))
+        .collect();
+    assert_eq!(held.len(), 2, "{held:?}");
+    let id = f
+        .engine
+        .outbox()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|o| o.op_id == "b-2#request")
+        .unwrap()
+        .id;
+    f.engine.cancel_impl(id).await.unwrap();
+    assert!(
+        held_outbox(&f)
+            .await
+            .iter()
+            .all(|(id, _)| !id.starts_with("b-2")),
+        "the CANCEL does not go out alone"
+    );
+    assert_eq!(
+        f.op("b-2").await.calendar.unwrap().reply,
+        Some(CalReplyStateDto::Cancelled)
+    );
+    f.engine.shutdown().await;
+}
+
+#[tokio::test]
+async fn applying_an_older_reply_by_hand_is_refused() {
+    let f = fixture(Scheduling::default()).await;
+    organized_and_synced(&f, "NEEDS-ACTION").await;
+    f.engine.shutdown().await;
+    let mail = FakeMail(Mutex::new(Some(reply_mail(BOSS, Some(PASS)))));
+    queue_invite(&f).await;
+    invite::process_inbox(&f.stores, &mail).await;
+    assert_eq!(applies(&f).await.len(), 1);
+    let older = organized("DECLINED")
+        .replace("VERSION:2.0\r\n", "VERSION:2.0\r\nMETHOD:REPLY\r\n")
+        .replace("DTSTAMP:20261101T120000Z", "DTSTAMP:20261101T130000Z");
+    let refused = f
+        .engine
+        .submit(CalRequest {
+            op_id: "m-8".into(),
+            account: ACCOUNT,
+            message: MessageRowId(1),
+            source: message(&older, "REPLY", Some(PASS)),
+            action: CalAction::Apply {
+                allow_organizer_change: false,
+            },
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&refused, WriteError::Invalid { message, .. } if message.contains("newer reply")),
+        "{refused}"
+    );
 }

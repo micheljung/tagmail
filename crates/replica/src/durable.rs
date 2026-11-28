@@ -15,6 +15,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/durable/V3__intent_sent_at.sql"),
     include_str!("../migrations/durable/V4__cal_intent.sql"),
     include_str!("../migrations/durable/V5__cal_intent_server.sql"),
+    include_str!("../migrations/durable/V6__cal_intent_edit.sql"),
 ];
 
 pub const BOUND_SERVER_KEY: &str = "bound_server";

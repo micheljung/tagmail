@@ -226,6 +226,47 @@ impl CalAccount {
         serde_json::from_value(op).unwrap()
     }
 
+    /// `POST /api/calendar/ops`; waits until the op is done.
+    pub async fn edit(&self, body: Value) -> OpDto {
+        let (status, op) = self.call(Method::Post, "/api/calendar/ops", &body).await;
+        assert_eq!(status, 202, "{op}");
+        let op: OpDto = serde_json::from_value(op).unwrap();
+        let done = self.settled(&op.op_id).await;
+        assert_eq!(done.status, OpStatusDto::Done, "{:?}", done.error);
+        done
+    }
+
+    /// The resource and UID an edit op wrote.
+    pub async fn written(&self, op_id: &str) -> (String, String) {
+        let id = op_id.to_owned();
+        self.running
+            .config
+            .read(move |c| {
+                Ok(
+                    c.query_row("SELECT href, uid FROM cal_op WHERE op_id = ?1", [id], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })?,
+                )
+            })
+            .await
+            .unwrap()
+    }
+
+    /// `GET /api/calendar/events/{account}/{href}` once the cache has it
+    /// at a new etag.
+    pub async fn detail(&self, href: &str, not_etag: Option<&Value>) -> Value {
+        let path = format!("/api/calendar/events/{}/{}", ACCOUNT.0, encode(href));
+        let deadline = tokio::time::Instant::now() + BUDGET;
+        loop {
+            let (status, detail) = self.call(Method::Get, &path, &Value::Null).await;
+            if status == 200 && not_etag.is_none_or(|e| &detail["etag"] != e) {
+                return detail;
+            }
+            assert!(tokio::time::Instant::now() < deadline, "{status} {detail}");
+            tokio::time::sleep(POLL_STEP).await;
+        }
+    }
+
     pub async fn op(&self, op_id: &str) -> OpDto {
         WriteService::op(&self.running.engine, op_id.into())
             .await
@@ -382,9 +423,9 @@ pub fn unique_uid(test: &str) -> String {
     format!("{test}-{}", super::nanos())
 }
 
-/// The raw REPLYs in Mailpit to `organizer` about `uid`.
-pub async fn replies(organizer: &str, uid: &str) -> Vec<String> {
-    let query = encode(&format!("to:\"{organizer}\""));
+/// The raw iTIP messages of `method` in Mailpit to `to` about `uid`.
+pub async fn itip_mails(to: &str, uid: &str, method: &str) -> Vec<String> {
+    let query = encode(&format!("to:\"{to}\""));
     let found: Value =
         serde_json::from_slice(&mailpit(&format!("/api/v1/search?query={query}&limit=100")).await)
             .unwrap();
@@ -396,21 +437,34 @@ pub async fn replies(organizer: &str, uid: &str) -> Vec<String> {
         let raw = String::from_utf8_lossy(&mailpit(&format!("/api/v1/message/{id}/raw")).await)
             .into_owned();
         let unfolded = raw.replace("\r\n ", "").replace("\n ", "");
-        if unfolded.contains(&format!("UID:{uid}")) && unfolded.contains("METHOD:REPLY") {
+        if unfolded.contains(&format!("UID:{uid}"))
+            && unfolded.contains(&format!("METHOD:{method}"))
+        {
             out.push(unfolded);
         }
     }
     out
 }
 
-/// Waits for `n` REPLYs, then watches that no more arrive.
-pub async fn exactly_replies(organizer: &str, uid: &str, n: usize) -> Vec<String> {
-    eventually("replies arrived", BUDGET, || async {
-        replies(organizer, uid).await.len() >= n
+/// Waits for `n` iTIP messages of `method`, then watches that no more
+/// arrive.
+pub async fn exactly(to: &str, uid: &str, method: &str, n: usize) -> Vec<String> {
+    eventually("iTIP mail arrived", BUDGET, || async {
+        itip_mails(to, uid, method).await.len() >= n
     })
     .await;
     tokio::time::sleep(QUIET).await;
-    let found = replies(organizer, uid).await;
-    assert_eq!(found.len(), n, "REPLYs to {organizer} for {uid}");
+    let found = itip_mails(to, uid, method).await;
+    assert_eq!(found.len(), n, "{method}s to {to} for {uid}");
     found
+}
+
+/// The raw REPLYs in Mailpit to `organizer` about `uid`.
+pub async fn replies(organizer: &str, uid: &str) -> Vec<String> {
+    itip_mails(organizer, uid, "REPLY").await
+}
+
+/// Waits for `n` REPLYs, then watches that no more arrive.
+pub async fn exactly_replies(organizer: &str, uid: &str, n: usize) -> Vec<String> {
+    exactly(organizer, uid, "REPLY", n).await
 }

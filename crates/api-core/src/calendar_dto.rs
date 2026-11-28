@@ -232,7 +232,7 @@ where
     Option::<T>::deserialize(d).map(Some)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum PartstatDto {
     NeedsAction,
@@ -381,6 +381,9 @@ pub struct EventInstanceDto {
     pub location: Option<String>,
     pub status: Option<EventStatusDto>,
     pub partstat: Option<PartstatDto>,
+    /// The times are wall clock without a zone, as for `allDay`: `start`
+    /// and `end` read them as UTC.
+    pub floating: bool,
 }
 
 /// `GET /api/calendar/events?from&to&calendars`: `from` and `to` are Unix
@@ -527,4 +530,99 @@ pub struct ReminderDto {
     pub fire_at: i64,
     #[serde(default)]
     pub devices: Vec<i64>,
+}
+
+/// What the event editor shows and sets of an event's master. Times are
+/// wall clock (`2026-12-01T09:00:00`, all-day `2026-12-01` with an
+/// exclusive end) in `tzid`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EventFieldsDto {
+    pub summary: Option<String>,
+    pub location: Option<String>,
+    pub description: Option<String>,
+    pub start: String,
+    pub end: String,
+    pub all_day: bool,
+    /// `null`: floating; `UTC`; else the TZID, e.g. `Europe/Zurich`.
+    pub tzid: Option<String>,
+    pub attendees: Vec<EventAttendeeDto>,
+    /// Minutes before the start of each reminder.
+    pub alarms: Vec<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EventAttendeeDto {
+    pub email: String,
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub name: Option<String>,
+    /// Ignored in an edit.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub partstat: Option<PartstatDto>,
+}
+
+/// `GET /api/calendar/events/{accountId}/{href}`: one event for the editor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct EventDetailDto {
+    pub account_id: i64,
+    pub calendar_href: String,
+    pub href: String,
+    /// The edit's `etag`, so a change on the server is not overwritten.
+    pub etag: Option<String>,
+    pub uid: String,
+    pub sequence: u32,
+    pub organizer: Option<InvitationOrganizerDto>,
+    /// No ORGANIZER, or it is one of my addresses: guests can be changed
+    /// and are told about changes.
+    pub organized_by_me: bool,
+    /// The master repeats; an edit changes every instance.
+    pub recurring: bool,
+    /// It repeats with exceptions (EXDATE, UNTIL, overrides), so its
+    /// times cannot be changed yet.
+    pub fixed_times: bool,
+    pub fields: EventFieldsDto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CalEditKindDto {
+    Put,
+    Delete,
+    Move,
+}
+
+/// `POST /api/calendar/ops`: creates (`put` without `href`), edits,
+/// deletes or moves an event. With attendees in client scheduling mode
+/// the account sends the REQUEST or CANCEL. Answers `OpDto`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CalEditDto {
+    pub op_id: String,
+    pub kind: CalEditKindDto,
+    pub account_id: i64,
+    pub calendar_href: String,
+    /// The event's resource; absent for a new event.
+    #[serde(default)]
+    #[ts(optional)]
+    pub href: Option<String>,
+    /// `EventDetailDto::etag` the edit is based on.
+    #[serde(default)]
+    #[ts(optional)]
+    pub etag: Option<String>,
+    /// For `put`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub event: Option<EventFieldsDto>,
+    /// For `move`: the calendar of the same account it goes to.
+    #[serde(default)]
+    #[ts(optional)]
+    pub dest_calendar_href: Option<String>,
+    /// For `delete` of an event someone else organizes: also decline it.
+    #[serde(default)]
+    #[ts(optional)]
+    pub send_decline: Option<bool>,
 }
