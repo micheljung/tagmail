@@ -49,6 +49,20 @@ describe('Api', () => {
 		expect((await client.viewIndex('search:old')).partial).toBe(true);
 	});
 
+	it('asks for calendar events in a range of some calendars', async () => {
+		const seen: string[] = [];
+		const client = api((path) => {
+			seen.push(path);
+			return new Response(JSON.stringify({ events: [] }));
+		});
+		await client.calendarEvents(10, 20, []);
+		await client.calendarEvents(10, 20, [{ accountId: 2, calendarHref: '/dav/a b/' }]);
+		expect(seen).toEqual([
+			'/api/calendar/events?from=10&to=20',
+			'/api/calendar/events?from=10&to=20&calendars=2%3A%2Fdav%2Fa+b%2F'
+		]);
+	});
+
 	it('posts a view sync and treats 202 as done', async () => {
 		const seen: [string, string | undefined][] = [];
 		const client = api((path, init) => {

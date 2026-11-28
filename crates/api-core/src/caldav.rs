@@ -104,6 +104,7 @@ impl<S: Store> Api<S> {
         &self,
         _route: RouteId,
         _params: &[&str],
+        _query: &str,
         _body: &[u8],
     ) -> Result<Response, StoreError> {
         Ok(feature_disabled())
@@ -114,6 +115,7 @@ impl<S: Store> Api<S> {
         &self,
         route: RouteId,
         params: &[&str],
+        query: &str,
         body: &[u8],
     ) -> Result<Response, StoreError> {
         let served = match route {
@@ -123,6 +125,7 @@ impl<S: Store> Api<S> {
             RouteId::ConfirmCaldavHost => self.confirm_caldav_host(params[0], body).await,
             RouteId::Calendars => self.list_calendars().await,
             RouteId::UpdateCalendar => self.update_calendar(body).await,
+            RouteId::CalendarEvents => self.calendar_events(query).await,
             RouteId::CalendarRsvp | RouteId::CalendarImport | RouteId::CalendarApply => {
                 self.calendar_op(route, body).await
             }
@@ -141,11 +144,12 @@ mod handlers {
 
     use crate::api::{
         Api, Checked, Response, bad_request, check_password, check_username, invalid, no_account,
-        valid_host,
+        query_param, valid_host,
     };
     use crate::calendar_dto::{
         CalApplyDto, CalImportDto, CalRsvpDto, CaldavSettingsDto, CaldavSettingsInputDto,
-        CalendarPatchDto, CalendarsDto, ConfirmHostDto, SchedulingDto, SchedulingOverrideDto,
+        CalendarEventsDto, CalendarPatchDto, CalendarTargetDto, CalendarsDto, ConfirmHostDto,
+        SchedulingDto, SchedulingOverrideDto,
     };
     use crate::compose::parse_row_id;
     use crate::routes::RouteId;
@@ -158,6 +162,7 @@ mod handlers {
     const MAX_HREF_LEN: usize = 2048;
     const MAX_AUTHSERV_ID_LEN: usize = 255;
     const MAX_COLOR_LEN: usize = 32;
+    const MAX_EVENTS_SPAN: i64 = 62 * 86_400;
     const HTTPS: &str = "https://";
     const HTTP: &str = "http://";
 
@@ -468,6 +473,39 @@ mod handlers {
         pub(super) async fn list_calendars(&self) -> Result<Response, StoreError> {
             let calendars = self.store.calendars().await?;
             Ok(Response::json(200, &CalendarsDto { calendars }))
+        }
+
+        pub(super) async fn calendar_events(&self, query: &str) -> Result<Response, StoreError> {
+            let bound = |name| query_param(query, name).and_then(|v| v.parse::<i64>().ok());
+            let (Some(from), Some(to)) = (bound("from"), bound("to")) else {
+                return Ok(bad_request("from and to must be Unix seconds"));
+            };
+            let instant = |t| time::OffsetDateTime::from_unix_timestamp(t).is_ok();
+            if !instant(from) {
+                return Ok(invalid("from", "not a representable time"));
+            }
+            let span = to.checked_sub(from);
+            if !instant(to) || !span.is_some_and(|s| s > 0 && s <= MAX_EVENTS_SPAN) {
+                return Ok(invalid("to", "after from and at most 62 days later"));
+            }
+            let mut calendars = Vec::new();
+            for (key, value) in form_urlencoded::parse(query.as_bytes()) {
+                if key != "calendars" {
+                    continue;
+                }
+                let Some((account, href)) = value
+                    .split_once(':')
+                    .and_then(|(a, h)| Some((a.parse().ok()?, h.to_owned())))
+                else {
+                    return Ok(invalid("calendars", "each is <accountId>:<href>"));
+                };
+                calendars.push(CalendarTargetDto {
+                    account_id: account,
+                    calendar_href: href,
+                });
+            }
+            let events = self.store.events_in(from..to, calendars).await?;
+            Ok(Response::json(200, &CalendarEventsDto { events }))
         }
 
         pub(super) async fn update_calendar(&self, body: &[u8]) -> Result<Response, StoreError> {

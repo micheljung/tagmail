@@ -307,9 +307,12 @@ impl<S: Store> Api<S> {
                 | RouteId::ConfirmCaldavHost
                 | RouteId::Calendars
                 | RouteId::UpdateCalendar
+                | RouteId::CalendarEvents
                 | RouteId::CalendarRsvp
                 | RouteId::CalendarImport
-                | RouteId::CalendarApply => self.calendar_route(id, &params, req.body).await,
+                | RouteId::CalendarApply => {
+                    self.calendar_route(id, &params, req.query, req.body).await
+                }
             },
             Err(Miss::MethodNotAllowed) => Ok(Response::error(
                 405,

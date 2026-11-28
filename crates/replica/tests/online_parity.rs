@@ -270,3 +270,54 @@ async fn calendar_parity(stack: &fixture::Stack, replica: &tagmail_replica::Repl
         assert_eq!(ours, theirs, "{range:?}");
     }
 }
+
+/// AC 16 on the desktop: the calendar views' requests (agenda, day, week,
+/// month, one calendar, past the window) answer through the replica as
+/// the server answers them, and the same offline.
+#[cfg(feature = "calendar")]
+#[tokio::test]
+async fn calendar_view_matches_server() {
+    let mut stack = Stack::start().await;
+    let today = now() - now().rem_euclid(DAY);
+    let calendars = ["/cal/work/", "/cal/home/"];
+    calendar_seed::seed(stack.server().store(), stack.account, &calendars, 40, today).await;
+    let replica = stack.replica().await;
+    replica.gate().await.unwrap();
+    assert!(replica.calendar());
+    let router = Router::new(replica.clone());
+    let edge = tagmail_calendar::Window::around_unix(today).end_ts();
+    let work = format!("&calendars={}%3A%2Fcal%2Fwork%2F", stack.account);
+    let agenda = format!("from={today}&to={}", today + 30 * DAY);
+    let first = stack
+        .owner_get(&format!("/api/calendar/events?{agenda}"))
+        .await["events"][0]["start"]
+        .as_i64()
+        .unwrap();
+    let day = first - first.rem_euclid(DAY);
+    let queries = [
+        agenda,
+        format!("from={day}&to={}", day + DAY),
+        format!("from={}&to={}", day - 3 * DAY, day + 4 * DAY),
+        format!("from={}&to={}{work}", today - 10 * DAY, today + 32 * DAY),
+        format!("from={}&to={}", edge - 20 * DAY, edge + 40 * DAY),
+    ];
+    let mut served = Vec::new();
+    for query in &queries {
+        let path = format!("/api/calendar/events?{query}");
+        let theirs = stack.owner_get(&path).await;
+        let ours = get(&router, &path).await;
+        assert_eq!(ours.status, 200, "{}", String::from_utf8_lossy(&ours.body));
+        let ours = fixture::json(&ours);
+        assert!(!theirs["events"].as_array().unwrap().is_empty(), "{query}");
+        assert_eq!(ours, theirs, "{query}");
+        served.push(ours);
+    }
+
+    stack.stop().await;
+    replica.client().link().mark_down();
+    for (query, online) in queries.iter().zip(served) {
+        let offline = get(&router, &format!("/api/calendar/events?{query}")).await;
+        assert_eq!(offline.status, 200, "{query}");
+        assert_eq!(fixture::json(&offline), online, "{query}");
+    }
+}

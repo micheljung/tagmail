@@ -12,8 +12,7 @@ use tagmail_store::rusqlite::{Connection, OptionalExtension};
 
 use crate::calendar_dto::{
     CalEventDto, CaldavSettingsDto, CaldavStatusDto, CalendarDto, CalendarTargetDto,
-    EventInstanceDto, EventStatusDto, PartstatDto, SchedulingDto, SchedulingOverrideDto,
-    StoredEventDto,
+    EventStatusDto, PartstatDto, SchedulingDto, SchedulingOverrideDto, StoredEventDto,
 };
 use crate::dto::AccountStateDto;
 use crate::ops_dto::CalReplyStateDto;
@@ -319,46 +318,128 @@ pub(crate) fn invitation_context(
     })
 }
 
-/// Instances overlapping `[start, end)`; an instance without duration
-/// counts at its start.
+/// Instances overlapping `[start, end)`, expanded from the stored text
+/// so each carries its own summary; an instance without duration counts
+/// at its start. Within `window` the cached instances pick the events,
+/// outside it, or past an event's expanded edge, every event that may
+/// reach the range. A resource that no longer parses keeps its cached
+/// instances, without summary.
+#[cfg(feature = "calendar")]
 pub(crate) fn events_in(
     conn: &Connection,
     start: i64,
     end: i64,
     calendars: &[CalendarTargetDto],
-) -> tagmail_store::Result<Vec<EventInstanceDto>> {
+    window: &tagmail_calendar::Window,
+) -> tagmail_store::Result<Vec<crate::calendar_dto::EventInstanceDto>> {
+    use crate::calendar_dto::EventInstanceDto;
+    use time::OffsetDateTime;
+
+    let outside = start < window.start_ts() || end > window.end_ts();
     let mut stmt = conn.prepare_cached(
-        "SELECT c.account_id, c.href, e.href, e.uid, i.recurrence_id, i.start_utc, i.end_utc, \
-         i.all_day, e.status, e.my_partstat FROM cal_instance i \
-         JOIN cal_event e ON e.id = i.event_id JOIN calendar c ON c.id = e.calendar_id \
-         WHERE i.start_utc < ?2 AND (i.end_utc > ?1 OR i.start_utc >= ?1) \
-         ORDER BY i.start_utc, c.account_id, c.href, e.href, i.recurrence_id",
+        "SELECT e.id, c.account_id, c.href, e.href, e.uid, e.status, e.my_partstat \
+         FROM cal_event e JOIN calendar c ON c.id = e.calendar_id \
+         WHERE EXISTS (SELECT 1 FROM cal_instance i WHERE i.event_id = e.id \
+             AND i.start_utc < ?2 AND (i.end_utc > ?1 OR i.start_utc >= ?1)) \
+         OR (e.first_start < ?2 AND (e.window_edge < ?2 \
+             OR (?3 AND (e.is_recurring = 1 OR e.last_end > ?1 OR e.first_start >= ?1))))",
     )?;
-    let rows = stmt.query_map([start, end], |r| {
-        Ok(EventInstanceDto {
-            account_id: r.get(0)?,
-            calendar_href: r.get(1)?,
-            href: r.get(2)?,
-            uid: r.get(3)?,
-            recurrence_id: r.get(4)?,
-            start: r.get(5)?,
-            end: r.get(6)?,
-            all_day: r.get(7)?,
-            status: r
-                .get::<_, Option<String>>(8)?
-                .as_deref()
-                .and_then(event_status_dto),
-            partstat: r.get::<_, Option<String>>(9)?.as_deref().map(partstat_dto),
-        })
+    let rows = stmt.query_map(tagmail_store::rusqlite::params![start, end, outside], |r| {
+        Ok((
+            r.get::<_, i64>(0)?,
+            CalendarTargetDto {
+                account_id: r.get(1)?,
+                calendar_href: r.get(2)?,
+            },
+            r.get::<_, String>(3)?,
+            r.get::<_, String>(4)?,
+            r.get::<_, Option<String>>(5)?,
+            r.get::<_, Option<String>>(6)?.as_deref().map(partstat_dto),
+        ))
     })?;
-    let mut out = rows.collect::<tagmail_store::rusqlite::Result<Vec<_>>>()?;
+    let mut found = rows.collect::<tagmail_store::rusqlite::Result<Vec<_>>>()?;
     if !calendars.is_empty() {
-        out.retain(|i| {
-            calendars
-                .iter()
-                .any(|c| c.account_id == i.account_id && c.calendar_href == i.calendar_href)
-        });
+        found.retain(|(_, target, ..)| calendars.contains(target));
     }
+    let at = |t: i64| OffsetDateTime::from_unix_timestamp(t).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+    let mut cached = conn.prepare_cached(
+        "SELECT start_utc, end_utc, recurrence_id, all_day FROM cal_instance \
+         WHERE event_id = ?1 AND start_utc < ?3 AND (end_utc > ?2 OR start_utc >= ?2)",
+    )?;
+    let mut out = Vec::new();
+    for (id, target, href, uid, status, partstat) in found {
+        let instance = |uid: String, recurrence_id, start, end, all_day| EventInstanceDto {
+            account_id: target.account_id,
+            calendar_href: target.calendar_href.clone(),
+            href: href.clone(),
+            uid,
+            recurrence_id,
+            start,
+            end,
+            all_day,
+            summary: None,
+            location: None,
+            status: None,
+            partstat,
+        };
+        let ics = calendar::event_ics(conn, id)?.unwrap_or_default();
+        let Ok(parsed) = tagmail_calendar::parse(&ics) else {
+            tracing::debug!(
+                event = id,
+                "unparsable calendar resource; listing its cached instances"
+            );
+            let rows = cached.query_map([id, start, end], |r| {
+                Ok(EventInstanceDto {
+                    status: status.as_deref().and_then(event_status_dto),
+                    ..instance(uid.clone(), r.get(2)?, r.get(0)?, r.get(1)?, r.get(3)?)
+                })
+            })?;
+            out.extend(rows.collect::<tagmail_store::rusqlite::Result<Vec<_>>>()?);
+            continue;
+        };
+        let expansion = parsed.expand(at(start)..at(end));
+        if expansion.truncated {
+            tracing::debug!(
+                event = id,
+                "calendar expansion truncated; instances may be missing"
+            );
+        }
+        for (o, recurrence_id) in expansion.occurrences.iter().zip(expansion.recurrence_ids) {
+            let event = &parsed.events[o.event];
+            out.push(EventInstanceDto {
+                summary: event.summary.clone(),
+                location: event.location.clone(),
+                status: event.status.map(|s| match s {
+                    tagmail_calendar::EventStatus::Tentative => EventStatusDto::Tentative,
+                    tagmail_calendar::EventStatus::Confirmed => EventStatusDto::Confirmed,
+                    tagmail_calendar::EventStatus::Cancelled => EventStatusDto::Cancelled,
+                }),
+                ..instance(
+                    event.uid.clone(),
+                    recurrence_id,
+                    o.start.unix_timestamp(),
+                    o.end.unix_timestamp(),
+                    event.start.all_day,
+                )
+            });
+        }
+    }
+    out.sort_by(|a, b| {
+        (
+            a.start,
+            a.account_id,
+            &a.calendar_href,
+            &a.href,
+            &a.recurrence_id,
+        )
+            .cmp(&(
+                b.start,
+                b.account_id,
+                &b.calendar_href,
+                &b.href,
+                &b.recurrence_id,
+            ))
+    });
     Ok(out)
 }
 

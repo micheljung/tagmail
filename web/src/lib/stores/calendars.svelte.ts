@@ -18,8 +18,21 @@ export class CalendarsStore {
 		this.calendars = await this.#api.calendars();
 	}
 
+	/** Shows a colour or visibility change at once; the server's answer then replaces it. */
 	async patch(change: CalendarPatchDto): Promise<void> {
-		await this.#api.updateCalendar(change);
-		await this.load();
+		const target = this.calendars.find(
+			(c) => c.accountId === change.accountId && c.href === change.href
+		);
+		const before = target && { color: target.color, visible: target.visible };
+		if (target && change.color !== undefined) target.color = change.color;
+		if (target && change.visible !== undefined) target.visible = change.visible;
+		try {
+			await this.#api.updateCalendar(change);
+		} catch (e) {
+			if (target && before) Object.assign(target, before);
+			throw e;
+		} finally {
+			await this.load().catch(() => undefined);
+		}
 	}
 }
