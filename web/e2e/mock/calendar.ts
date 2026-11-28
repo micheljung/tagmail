@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type {
 	CalApplyDto,
+	CalEditDto,
 	CaldavDiscoveryDto,
 	CaldavSettingsDto,
 	CaldavSettingsInputDto,
@@ -29,7 +30,15 @@ import {
 	type CalOutcome
 } from './calOps.ts';
 import { idAt, messagesOf, rowAt } from './fixture.ts';
-import { MAX_EVENTS_SPAN, MAX_TIME, MIN_TIME, eventsIn } from './calendarEvents.ts';
+import {
+	MAX_EVENTS_SPAN,
+	MAX_TIME,
+	MIN_TIME,
+	checkEdit,
+	eventDetail,
+	eventsIn,
+	resetEvents
+} from './calendarEvents.ts';
 import { mailOpExists, type WriteContext } from './write.ts';
 
 export type InvitationScenario =
@@ -333,6 +342,9 @@ function foundCalendars(): CalendarDto[] {
 	];
 }
 
+let edits: CalEditDto[] = [];
+let eventChanges = 0;
+
 export function resetCaldav(scenario: CaldavScenario = 'unconfigured'): void {
 	caldav = new Map([[ACCOUNT_A, blankSettings()]]);
 	calendars = [];
@@ -340,6 +352,7 @@ export function resetCaldav(scenario: CaldavScenario = 'unconfigured'): void {
 	patches = [];
 	seenEventQueries = [];
 	confirms = [];
+	edits = [];
 	if (scenario === 'configured') {
 		caldav.set(ACCOUNT_A, {
 			...blankSettings(),
@@ -415,6 +428,7 @@ function applyInput(accountId: number, input: CaldavSettingsInputDto): void {
 
 export function caldavState() {
 	return {
+		edits,
 		settings: Object.fromEntries(caldav),
 		calendars,
 		puts,
@@ -429,6 +443,7 @@ const changed = new Map<number, Partial<InvitationDto>>();
 export function resetCalendar(): void {
 	changed.clear();
 	resetCalOps();
+	resetEvents();
 }
 
 function invitationOf(messageId: number): InvitationDto | undefined {
@@ -540,6 +555,51 @@ export async function calendarApi(
 		}
 		seenEventQueries.push(url.search);
 		ctx.send(res, 200, { events: eventsIn(calendars, Number(from), Number(to), wanted) });
+		return true;
+	}
+
+	const one = /^\/api\/calendar\/events\/(\d+)\/([^/]+)$/.exec(url.pathname);
+	if (one && method === 'GET') {
+		const detail = eventDetail(Number(one[1]), decodeURIComponent(one[2]));
+		if (detail) ctx.send(res, 200, detail);
+		else ctx.error(res, 404, 'not_found', 'no such event');
+		return true;
+	}
+
+	if (url.pathname === '/api/calendar/ops' && method === 'POST') {
+		const body = await json<CalEditDto>();
+		if (calOp(body.opId)) {
+			ctx.send(res, 200, calOp(body.opId));
+			return true;
+		}
+		const checked = checkEdit(
+			calendars,
+			body,
+			currentIdentities().find((i) => i.accountId === body.accountId)?.address ?? ''
+		);
+		if ('field' in checked) {
+			ctx.send(res, 422, { error: 'invalid', field: checked.field, message: checked.message });
+			return true;
+		}
+		if ('conflict' in checked) {
+			ctx.error(res, 409, 'conflict', checked.conflict);
+			return true;
+		}
+		edits.push(body);
+		const op = startCalOp(ctx, {
+			opId: body.opId,
+			kind: `cal.${body.kind}`,
+			accountId: body.accountId,
+			uid: checked.uid,
+			targetAccountId: body.accountId,
+			calendarHref: body.calendarHref,
+			reply: null,
+			onDone: () => {
+				checked.apply();
+				ctx.push([{ entity: 'event', id: ++eventChanges, op: { kind: 'upsert' }, payload: null }]);
+			}
+		});
+		ctx.send(res, 202, op);
 		return true;
 	}
 

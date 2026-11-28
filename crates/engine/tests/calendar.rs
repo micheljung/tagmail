@@ -967,3 +967,421 @@ async fn put_412_server_wins_and_keeps_rejected_ics() {
     );
     account.stop().await;
 }
+
+fn event_fields(summary: &str, start: &str, end: &str, attendees: &[&str]) -> serde_json::Value {
+    json!({
+        "summary": summary,
+        "location": "Room 4",
+        "description": null,
+        "start": start,
+        "end": end,
+        "allDay": false,
+        "tzid": "Europe/Zurich",
+        "attendees": attendees.iter().map(|a| json!({ "email": a })).collect::<Vec<_>>(),
+        "alarms": [15],
+    })
+}
+
+fn put_body(
+    op_id: &str,
+    user: &str,
+    href: Option<&str>,
+    etag: Option<&serde_json::Value>,
+    event: serde_json::Value,
+) -> serde_json::Value {
+    let mut body = json!({
+        "opId": op_id,
+        "kind": "put",
+        "accountId": CAL.0,
+        "calendarHref": default_href(user),
+        "event": event,
+    });
+    if let Some(href) = href {
+        body["href"] = json!(href);
+    }
+    if let Some(etag) = etag {
+        body["etag"] = etag.clone();
+    }
+    body
+}
+
+#[tokio::test]
+async fn edit_roundtrips_to_radicale() {
+    let test = "edit_roundtrips_to_radicale";
+    let cal = CalFixture::for_test(test).await;
+    let account = CalAccount::start(cal.user, None).await;
+    let uid = common::cal_flow::unique_uid(test);
+    let original = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//tagmail//test//EN\r\nBEGIN:VEVENT\r\n\
+         UID:{uid}\r\nDTSTAMP:20261101T120000Z\r\nSEQUENCE:2\r\n\
+         DTSTART:20991201T090000Z\r\nDTEND:20991201T100000Z\r\nSUMMARY:Draft\r\n\
+         X-TAGMAIL-TEST;X-P=1:kept\r\nCATEGORIES:Work\r\n\
+         BEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:Draft\r\nTRIGGER:-PT10M\r\n\
+         X-ALARM-NOTE:kept too\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    );
+    put_object(cal.user, "edit.ics", &original).await;
+    account.cached(&uid).await;
+    let href = format!("{}edit.ics", default_href(cal.user));
+    let detail = account.detail(&href, None).await;
+    let mut fields = detail["fields"].clone();
+    assert_eq!(fields["start"], "2099-12-01T09:00:00");
+    assert_eq!(fields["tzid"], "UTC");
+    assert_eq!(fields["alarms"], json!([10]));
+    fields["summary"] = json!("Final");
+    account
+        .edit(put_body(
+            "e-1",
+            cal.user,
+            Some(&href),
+            Some(&detail["etag"]),
+            fields,
+        ))
+        .await;
+    let stored = object(cal.user, "edit.ics").await.unwrap();
+    for kept in [
+        "X-TAGMAIL-TEST;X-P=1:kept",
+        "X-ALARM-NOTE:kept too",
+        "TRIGGER:-PT10M",
+        "CATEGORIES:Work",
+        "DTSTART:20991201T090000Z",
+    ] {
+        assert!(stored.contains(kept), "{kept} in {stored}");
+    }
+    assert!(
+        stored.contains("SUMMARY:Final") && stored.contains("SEQUENCE:3"),
+        "{stored}"
+    );
+    let reread = account.detail(&href, Some(&detail["etag"])).await;
+    assert_eq!(reread["fields"]["summary"], "Final");
+
+    let mut all_day = reread["fields"].clone();
+    all_day["allDay"] = json!(true);
+    all_day["start"] = json!("2099-12-02");
+    all_day["end"] = json!("2099-12-03");
+    all_day["tzid"] = json!(null);
+    all_day["alarms"] = json!([0, 60]);
+    account
+        .edit(put_body(
+            "e-2",
+            cal.user,
+            Some(&href),
+            Some(&reread["etag"]),
+            all_day,
+        ))
+        .await;
+    let stored = object(cal.user, "edit.ics").await.unwrap();
+    assert!(stored.contains("DTSTART;VALUE=DATE:20991202"), "{stored}");
+    assert!(
+        stored.contains("TRIGGER:-PT1H") && !stored.contains("TRIGGER:-PT10M"),
+        "{stored}"
+    );
+
+    account
+        .edit(json!({
+            "opId": "e-3",
+            "kind": "delete",
+            "accountId": CAL.0,
+            "calendarHref": default_href(cal.user),
+            "href": href,
+        }))
+        .await;
+    assert!(object(cal.user, "edit.ics").await.is_none());
+    assert!(
+        account.outbox_ops().await.is_empty(),
+        "no attendees, no mail"
+    );
+    account.stop().await;
+}
+
+#[tokio::test]
+async fn invite_client_mode_sends_request_from_account_identity() {
+    let test = "invite_client_mode_sends_request_from_account_identity";
+    let cal = CalFixture::for_test(test).await;
+    let account = CalAccount::start(cal.user, None).await;
+    let guest = organizer(test);
+    let other = "guest2@example.com";
+    let event = event_fields(
+        "Kickoff",
+        "2099-12-01T09:00:00",
+        "2099-12-01T10:00:00",
+        &[&guest, other],
+    );
+    account
+        .edit(put_body("i-1", cal.user, None, None, event))
+        .await;
+    let (_, uid) = account.written("i-1").await;
+    let request = common::cal_flow::exactly(&guest, &uid, "REQUEST", 1)
+        .await
+        .remove(0);
+    let me = account.email();
+    assert!(request.contains(&format!("<{me}>")), "{request}");
+    assert!(
+        request
+            .lines()
+            .any(|l| l.starts_with("ORGANIZER") && l.trim_end().ends_with(&format!("mailto:{me}"))),
+        "{request}"
+    );
+    assert!(
+        request.contains(&format!("mailto:{guest}"))
+            && request.contains(&format!("mailto:{other}"))
+    );
+    assert!(
+        !request.contains("SCHEDULE-AGENT") && !request.contains("VALARM"),
+        "{request}"
+    );
+    assert_eq!(account.outbox_ops().await, ["i-1#request"]);
+    account.stop().await;
+}
+
+#[tokio::test]
+async fn time_change_bumps_sequence_and_sends_updated_request() {
+    let test = "time_change_bumps_sequence_and_sends_updated_request";
+    let cal = CalFixture::for_test(test).await;
+    let account = CalAccount::start(cal.user, None).await;
+    let guest = organizer(test);
+    let event = event_fields(
+        "Sync",
+        "2099-12-01T09:00:00",
+        "2099-12-01T10:00:00",
+        &[&guest],
+    );
+    account
+        .edit(put_body("t-1", cal.user, None, None, event))
+        .await;
+    let (href, uid) = account.written("t-1").await;
+    common::cal_flow::exactly(&guest, &uid, "REQUEST", 1).await;
+    let detail = account.detail(&href, None).await;
+    assert_eq!(detail["sequence"], 0);
+    let moved = event_fields(
+        "Sync",
+        "2099-12-01T11:00:00",
+        "2099-12-01T12:00:00",
+        &[&guest],
+    );
+    account
+        .edit(put_body(
+            "t-2",
+            cal.user,
+            Some(&href),
+            Some(&detail["etag"]),
+            moved,
+        ))
+        .await;
+    let requests = common::cal_flow::exactly(&guest, &uid, "REQUEST", 2).await;
+    let updated = requests
+        .iter()
+        .find(|r| r.contains("SEQUENCE:1"))
+        .expect("an updated REQUEST");
+    assert!(
+        updated.contains("DTSTART;TZID=Europe/Zurich:20991201T110000"),
+        "{updated}"
+    );
+    assert!(updated.contains("BEGIN:VTIMEZONE"), "{updated}");
+    account.stop().await;
+}
+
+#[tokio::test]
+async fn delete_sends_cancel() {
+    let test = "delete_sends_cancel";
+    let cal = CalFixture::for_test(test).await;
+    let account = CalAccount::start(cal.user, None).await;
+    let guest = organizer(test);
+    let event = event_fields(
+        "Gone",
+        "2099-12-01T09:00:00",
+        "2099-12-01T10:00:00",
+        &[&guest],
+    );
+    account
+        .edit(put_body("d-1", cal.user, None, None, event))
+        .await;
+    let (href, uid) = account.written("d-1").await;
+    let detail = account.detail(&href, None).await;
+    account
+        .edit(json!({
+            "opId": "d-2",
+            "kind": "delete",
+            "accountId": CAL.0,
+            "calendarHref": default_href(cal.user),
+            "href": href,
+            "etag": detail["etag"],
+        }))
+        .await;
+    let cancel = common::cal_flow::exactly(&guest, &uid, "CANCEL", 1)
+        .await
+        .remove(0);
+    assert!(
+        cancel.contains("STATUS:CANCELLED") && cancel.contains("SEQUENCE:1"),
+        "{cancel}"
+    );
+    assert_eq!(account.outbox_ops().await, ["d-1#request", "d-2#cancel"]);
+    account.stop().await;
+}
+
+#[tokio::test]
+async fn invite_server_mode_sends_no_outbox() {
+    let test = "invite_server_mode_sends_no_outbox";
+    let cal = CalFixture::for_test(test).await;
+    let account = CalAccount::start(cal.user, Some(Scheduling::Server)).await;
+    let guest = organizer(test);
+    let event = event_fields(
+        "Served",
+        "2099-12-01T09:00:00",
+        "2099-12-01T10:00:00",
+        &[&guest],
+    );
+    account
+        .edit(put_body("s-1", cal.user, None, None, event))
+        .await;
+    let (href, uid) = account.written("s-1").await;
+    let stored = object(cal.user, href.rsplit('/').next().unwrap())
+        .await
+        .unwrap();
+    assert!(
+        stored.contains(&format!("mailto:{guest}")) && !stored.contains("SCHEDULE-AGENT"),
+        "{stored}"
+    );
+    tokio::time::sleep(common::cal_flow::QUIET).await;
+    assert!(account.outbox_ops().await.is_empty());
+    assert!(
+        common::cal_flow::itip_mails(&guest, &uid, "REQUEST")
+            .await
+            .is_empty()
+    );
+    account.stop().await;
+}
+
+/// An event I organize with `guest` invited, cached; the account trusts
+/// [`TRUSTED`].
+async fn organized(test: &str, user: &'static str) -> (CalAccount, String, String) {
+    let account = CalAccount::start(user, None).await;
+    let guest = organizer(test);
+    let uid = common::cal_flow::unique_uid(test);
+    let me = account.email();
+    let ics = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//tagmail//test//EN\r\nBEGIN:VEVENT\r\n\
+         UID:{uid}\r\nDTSTAMP:20261101T120000Z\r\nSEQUENCE:0\r\n\
+         DTSTART:20991201T090000Z\r\nDTEND:20991201T100000Z\r\nSUMMARY:Review\r\n\
+         ORGANIZER;CN=Me:mailto:{me}\r\n\
+         ATTENDEE;PARTSTAT=NEEDS-ACTION;RSVP=TRUE:mailto:{guest}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    );
+    put_object(user, "mine.ics", &ics).await;
+    common::cal_flow::set_trust(&account.running, CAL, Some(TRUSTED)).await;
+    account.cached(&uid).await;
+    (account, uid, guest)
+}
+
+fn reply_from<'a>(
+    uid: &'a str,
+    me: &'a str,
+    guest: &'a str,
+    from: &'a str,
+    headers: &'a str,
+) -> String {
+    let ics = format!(
+        "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//other//EN\r\nMETHOD:REPLY\r\nBEGIN:VEVENT\r\n\
+         UID:{uid}\r\nDTSTAMP:20261102T120000Z\r\nSEQUENCE:0\r\n\
+         DTSTART:20991201T090000Z\r\nDTEND:20991201T100000Z\r\nSUMMARY:Review\r\n\
+         ORGANIZER;CN=Me:mailto:{me}\r\n\
+         ATTENDEE;PARTSTAT=ACCEPTED:mailto:{guest}\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+    );
+    format!(
+        "{headers}From: <{from}>\r\nTo: <{me}>\r\nSubject: Accepted\r\n\
+         Message-ID: <{uid}-reply@tagmail.test>\r\nDate: Wed, 25 Nov 2026 10:00:00 +0000\r\n\
+         MIME-Version: 1.0\r\nContent-Type: text/calendar; method=REPLY; charset=utf-8\r\n\r\n{ics}"
+    )
+}
+
+#[tokio::test]
+async fn incoming_reply_updates_attendee_partstat() {
+    let test = "incoming_reply_updates_attendee_partstat";
+    let cal = CalFixture::for_test(test).await;
+    let (account, uid, guest) = organized(test, cal.user).await;
+    let me = account.email();
+    let message = account
+        .deliver(
+            &reply_from(&uid, &me, &guest, &guest, PASS_RESULTS),
+            "Accepted",
+        )
+        .await;
+    eventually("reply applied", common::cal_flow::BUDGET, || async {
+        object(cal.user, "mine.ics")
+            .await
+            .is_some_and(|o| o.contains(&format!("PARTSTAT=ACCEPTED;RSVP=TRUE:mailto:{guest}")))
+    })
+    .await;
+    assert_eq!(account.cal_ops("apply").await.len(), 1);
+    account.cached(&uid).await;
+    eventually("card applied", common::cal_flow::BUDGET, || async {
+        account.invitation(message).await["autoApply"] == "applied"
+    })
+    .await;
+    assert_eq!(account.invitation(message).await["senderAuth"], "verified");
+    assert!(
+        account.outbox_ops().await.is_empty(),
+        "a reply is answered by nothing"
+    );
+    account.stop().await;
+}
+
+/// Delivers a REPLY that must not be applied without asking, checks the
+/// card, then applies it by hand.
+async fn manual_reply(test: &str, from: Option<&str>, headers: &str, sender_auth: &str) {
+    let cal = CalFixture::for_test(test).await;
+    let (account, uid, guest) = organized(test, cal.user).await;
+    let me = account.email();
+    let from = from.map_or(guest.clone(), str::to_owned);
+    let message = account
+        .deliver(&reply_from(&uid, &me, &guest, &from, headers), "Accepted")
+        .await;
+    account.inbox_drained().await;
+    assert!(account.cal_ops("apply").await.is_empty());
+    assert!(
+        object(cal.user, "mine.ics")
+            .await
+            .unwrap()
+            .contains("PARTSTAT=NEEDS-ACTION")
+    );
+    let card = account.invitation(message).await;
+    assert_eq!(card["method"], "reply");
+    assert_eq!(card["senderAuth"], sender_auth);
+    assert_eq!(card["autoApply"], "manual");
+
+    account
+        .submit(
+            "apply",
+            json!({ "opId": "m-1", "messageId": message.to_string() }),
+        )
+        .await;
+    let done = account.settled("m-1").await;
+    assert_eq!(done.status, OpStatusDto::Done, "{:?}", done.error);
+    assert!(
+        object(cal.user, "mine.ics")
+            .await
+            .unwrap()
+            .contains(&format!("PARTSTAT=ACCEPTED;RSVP=TRUE:mailto:{guest}"))
+    );
+    account.stop().await;
+}
+
+#[tokio::test]
+async fn spoofed_reply_sender_is_not_applied() {
+    manual_reply(
+        "spoofed_reply_sender_is_not_applied",
+        Some("eve@example.com"),
+        PASS_RESULTS,
+        "address_mismatch",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn forged_reply_without_authentication_results_is_manual() {
+    manual_reply(
+        "forged_reply_without_authentication_results_is_manual",
+        None,
+        "",
+        "unauthenticated",
+    )
+    .await;
+}

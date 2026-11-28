@@ -315,7 +315,9 @@ impl<S: Store> Api<S> {
                 | RouteId::CalendarEvents
                 | RouteId::CalendarRsvp
                 | RouteId::CalendarImport
-                | RouteId::CalendarApply => {
+                | RouteId::CalendarApply
+                | RouteId::CalendarEvent
+                | RouteId::CalendarEdit => {
                     self.calendar_route(id, &params, req.query, req.body).await
                 }
             },

@@ -97,6 +97,18 @@ pub(crate) mod card {
         }
     }
 
+    /// A REPLY's answer, for [`itip_auth::ReplyCheck`].
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct Replying {
+        pub uid: String,
+        pub attendee: String,
+        pub partstat: String,
+        pub instance: Option<OffsetDateTime>,
+        /// RECURRENCE-ID as an apply id names it.
+        pub instance_key: Option<String>,
+        pub dtstamp: Option<i64>,
+    }
+
     /// One VEVENT's place in its series' history.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub(crate) struct Version {
@@ -125,6 +137,9 @@ pub(crate) mod card {
         /// When the first UID's last instance ends, Unix seconds; `None`
         /// for a recurring event.
         pub last_end: Option<i64>,
+        /// A REPLY's attendee, the PARTSTAT it answers with and the
+        /// instance it answers for.
+        pub replying: Option<Replying>,
     }
 
     /// The card of `source` with each event's version; what is stored
@@ -217,6 +232,24 @@ pub(crate) mod card {
             matches: (!checked.is_empty()).then(|| (check(false), check(true))),
             organizer: itip_auth::uid_organizer(&first).cloned(),
             overrides_only: !first.is_empty() && first.iter().all(|e| e.recurrence_id.is_some()),
+            replying: events
+                .iter()
+                .filter(|s| s.method == Some(Method::Reply))
+                .find_map(|s| {
+                    let (a, p) = itip_auth::replying(&s.event)?;
+                    Some(Replying {
+                        uid: s.event.uid.clone(),
+                        attendee: a.to_owned(),
+                        partstat: p,
+                        instance: s.event.recurrence_id.as_ref().map(|r| r.instant),
+                        instance_key: s
+                            .event
+                            .recurrence_id
+                            .as_ref()
+                            .map(itip_auth::recurrence_key),
+                        dtstamp: s.event.dtstamp.map(OffsetDateTime::unix_timestamp),
+                    })
+                }),
             last_end: (!first.iter().any(|e| e.recurrence.is_some()))
                 .then(|| {
                     first
@@ -301,6 +334,33 @@ pub(crate) mod card {
                 received: context.received,
                 now,
                 has_target: context.target.is_some(),
+                reply: sender.replying.as_ref().map(|r| {
+                    let copy = stored;
+                    let (attendee, instance) = (&r.attendee, r.instance);
+                    let answered = copy.and_then(|c| {
+                        tagmail_calendar::attendee_partstat(&c.ics, attendee, instance)
+                    });
+                    itip_auth::ReplyCheck {
+                        superseded: itip_auth::superseded(
+                            context
+                                .reply_stamps
+                                .iter()
+                                .filter(|(uid, ..)| *uid == r.uid)
+                                .map(|(_, a, k, t)| (a.as_str(), k.as_deref(), *t)),
+                            attendee,
+                            r.instance_key.as_deref(),
+                            r.dtstamp,
+                        ),
+                        partstat: r.partstat.clone(),
+                        organized: copy.and_then(|c| c.organizer.as_deref()).is_some_and(|o| {
+                            context.addresses.iter().any(|a| a.eq_ignore_ascii_case(o))
+                        }),
+                        stored_partstat: answered
+                            .as_ref()
+                            .map(|(p, _)| itip_auth::partstat_text(p)),
+                        certain: answered.as_ref().is_none_or(|(_, c)| *c),
+                    }
+                }),
             })
         });
         dto.auto_apply = decision.map_or(AutoApplyDto::None, |d| d.auto_apply);

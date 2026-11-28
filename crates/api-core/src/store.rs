@@ -315,6 +315,8 @@ pub struct StoredCopy {
     pub dtstamp: Option<i64>,
     /// The stored ORGANIZER calendar address.
     pub organizer: Option<String>,
+    /// The stored iCalendar text.
+    pub ics: Vec<u8>,
     pub stored: StoredEventDto,
 }
 
@@ -329,6 +331,18 @@ pub struct InvitationContext {
     pub authserv_id: Option<String>,
     /// The message's INTERNALDATE, Unix seconds, when known.
     pub received: Option<i64>,
+    /// The receiving account's addresses, lower case.
+    pub addresses: Vec<String>,
+    /// `(uid, attendee, RECURRENCE-ID key, DTSTAMP)` of the newest REPLYs
+    /// applied, see [`tagmail_store::calendar::reply_stamps`].
+    pub reply_stamps: Vec<(String, String, Option<String>, i64)>,
+}
+
+impl InvitationContext {
+    pub fn with_reply_stamps(mut self, stamps: Vec<(String, String, Option<String>, i64)>) -> Self {
+        self.reply_stamps = stamps;
+        self
+    }
 }
 
 /// Read access to mail data and the change log, plus account persistence.
@@ -504,6 +518,15 @@ pub trait Store: Send + Sync + 'static {
         href: String,
     ) -> impl Future<Output = StoreResult<Option<CalEventDto>>> + Send {
         let _ = (account, href);
+        feature_disabled()
+    }
+
+    /// The owner's addresses for `account`, lower case.
+    fn my_addresses(
+        &self,
+        account: AccountId,
+    ) -> impl Future<Output = StoreResult<Vec<String>>> + Send {
+        let _ = account;
         feature_disabled()
     }
 

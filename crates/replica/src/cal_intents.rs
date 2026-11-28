@@ -5,7 +5,9 @@
 
 use rusqlite::{OptionalExtension, Row, params};
 use serde_json::{Map, Value};
-use tagmail_api_core::calendar_dto::{CalApplyDto, CalImportDto, CalRsvpDto};
+use tagmail_api_core::calendar_dto::{
+    CalApplyDto, CalEditDto, CalEditKindDto, CalImportDto, CalRsvpDto,
+};
 use tagmail_api_core::dto::{ChangeDto, ChangeOpDto, EntityDto};
 use tagmail_api_core::ops_dto::{CalOpInfoDto, OpDomainDto, OpDto, OpKindDto, OpStatusDto};
 use tagmail_api_core::writes::{Submitted, WriteError, WriteResult, valid_op_id};
@@ -24,12 +26,15 @@ use crate::writes::{DISCARDED_ON_SERVER, NOT_ON_SERVER, backoff};
 
 const MESSAGE_ID: &str = "messageId";
 const OP_ID: &str = "opId";
+const ACCOUNT_ID: &str = "accountId";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CalKind {
     Rsvp,
     Import,
     Apply,
+    /// A new, edited, deleted or moved event; it names no message.
+    Edit,
 }
 
 impl CalKind {
@@ -38,6 +43,7 @@ impl CalKind {
             CalKind::Rsvp => "rsvp",
             CalKind::Import => "import",
             CalKind::Apply => "apply",
+            CalKind::Edit => "edit",
         }
     }
 
@@ -46,6 +52,7 @@ impl CalKind {
             "rsvp" => CalKind::Rsvp,
             "import" => CalKind::Import,
             "apply" => CalKind::Apply,
+            "edit" => CalKind::Edit,
             other => return Err(Error::Corrupt(format!("cal_intent kind {other:?}"))),
         })
     }
@@ -56,14 +63,21 @@ impl CalKind {
             CalKind::Rsvp => "api/calendar/rsvp",
             CalKind::Import => "api/calendar/import",
             CalKind::Apply => "api/calendar/apply",
+            CalKind::Edit => "api/calendar/ops",
         }
     }
 
-    fn op_kind(self) -> OpKindDto {
+    fn op_kind(self, payload: &Map<String, Value>) -> OpKindDto {
+        let edit = || serde_json::from_value(payload.get("kind").cloned().unwrap_or_default());
         match self {
             CalKind::Rsvp => OpKindDto::CalRsvp,
             CalKind::Import => OpKindDto::CalImport,
             CalKind::Apply => OpKindDto::CalApply,
+            CalKind::Edit => match edit() {
+                Ok(CalEditKindDto::Delete) => OpKindDto::CalDelete,
+                Ok(CalEditKindDto::Move) => OpKindDto::CalMove,
+                _ => OpKindDto::CalPut,
+            },
         }
     }
 
@@ -73,6 +87,7 @@ impl CalKind {
             CalKind::Rsvp => serde_json::from_slice::<CalRsvpDto>(body).map(drop),
             CalKind::Import => serde_json::from_slice::<CalImportDto>(body).map(drop),
             CalKind::Apply => serde_json::from_slice::<CalApplyDto>(body).map(drop),
+            CalKind::Edit => serde_json::from_slice::<CalEditDto>(body).map(drop),
         }
     }
 }
@@ -104,7 +119,7 @@ impl CalIntent {
             op_id: self.op_id.clone(),
             seq: self.seq,
             account_id: self.account_id,
-            kind: self.kind.op_kind(),
+            kind: self.kind.op_kind(&self.payload),
             status: match self.state {
                 IntentState::Pending | IntentState::Sent => OpStatusDto::Pending,
                 IntentState::Done => OpStatusDto::Done,
@@ -413,6 +428,15 @@ impl Replica {
         if let Some(existing) = durable.cal_intent(&op_id).map_err(internal)? {
             return Ok(Submitted::Existing(existing.op_dto()));
         }
+        if kind == CalKind::Edit {
+            let account_id = payload
+                .get(ACCOUNT_ID)
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
+            return self
+                .queue_cal(kind, op_id, account_id, String::new(), payload)
+                .await;
+        }
         let message = payload
             .remove(MESSAGE_ID)
             .and_then(|v| v.as_str().and_then(|s| s.parse::<i64>().ok()))
@@ -442,6 +466,19 @@ impl Replica {
                 "the message has no invitation",
             ));
         }
+        self.queue_cal(kind, op_id, account_id, email_id, payload)
+            .await
+    }
+
+    async fn queue_cal(
+        &self,
+        kind: CalKind,
+        op_id: String,
+        account_id: i64,
+        email_id: String,
+        payload: Map<String, Value>,
+    ) -> WriteResult<Submitted> {
+        let durable = self.durable();
         let intent = CalIntent {
             op_id: op_id.clone(),
             seq: 0,
@@ -560,13 +597,19 @@ impl Replica {
             .collect();
         let mut stop = None;
         for i in due {
-            let Some(message) = self.message_of(&i).await? else {
-                durable.advance_cal_intent(&i.op_id, IntentState::Failed, Some(NOT_ON_SERVER))?;
-                changed.extend(durable.cal_intent(&i.op_id)?);
-                continue;
-            };
             let mut body = i.payload.clone();
-            body.insert(MESSAGE_ID.to_owned(), Value::String(message.to_string()));
+            if i.kind != CalKind::Edit {
+                let Some(message) = self.message_of(&i).await? else {
+                    durable.advance_cal_intent(
+                        &i.op_id,
+                        IntentState::Failed,
+                        Some(NOT_ON_SERVER),
+                    )?;
+                    changed.extend(durable.cal_intent(&i.op_id)?);
+                    continue;
+                };
+                body.insert(MESSAGE_ID.to_owned(), Value::String(message.to_string()));
+            }
             match self
                 .client()
                 .post_json::<_, OpDto>(i.kind.path(), &Value::Object(body))

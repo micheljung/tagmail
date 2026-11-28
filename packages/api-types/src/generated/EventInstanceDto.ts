@@ -5,4 +5,9 @@ import type { PartstatDto } from "./PartstatDto";
 /**
  * One instance of a cached event; times are Unix seconds.
  */
-export type EventInstanceDto = { accountId: number, calendarHref: string, href: string, uid: string, recurrenceId: string | null, start: number, end: number, allDay: boolean, summary: string | null, location: string | null, status: EventStatusDto | null, partstat: PartstatDto | null, };
+export type EventInstanceDto = { accountId: number, calendarHref: string, href: string, uid: string, recurrenceId: string | null, start: number, end: number, allDay: boolean, summary: string | null, location: string | null, status: EventStatusDto | null, partstat: PartstatDto | null, 
+/**
+ * The times are wall clock without a zone, as for `allDay`: `start`
+ * and `end` read them as UTC.
+ */
+floating: boolean, };

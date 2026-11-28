@@ -53,6 +53,10 @@ pub trait CalendarService: Send + Sync + 'static {
     /// Queues an RSVP, import or apply of the invitation in a message.
     fn submit(&self, request: CalRequest) -> BoxFuture<WriteResult<Submitted>>;
 
+    /// Queues a new, edited, deleted or moved event (`POST
+    /// /api/calendar/ops`); its fields are already checked.
+    fn edit(&self, request: crate::calendar_dto::CalEditDto) -> BoxFuture<WriteResult<Submitted>>;
+
     /// The calendar op `op_id` names if it was submitted before; a conflict
     /// when a mail op or a discarded op used it.
     fn existing(&self, op_id: String) -> BoxFuture<WriteResult<Option<crate::ops_dto::OpDto>>>;
@@ -133,6 +137,8 @@ impl<S: Store> Api<S> {
             RouteId::CalendarRsvp | RouteId::CalendarImport | RouteId::CalendarApply => {
                 self.calendar_op(route, body).await
             }
+            RouteId::CalendarEvent => self.calendar_event(params[0], params[1]).await,
+            RouteId::CalendarEdit => self.calendar_edit(body).await,
             _ => unreachable!("not a calendar route: {route:?}"),
         };
         match served {
@@ -151,9 +157,9 @@ mod handlers {
         query_param, valid_host,
     };
     use crate::calendar_dto::{
-        CalApplyDto, CalImportDto, CalRsvpDto, CaldavSettingsDto, CaldavSettingsInputDto,
-        CalendarEventsDto, CalendarPatchDto, CalendarTargetDto, CalendarsDto, ConfirmHostDto,
-        SchedulingDto, SchedulingOverrideDto,
+        CalApplyDto, CalEditDto, CalEditKindDto, CalImportDto, CalRsvpDto, CaldavSettingsDto,
+        CaldavSettingsInputDto, CalendarEventsDto, CalendarPatchDto, CalendarTargetDto,
+        CalendarsDto, ConfirmHostDto, SchedulingDto, SchedulingOverrideDto,
     };
     use crate::compose::parse_row_id;
     use crate::routes::RouteId;
@@ -297,6 +303,57 @@ mod handlers {
                 .map(|id| check_text("authservId", id, MAX_AUTHSERV_ID_LEN))
                 .transpose()?,
         })
+    }
+
+    /// The shape of `POST /api/calendar/ops`; the engine checks the
+    /// event's fields against what it stores.
+    pub(crate) fn check_edit(dto: &CalEditDto) -> Checked<()> {
+        if !valid_op_id(&dto.op_id) {
+            return Err(write_error(WriteError::invalid(
+                "opId",
+                "1 to 64 characters of letters, digits, '-', '_' or '.'",
+            )));
+        }
+        let needs =
+            |ok: bool, field: &str, why: &str| if ok { Ok(()) } else { Err(invalid(field, why)) };
+        needs(
+            !dto.calendar_href.is_empty() && dto.calendar_href.len() <= MAX_HREF_LEN,
+            "calendarHref",
+            "a calendar href",
+        )?;
+        needs(
+            dto.href
+                .as_ref()
+                .is_none_or(|h| !h.is_empty() && h.len() <= MAX_HREF_LEN),
+            "href",
+            "an event href",
+        )?;
+        needs(
+            dto.send_decline.is_none() || dto.kind == CalEditKindDto::Delete,
+            "sendDecline",
+            "only for a delete",
+        )?;
+        match dto.kind {
+            CalEditKindDto::Put => {
+                let Some(event) = &dto.event else {
+                    return Err(invalid("event", "a put needs the event"));
+                };
+                crate::event_fields::fields_of(event, |_| true)
+                    .map(drop)
+                    .map_err(|(field, why)| invalid(field, why))
+            }
+            CalEditKindDto::Delete => needs(dto.href.is_some(), "href", "a delete needs the event"),
+            CalEditKindDto::Move => {
+                needs(dto.href.is_some(), "href", "a move needs the event")?;
+                needs(
+                    dto.dest_calendar_href
+                        .as_ref()
+                        .is_some_and(|d| *d != dto.calendar_href && d.len() <= MAX_HREF_LEN),
+                    "destCalendarHref",
+                    "another calendar of the account",
+                )
+            }
+        }
     }
 
     impl<S: Store> Api<S> {
@@ -468,6 +525,55 @@ mod handlers {
                 action,
             };
             Ok(match service.submit(request).await {
+                Ok(Submitted::Created(op)) => Response::json(202, &op),
+                Ok(Submitted::Existing(op)) => Response::json(200, &op),
+                Err(e) => write_error(e),
+            })
+        }
+
+        /// `GET /api/calendar/events/{accountId}/{href}`.
+        pub(super) async fn calendar_event(
+            &self,
+            account: &str,
+            href: &str,
+        ) -> Result<Response, StoreError> {
+            let Some(account) = parse_row_id(account).map(AccountId) else {
+                return Ok(no_account());
+            };
+            let event = self.store.event(account, href.to_owned()).await?;
+            let mine = match &event {
+                Some(_) => self.store.my_addresses(account).await?,
+                None => Vec::new(),
+            };
+            let detail = event
+                .as_ref()
+                .and_then(|e| crate::event_fields::detail(e, &mine));
+            Ok(match (event, detail) {
+                (_, Some(detail)) => Response::json(200, &detail),
+                (Some(_), None) => Response::error(422, "unparsable", "the event cannot be read"),
+                (None, None) => Response::error(404, "not_found", "no such event"),
+            })
+        }
+
+        /// `POST /api/calendar/ops`.
+        pub(super) async fn calendar_edit(&self, body: &[u8]) -> Result<Response, StoreError> {
+            let service = match self.calendar_service() {
+                Ok(s) => s,
+                Err(resp) => return Ok(resp),
+            };
+            let dto: CalEditDto = match serde_json::from_slice(body) {
+                Ok(dto) => dto,
+                Err(e) => return Ok(bad_request(format!("invalid calendar op JSON: {e}"))),
+            };
+            if let Err(resp) = check_edit(&dto) {
+                return Ok(resp);
+            }
+            match service.existing(dto.op_id.clone()).await {
+                Ok(Some(op)) => return Ok(Response::json(200, &op)),
+                Ok(None) => {}
+                Err(e) => return Ok(write_error(e)),
+            }
+            Ok(match service.edit(dto).await {
                 Ok(Submitted::Created(op)) => Response::json(202, &op),
                 Ok(Submitted::Existing(op)) => Response::json(200, &op),
                 Err(e) => write_error(e),

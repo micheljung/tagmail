@@ -29,6 +29,7 @@ function instance(start: number, end: number, extra: Partial<EventInstanceDto> =
 		location: null,
 		status: null,
 		partstat: null,
+		floating: false,
 		...extra
 	} satisfies EventInstanceDto;
 }

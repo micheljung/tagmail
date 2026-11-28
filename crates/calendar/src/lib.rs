@@ -3,6 +3,7 @@
 //! VTIMEZONE) and recurrence expansion. No IO.
 
 mod alarm;
+mod edit;
 mod error;
 mod expand;
 mod itip;
@@ -12,6 +13,10 @@ mod tz;
 mod window;
 
 pub use alarm::{Alarm, is_time_zone};
+pub use edit::{
+    EditAttendee, EditOrganizer, Edited, EventFields, LocalTime, apply_reply, attendee_partstat,
+    cancel, edit, fields, has_exceptions, has_until, is_known_zone, request,
+};
 pub use error::{EventError, ItipError, ParseError};
 pub use expand::Expansion;
 pub use itip::{apply_cancel, apply_update, for_import, reply, schedule_status, set_my_partstat};

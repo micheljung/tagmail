@@ -7,6 +7,7 @@ import type {
 	ApiErrorDto,
 	ApiTransport,
 	CalApplyDto,
+	CalEditDto,
 	CaldavDiscoveryDto,
 	CaldavSettingsDto,
 	CaldavSettingsInputDto,
@@ -25,6 +26,7 @@ import type {
 	DesktopStatusDto,
 	DeviceDto,
 	DevicesDto,
+	EventDetailDto,
 	EventInstanceDto,
 	ImageSendersDto,
 	InvitationDto,
@@ -204,6 +206,19 @@ export class Api {
 		for (const c of calendars) query.append('calendars', `${c.accountId}:${c.calendarHref}`);
 		return (await this.#json<CalendarEventsDto>(`/api/calendar/events?${query}`, { signal }))
 			.events;
+	}
+
+	/** One event as the editor shows it. */
+	calendarEvent(accountId: number, href: string, signal?: AbortSignal): Promise<EventDetailDto> {
+		return this.#json<EventDetailDto>(
+			`/api/calendar/events/${accountId}/${encodeURIComponent(href)}`,
+			{ signal }
+		);
+	}
+
+	/** Creates, edits, deletes or moves an event. */
+	editEvent(request: CalEditDto): Promise<OpDto> {
+		return this.#post<OpDto>('/api/calendar/ops', request);
 	}
 
 	rsvp(request: CalRsvpDto): Promise<OpDto> {

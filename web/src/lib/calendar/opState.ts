@@ -22,9 +22,16 @@ export interface CalendarNote {
 
 /** What a failed or half-done calendar op means to the person; `null` when nothing special. */
 export function calendarNote(status: string, calendar: CalOpInfoDto): CalendarNote | null {
+	const invites = /#(request|cancel)$/.test(calendar.replyOpId ?? '');
+	if (invites && calendar.reply === 'cancelled') {
+		return { text: 'Guests were not told about this change', retryLabel: 'Retry' };
+	}
+	if (status === 'failed' && invites && calendar.conflict !== 'server_won') {
+		return { text: "Your edit wasn't saved and guests were not told", retryLabel: 'Retry' };
+	}
 	if (calendar.conflict === 'server_won') {
 		return {
-			text: "Calendar changed on the server — your edit wasn't saved",
+			text: `Calendar changed on the server — your edit wasn't saved${invites ? ' and guests were not told' : ''}`,
 			retryLabel: 'Re-apply'
 		};
 	}

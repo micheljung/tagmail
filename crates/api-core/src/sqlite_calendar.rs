@@ -218,6 +218,29 @@ pub(crate) fn mapped_accounts(
     Ok(mapped)
 }
 
+/// The stored iCalendar text of the event at `href`.
+fn stored_ics(
+    conn: &Connection,
+    account: AccountId,
+    calendar_href: &str,
+    href: &str,
+) -> tagmail_store::Result<Vec<u8>> {
+    let id: Option<i64> = conn
+        .prepare_cached(
+            "SELECT e.id FROM cal_event e JOIN calendar c ON c.id = e.calendar_id \
+             WHERE c.account_id = ?1 AND c.href = ?2 AND e.href = ?3",
+        )?
+        .query_row(
+            tagmail_store::rusqlite::params![account.0, calendar_href, href],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(match id {
+        Some(id) => calendar::event_ics(conn, id)?.unwrap_or_default(),
+        None => Vec::new(),
+    })
+}
+
 /// The REPLY state of the newest RSVP of `account` to each of `uids`,
 /// with my PARTSTAT before it.
 pub(crate) fn reply_states(
@@ -260,6 +283,7 @@ pub(crate) fn invitation_context(
     message: MessageRowId,
     uids: &[String],
     replies: &HashMap<String, (CalReplyStateDto, Option<String>)>,
+    addresses: Vec<String>,
 ) -> tagmail_store::Result<InvitationContext> {
     let accounts: Vec<AccountId> = mapped.iter().map(|(a, _)| *a).collect();
     let mut cached =
@@ -286,6 +310,7 @@ pub(crate) fn invitation_context(
                 uid: uid.clone(),
                 dtstamp: copy.event.dtstamp,
                 organizer: copy.event.organizer.clone(),
+                ics: stored_ics(conn, copy.account, &copy.calendar_href, &copy.event.href)?,
                 stored: StoredEventDto {
                     account_id: copy.account.0,
                     calendar_href: copy.calendar_href,
@@ -315,6 +340,8 @@ pub(crate) fn invitation_context(
             )
             .optional()?
             .flatten(),
+        addresses,
+        reply_stamps: Vec::new(),
     })
 }
 
@@ -381,6 +408,7 @@ pub(crate) fn events_in(
             location: None,
             status: None,
             partstat,
+            floating: false,
         };
         let ics = calendar::event_ics(conn, id)?.unwrap_or_default();
         let Ok(parsed) = tagmail_calendar::parse(&ics) else {
@@ -414,6 +442,7 @@ pub(crate) fn events_in(
                     tagmail_calendar::EventStatus::Confirmed => EventStatusDto::Confirmed,
                     tagmail_calendar::EventStatus::Cancelled => EventStatusDto::Cancelled,
                 }),
+                floating: event.start.floating && !event.start.all_day,
                 ..instance(
                     event.uid.clone(),
                     recurrence_id,

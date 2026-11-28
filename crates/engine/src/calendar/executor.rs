@@ -42,6 +42,11 @@ pub(crate) const ICS_DIR: &str = crate::compose::CAL_OP_DIR;
 pub(crate) const CAL_OP: &str = "cal";
 /// The outbox op id suffix of an RSVP's REPLY.
 pub(crate) const REPLY_SUFFIX: &str = "#reply";
+/// The outbox op id suffixes of an edit's REQUEST and CANCEL.
+pub(crate) const EDIT_SUFFIXES: [&str; 2] = ["#request", "#cancel"];
+/// `outbox.next_at` of an edit's REQUEST or CANCEL until the edit is
+/// written: it is sent only once the calendar has the change.
+pub(crate) const HELD: i64 = i64::MAX;
 const SERVER_WON: &str = "server_won";
 const ICS_EXTENSION: &str = "ics";
 const CONFLICT_EXTENSION: &str = "conflict.ics";
@@ -136,6 +141,8 @@ pub(crate) struct CalOp {
     pub reply_cancelled: bool,
     /// My PARTSTAT before an RSVP wrote its answer.
     pub prior_partstat: Option<String>,
+    /// The DTSTAMP of the REPLY an apply sets an attendee's answer from.
+    pub dtstamp: Option<i64>,
 }
 
 impl CalOp {
@@ -167,6 +174,7 @@ impl CalOp {
             dest_href: None,
             reply_cancelled: false,
             prior_partstat: None,
+            dtstamp: None,
         }
     }
 }
@@ -174,7 +182,7 @@ impl CalOp {
 const COLUMNS: &str = "op_id, account_id, target_account_id, calendar_href, uid, recurrence_id, \
      kind, partstat, ics_file, if_match, reply_op_id, state, attempts, next_at, error, \
      conflict_kind, conflict_ics_file, created_at, op_seq, attendee, identity_id, href, dest_href, \
-     reply_cancelled, prior_partstat";
+     reply_cancelled, prior_partstat, dtstamp";
 
 fn corrupt(what: impl std::fmt::Display) -> rusqlite::Error {
     rusqlite::Error::FromSqlConversionFailure(
@@ -213,6 +221,7 @@ fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<CalOp> {
         dest_href: r.get(22)?,
         reply_cancelled: r.get(23)?,
         prior_partstat: r.get(24)?,
+        dtstamp: r.get(25)?,
     })
 }
 
@@ -251,7 +260,7 @@ pub(crate) fn insert(conn: &Connection, op: &CalOp) -> rusqlite::Result<bool> {
     conn.execute(
         &format!(
             "INSERT INTO cal_op ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, \
-             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)"
+             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)"
         ),
         params![
             op.op_id,
@@ -279,6 +288,7 @@ pub(crate) fn insert(conn: &Connection, op: &CalOp) -> rusqlite::Result<bool> {
             op.dest_href,
             op.reply_cancelled,
             op.prior_partstat,
+            op.dtstamp,
         ],
     )?;
     Ok(true)
@@ -314,6 +324,31 @@ fn reply_state(conn: &Connection, op: &CalOp) -> rusqlite::Result<Option<CalRepl
     };
     if op.reply_cancelled {
         return Ok(Some(CalReplyStateDto::Cancelled));
+    }
+    if reply.ends_with(EDIT_SUFFIXES[0]) || reply.ends_with(EDIT_SUFFIXES[1]) {
+        let mut states = Vec::new();
+        for suffix in EDIT_SUFFIXES {
+            states.extend(
+                conn.query_row(
+                    "SELECT state FROM outbox WHERE op_id = ?1",
+                    [format!("{}{suffix}", op.op_id)],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?,
+            );
+        }
+        let has = |s: &str| states.iter().any(|x| x == s);
+        return Ok(Some(if has("failed") {
+            CalReplyStateDto::Failed
+        } else if has("sending") {
+            CalReplyStateDto::Sending
+        } else if has("queued") {
+            CalReplyStateDto::Queued
+        } else if states.is_empty() && op.state != OpState::Done {
+            CalReplyStateDto::Cancelled
+        } else {
+            CalReplyStateDto::Sent
+        }));
     }
     let state: Option<String> = conn
         .query_row("SELECT state FROM outbox WHERE op_id = ?1", [reply], |r| {
@@ -615,6 +650,18 @@ fn new_resource(calendar: &Url, uid: &str) -> Url {
             .push(&format!("{uid}.{ICS_EXTENSION}"));
     }
     url
+}
+
+/// Whether the server holds what an op wrote, e.g. after a crash between
+/// its PUT and recording it done.
+fn same_object(server: &str, written: &str) -> bool {
+    match (
+        tagmail_calendar::parse(server.as_bytes()),
+        tagmail_calendar::parse(written.as_bytes()),
+    ) {
+        (Ok(a), Ok(b)) => a.to_ics() == b.to_ics(),
+        _ => false,
+    }
 }
 
 fn delivered(status: &str) -> bool {
@@ -937,6 +984,9 @@ impl Exec<'_> {
             Ok(c) => c,
             Err(e) => return Outcome::Failed(format!("the invitation cannot be read: {e}")),
         };
+        if incoming.method == Some(tagmail_calendar::Method::Reply) {
+            return self.apply_reply(op, &text).await;
+        }
         let cancel = incoming.method == Some(tagmail_calendar::Method::Cancel);
         let of_uid: Vec<_> = incoming.events.iter().filter(|e| e.uid == op.uid).collect();
         let Some(newest) = of_uid
@@ -1016,6 +1066,44 @@ impl Exec<'_> {
         Outcome::Failed("the event kept changing on the server; try again".to_owned())
     }
 
+    /// An attendee's REPLY to an event I organize: their PARTSTAT on the
+    /// stored copy, rebased over 412s; nothing is written when it is
+    /// stored already, e.g. by a scheduling server.
+    async fn apply_reply(&mut self, op: &mut CalOp, reply: &str) -> Outcome {
+        let attendee = op.attendee.clone().unwrap_or_default();
+        let calendars = self.urls(op.calendar_href.as_deref());
+        for _ in 0..MAX_REBASES {
+            let found = match self.dav.find_by_uid(&calendars, &op.uid).await {
+                Ok(Some(found)) => found.resource,
+                Ok(None) => return Outcome::Failed("the event is not in the calendar".to_owned()),
+                Err(e) => return failure(e),
+            };
+            let body = match tagmail_calendar::apply_reply(
+                found.data.as_bytes(),
+                reply.as_bytes(),
+                &attendee,
+            ) {
+                Ok(Some(body)) => body,
+                Ok(None) => return Outcome::Done,
+                Err(e) => return Outcome::Failed(e.to_string()),
+            };
+            let condition = found
+                .etag
+                .clone()
+                .map_or(PutCondition::Overwrite, PutCondition::IfMatch);
+            match self.dav.put(&found.href, &body, condition).await {
+                Ok(_) => {
+                    op.href = Some(href(&found.href));
+                    self.refresh(&found.href).await;
+                    return Outcome::Done;
+                }
+                Err(DavError::PreconditionFailed) => {}
+                Err(e) => return failure(e),
+            }
+        }
+        Outcome::Failed("the event kept changing on the server; try again".to_owned())
+    }
+
     fn resource_url(&self, op: &CalOp) -> Option<Url> {
         match &op.href {
             Some(href) => self.home.join(href).ok(),
@@ -1052,7 +1140,14 @@ impl Exec<'_> {
                 self.refresh(&url).await;
                 Outcome::Done
             }
-            Err(DavError::PreconditionFailed) => self.server_won(&url).await,
+            Err(DavError::PreconditionFailed) => match self.refresh(&url).await {
+                Refreshed::Found(r) if same_object(&r.data, &body) => {
+                    op.href = Some(href(&url));
+                    Outcome::Done
+                }
+                Refreshed::Found(r) => Outcome::ServerWon(r.etag),
+                Refreshed::Gone | Refreshed::Unknown => Outcome::ServerWon(None),
+            },
             Err(e) => failure(e),
         }
     }
@@ -1061,7 +1156,11 @@ impl Exec<'_> {
         let Some(url) = op.href.as_deref().and_then(|h| self.home.join(h).ok()) else {
             return Outcome::Failed("no event to delete".to_owned());
         };
-        match self.dav.delete(&url, op.if_match.as_deref()).await {
+        match self
+            .dav
+            .delete(&url, op.if_match.as_deref(), !op.reply_cancelled)
+            .await
+        {
             Ok(()) | Err(DavError::NotFound { .. }) => {
                 self.refresh(&url).await;
                 Outcome::Done
@@ -1090,7 +1189,7 @@ impl Exec<'_> {
             segments.pop_if_empty().push(&name);
         }
         if op.attempts > 0 && self.dav.get(&to).await.is_ok() {
-            return match self.dav.delete(&from, None).await {
+            return match self.dav.delete(&from, None, false).await {
                 Ok(()) | Err(DavError::NotFound { .. }) => {
                     self.refresh(&from).await;
                     self.refresh(&to).await;
@@ -1228,16 +1327,70 @@ pub(crate) async fn run_account(
         tracing::info!(op = %op.op_id, kind = op.kind.as_str(), outcome = ?outcome, "calendar op ran");
         settle(&dir, &mut op, outcome);
         let row = op.clone();
-        if let Err(e) = stores
+        let saved = stores
             .config
-            .write(move |tx| Ok(save_state(tx, &row)?))
-            .await
-        {
-            tracing::error!(op = %op.op_id, error = %e, "cannot record a calendar op");
+            .write(move |tx| {
+                save_state(tx, &row)?;
+                Ok(if row.state == OpState::Done {
+                    release(tx, &row.op_id)?
+                } else {
+                    0
+                })
+            })
+            .await;
+        match saved {
+            Ok(released) => replied |= released > 0,
+            Err(e) => tracing::error!(op = %op.op_id, error = %e, "cannot record a calendar op"),
         }
         emit(stores, &op.op_id).await;
     }
     replied
+}
+
+/// Lets the outbox send the REQUEST and CANCEL of `op_id`, now that the
+/// edit is written; how many there were.
+fn release(tx: &Connection, op_id: &str) -> rusqlite::Result<usize> {
+    let mut released = 0;
+    for suffix in EDIT_SUFFIXES {
+        released += tx.execute(
+            "UPDATE outbox SET next_at = NULL WHERE op_id = ?1 AND next_at = ?2",
+            params![format!("{op_id}{suffix}"), HELD],
+        )?;
+    }
+    Ok(released)
+}
+
+/// The outbox rows of an edit's REQUEST and CANCEL that have not gone
+/// out, so cancelling one cancels both.
+fn unsent(conn: &Connection, op_id: &str) -> rusqlite::Result<Vec<i64>> {
+    let mut ids = Vec::new();
+    for suffix in EDIT_SUFFIXES {
+        ids.extend(
+            conn.query_row(
+                "SELECT id FROM outbox WHERE op_id = ?1 AND state IN ('queued', 'failed')",
+                [format!("{op_id}{suffix}")],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?,
+        );
+    }
+    Ok(ids)
+}
+
+/// The outbox rows of an edit's REQUEST and CANCEL that still wait.
+fn held(conn: &Connection, op_id: &str) -> rusqlite::Result<Vec<i64>> {
+    let mut ids = Vec::new();
+    for suffix in EDIT_SUFFIXES {
+        ids.extend(
+            conn.query_row(
+                "SELECT id FROM outbox WHERE op_id = ?1 AND next_at = ?2",
+                params![format!("{op_id}{suffix}"), HELD],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?,
+        );
+    }
+    Ok(ids)
 }
 
 /// Puts off `ops`, which could not run for `error`, as after a transient
@@ -1259,6 +1412,14 @@ pub(crate) async fn defer(stores: &Stores, ops: Vec<CalOp>, error: &str) {
     }
 }
 
+/// An edit of an event waits while an earlier edit of it is pending or
+/// running, so a put, move and delete keep their order through retries;
+/// a failed one no longer holds the later ones back.
+const IN_TURN: &str = "(c.kind NOT IN ('put', 'delete', 'move') OR NOT EXISTS (\
+     SELECT 1 FROM cal_op p WHERE p.target_account_id = c.target_account_id \
+     AND p.uid = c.uid AND p.op_seq < c.op_seq AND p.state IN ('pending', 'running') \
+     AND p.kind IN ('put', 'delete', 'move')))";
+
 /// Pending ops due now, by target account.
 pub(crate) async fn due(stores: &Stores) -> tagmail_store::Result<Vec<CalOp>> {
     let now = now_secs();
@@ -1266,8 +1427,9 @@ pub(crate) async fn due(stores: &Stores) -> tagmail_store::Result<Vec<CalOp>> {
         .config
         .read(move |c| {
             let mut stmt = c.prepare_cached(&format!(
-                "SELECT {COLUMNS} FROM cal_op \
-                 WHERE state = 'pending' AND coalesce(next_at, 0) <= ?1 ORDER BY op_seq LIMIT ?2"
+                "SELECT {COLUMNS} FROM cal_op c \
+                 WHERE state = 'pending' AND coalesce(next_at, 0) <= ?1 AND {IN_TURN} \
+                 ORDER BY op_seq LIMIT ?2"
             ))?;
             Ok(stmt
                 .query_map(params![now, BATCH as i64], row)?
@@ -1282,7 +1444,10 @@ pub(crate) async fn next_due(stores: &Stores) -> Option<i64> {
         .config
         .read(|c| {
             Ok(c.query_row(
-                "SELECT min(coalesce(next_at, 0)) FROM cal_op WHERE state = 'pending'",
+                &format!(
+                    "SELECT min(coalesce(next_at, 0)) FROM cal_op c \
+                     WHERE state = 'pending' AND {IN_TURN}"
+                ),
                 [],
                 |r| r.get::<_, Option<i64>>(0),
             )?)
@@ -1428,6 +1593,17 @@ impl<F: crate::supervisor::ConnectorFactory> crate::supervisor::Engine<F> {
             Some(Some(op)) => {
                 remove_files(&ics_dir(stores), &op);
                 emit_removed(stores, &op.op_id, op.seq).await;
+                let id = op.op_id.clone();
+                let waiting = stores
+                    .config
+                    .read(move |c| Ok(held(c, &id)?))
+                    .await
+                    .unwrap_or_default();
+                for outbox in waiting {
+                    if let Err(e) = self.cancel_impl(outbox).await {
+                        tracing::warn!(op = %op.op_id, error = %e, "cannot cancel an unsent invitation");
+                    }
+                }
                 Ok(Some(()))
             }
         }
@@ -1445,7 +1621,7 @@ impl<F: crate::supervisor::ConnectorFactory> crate::supervisor::Engine<F> {
                 let Some(op) = load_one(tx, &id)? else {
                     return Ok(None);
                 };
-                if op.state == OpState::Pending {
+                if op.state == OpState::Pending && op.kind == CalOpKind::Rsvp {
                     tx.execute("DELETE FROM cal_op WHERE op_id = ?1", [&id])?;
                     return Ok(Some((op, true)));
                 }
@@ -1461,7 +1637,22 @@ impl<F: crate::supervisor::ConnectorFactory> crate::supervisor::Engine<F> {
                 remove_files(&ics_dir(stores), &op);
                 emit_removed(stores, &op.op_id, op.seq).await;
             }
-            Ok(Some((_, false))) => emit(stores, &parent).await,
+            Ok(Some((op, false))) => {
+                emit(stores, &parent).await;
+                if matches!(op.kind, CalOpKind::Put | CalOpKind::Delete) {
+                    let id = parent.clone();
+                    let rest = stores
+                        .config
+                        .read(move |c| Ok(unsent(c, &id)?))
+                        .await
+                        .unwrap_or_default();
+                    for outbox in rest {
+                        if let Err(e) = Box::pin(self.cancel_impl(outbox)).await {
+                            tracing::warn!(op = %parent, error = %e, "cannot cancel an invitation");
+                        }
+                    }
+                }
+            }
             Ok(None) => {}
             Err(e) => tracing::error!(op = %parent, error = %e, "cannot settle a cancelled reply"),
         }

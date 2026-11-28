@@ -227,6 +227,14 @@ impl Store for ReplicaStore {
     }
 
     #[cfg(feature = "calendar")]
+    fn my_addresses(
+        &self,
+        account: AccountId,
+    ) -> impl Future<Output = StoreResult<Vec<String>>> + Send {
+        self.inner.my_addresses(account)
+    }
+
+    #[cfg(feature = "calendar")]
     fn event_by_uid(
         &self,
         account: AccountId,

@@ -13,6 +13,7 @@ pub(crate) const CONFIG: &[&str] = &[
     include_str!("../migrations/config/V8__push_subscription.sql"),
     include_str!("../migrations/config/V9__caldav.sql"),
     include_str!("../migrations/config/V10__cal_op.sql"),
+    include_str!("../migrations/config/V11__cal_op_dtstamp.sql"),
 ];
 pub(crate) const CACHE: &[&str] = &[
     include_str!("../migrations/cache/V1__init.sql"),

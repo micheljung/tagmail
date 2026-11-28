@@ -631,7 +631,7 @@ async fn config_v5_gives_identityless_accounts_a_default() {
 
 #[test]
 fn schema_constants_count_the_migrations() {
-    assert_eq!((CONFIG_SCHEMA, CACHE_SCHEMA), (10, 8));
+    assert_eq!((CONFIG_SCHEMA, CACHE_SCHEMA), (11, 8));
 }
 
 #[tokio::test]

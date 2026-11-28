@@ -62,6 +62,8 @@ pub enum RouteId {
     CalendarRsvp,
     CalendarImport,
     CalendarApply,
+    CalendarEvent,
+    CalendarEdit,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -178,6 +180,12 @@ pub const ROUTES: &[Route] = &[
         RouteId::CalendarImport,
     ),
     route(Method::Post, "/api/calendar/apply", RouteId::CalendarApply),
+    route(
+        Method::Get,
+        "/api/calendar/events/{accountId}/{href}",
+        RouteId::CalendarEvent,
+    ),
+    route(Method::Post, "/api/calendar/ops", RouteId::CalendarEdit),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

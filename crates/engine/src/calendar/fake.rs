@@ -328,8 +328,17 @@ impl CalDav for FakeDav {
         Box::pin(async move { put })
     }
 
-    fn delete<'a>(&'a self, href: &'a Url, etag: Option<&'a str>) -> DavFuture<'a, ()> {
-        self.called("delete");
+    fn delete<'a>(
+        &'a self,
+        href: &'a Url,
+        etag: Option<&'a str>,
+        schedule_reply: bool,
+    ) -> DavFuture<'a, ()> {
+        self.called(if schedule_reply {
+            "delete"
+        } else {
+            "delete without reply"
+        });
         let deleted = match self.scripted("delete") {
             Some(e) => Err(e),
             None => self.remove(href, etag),

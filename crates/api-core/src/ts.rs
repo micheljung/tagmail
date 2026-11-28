@@ -153,6 +153,11 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<CalendarsDto>(&cfg, &mut files)?;
     file::<CalendarTargetDto>(&cfg, &mut files)?;
     file::<CalApplyDto>(&cfg, &mut files)?;
+    file::<CalEditDto>(&cfg, &mut files)?;
+    file::<CalEditKindDto>(&cfg, &mut files)?;
+    file::<EventAttendeeDto>(&cfg, &mut files)?;
+    file::<EventDetailDto>(&cfg, &mut files)?;
+    file::<EventFieldsDto>(&cfg, &mut files)?;
     file::<CalImportDto>(&cfg, &mut files)?;
     file::<CalRsvpDto>(&cfg, &mut files)?;
     file::<RsvpPartstatDto>(&cfg, &mut files)?;

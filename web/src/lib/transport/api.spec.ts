@@ -63,6 +63,16 @@ describe('Api', () => {
 		]);
 	});
 
+	it('opens one event by its href as a single path segment', async () => {
+		const seen: string[] = [];
+		const client = api((path) => {
+			seen.push(path);
+			return new Response(JSON.stringify({}));
+		});
+		await client.calendarEvent(2, '/dav/work/a b.ics');
+		expect(seen).toEqual(['/api/calendar/events/2/%2Fdav%2Fwork%2Fa%20b.ics']);
+	});
+
 	it('posts a view sync and treats 202 as done', async () => {
 		const seen: [string, string | undefined][] = [];
 		const client = api((path, init) => {

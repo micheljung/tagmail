@@ -23,13 +23,19 @@ export class CalendarsStore {
 		const target = this.calendars.find(
 			(c) => c.accountId === change.accountId && c.href === change.href
 		);
-		const before = target && { color: target.color, visible: target.visible };
-		if (target && change.color !== undefined) target.color = change.color;
-		if (target && change.visible !== undefined) target.visible = change.visible;
+		const before: Partial<Pick<CalendarDto, 'color' | 'visible'>> = {};
+		if (target && change.color !== undefined) {
+			before.color = target.color;
+			target.color = change.color;
+		}
+		if (target && change.visible !== undefined) {
+			before.visible = target.visible;
+			target.visible = change.visible;
+		}
 		try {
 			await this.#api.updateCalendar(change);
 		} catch (e) {
-			if (target && before) Object.assign(target, before);
+			if (target) Object.assign(target, before);
 			throw e;
 		} finally {
 			await this.load().catch(() => undefined);
