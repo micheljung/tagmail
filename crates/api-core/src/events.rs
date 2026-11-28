@@ -34,6 +34,20 @@ pub struct Arrival {
     pub date: i64,
 }
 
+/// A due reminder for the push subscriptions of `sessions` (session hashes
+/// in lowercase hex), each of which it reaches once (plan §3.7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReminderPush {
+    pub alarm_key: String,
+    pub account_id: i64,
+    pub title: Option<String>,
+    pub start: i64,
+    /// Unix seconds; a push still undelivered
+    /// [`crate::calendar_dto::REMINDER_GRACE_SECS`] later is dropped.
+    pub fire_at: i64,
+    pub sessions: Vec<String>,
+}
+
 /// Source of change-log head updates.
 pub trait EventSource: Send + Sync + 'static {
     /// Yields the head after every commit that appended changes. A new
@@ -47,6 +61,7 @@ pub trait EventSource: Send + Sync + 'static {
 pub struct ChangeFeed {
     tx: watch::Sender<ChangeCursor>,
     arrivals: broadcast::Sender<Arc<[Arrival]>>,
+    reminders: broadcast::Sender<Arc<ReminderPush>>,
 }
 
 impl ChangeFeed {
@@ -54,6 +69,7 @@ impl ChangeFeed {
         ChangeFeed {
             tx: watch::Sender::new(head),
             arrivals: broadcast::Sender::new(ARRIVALS_CAPACITY),
+            reminders: broadcast::Sender::new(ARRIVALS_CAPACITY),
         }
     }
 
@@ -72,6 +88,15 @@ impl ChangeFeed {
 
     pub fn subscribe_arrivals(&self) -> broadcast::Receiver<Arc<[Arrival]>> {
         self.arrivals.subscribe()
+    }
+
+    /// Called after the commit that recorded the reminder as sent.
+    pub fn publish_reminder(&self, reminder: ReminderPush) {
+        let _ = self.reminders.send(reminder.into());
+    }
+
+    pub fn subscribe_reminders(&self) -> broadcast::Receiver<Arc<ReminderPush>> {
+        self.reminders.subscribe()
     }
 }
 

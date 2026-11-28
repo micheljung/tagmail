@@ -20,4 +20,4 @@ lastSuccessAt: number | null,
 /**
  * Belongs to the caller's session: this browser.
  */
-current: boolean, };
+current: boolean, reminders: boolean, };

@@ -39,6 +39,8 @@ import type {
 	PushSubscribeDto,
 	PushSubscriptionDto,
 	PushSubscriptionPatchDto,
+	ReminderSettingsDto,
+	ReminderSettingsPatchDto,
 	SessionDto,
 	SessionsDto,
 	StatusDto,
@@ -295,6 +297,14 @@ export class Api {
 
 	testPush(id: number): Promise<void> {
 		return this.#empty(`/api/push/subscriptions/${id}/test`, 'POST');
+	}
+
+	reminderSettings(): Promise<ReminderSettingsDto> {
+		return this.#json<ReminderSettingsDto>('/api/reminders/settings');
+	}
+
+	updateReminderSettings(patch: ReminderSettingsPatchDto): Promise<ReminderSettingsDto> {
+		return this.#post<ReminderSettingsDto>('/api/reminders/settings', patch, 'PATCH');
 	}
 
 	passkeyLoginStart(): Promise<PasskeyChallengeDto> {

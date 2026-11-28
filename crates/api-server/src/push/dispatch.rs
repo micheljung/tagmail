@@ -8,8 +8,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::{StatusCode, header};
-use tagmail_api_core::Arrival;
+use tagmail_api_core::calendar_dto::REMINDER_GRACE_SECS;
 use tagmail_api_core::push_dto::PushPayloadDto;
+use tagmail_api_core::{Arrival, ReminderPush};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Semaphore, broadcast, mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
@@ -32,6 +33,9 @@ pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 pub const MAX_LOGGED_BODY: usize = 256;
 /// The push service keeps an undelivered message this long.
 pub const TTL_SECS: u32 = 12 * 60 * 60;
+/// A reminder push that failed (5xx, timeout) is tried once more this
+/// much later, if that is still within its grace.
+pub const REMINDER_RETRY: Duration = Duration::from_secs(2);
 /// Longest honoured `Retry-After` of a push service.
 pub const MAX_BACKOFF: Duration = Duration::from_secs(60 * 60);
 const DEFAULT_BACKOFF: Duration = Duration::from_secs(60);
@@ -44,6 +48,8 @@ enum Outcome {
     Gone,
     RetryAfter(Duration),
     Failed,
+    /// A 5xx answer or no answer: worth one more try.
+    Transient,
     /// This server could not send: no fault of the subscription.
     LocalFault,
 }
@@ -53,7 +59,29 @@ struct Sent {
     endpoint: String,
     origin: String,
     outcome: Outcome,
+    reminder: Option<Reminder>,
 }
+
+/// A reminder push, to try again while `deadline` allows.
+#[derive(Clone)]
+struct Reminder {
+    target: Target,
+    payload: PushPayloadDto,
+    deadline: Instant,
+    retried: bool,
+}
+
+/// How a push is sent: TTL seconds and Urgency.
+#[derive(Clone, Copy)]
+struct Delivery {
+    ttl: u32,
+    urgency: &'static str,
+}
+
+const MAIL: Delivery = Delivery {
+    ttl: TTL_SECS,
+    urgency: "normal",
+};
 
 impl std::fmt::Debug for Sent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -122,6 +150,8 @@ struct Dispatcher {
     last_sent: HashMap<String, Instant>,
     /// Push service origins that answered 429, until when.
     backoff: HashMap<String, Instant>,
+    /// Reminder pushes waiting for a retry or the end of a backoff.
+    retries: Vec<(Instant, Reminder)>,
     sends: JoinSet<Sent>,
 }
 
@@ -130,6 +160,7 @@ struct Dispatcher {
 pub fn spawn(
     push: Arc<Push>,
     arrivals: broadcast::Receiver<Arc<[Arrival]>>,
+    reminders: broadcast::Receiver<Arc<ReminderPush>>,
     tests: mpsc::Receiver<i64>,
     stop: watch::Receiver<bool>,
 ) -> JoinHandle<()> {
@@ -139,15 +170,17 @@ pub fn spawn(
         pending: HashMap::new(),
         last_sent: HashMap::new(),
         backoff: HashMap::new(),
+        retries: Vec::new(),
         sends: JoinSet::new(),
     };
-    tokio::spawn(dispatcher.run(arrivals, tests, stop))
+    tokio::spawn(dispatcher.run(arrivals, reminders, tests, stop))
 }
 
 impl Dispatcher {
     async fn run(
         mut self,
         mut arrivals: broadcast::Receiver<Arc<[Arrival]>>,
+        mut reminders: broadcast::Receiver<Arc<ReminderPush>>,
         mut tests: mpsc::Receiver<i64>,
         mut stop: watch::Receiver<bool>,
     ) {
@@ -164,6 +197,13 @@ impl Dispatcher {
                     Err(RecvError::Lagged(missed)) => self.lagged(missed).await,
                     Err(RecvError::Closed) => break,
                 },
+                received = reminders.recv() => match received {
+                    Ok(due) => self.send_reminder(&due).await,
+                    Err(RecvError::Lagged(missed)) => {
+                        tracing::warn!(missed, "push dispatcher lagged behind reminders");
+                    }
+                    Err(RecvError::Closed) => break,
+                },
                 Some(id) = tests.recv() => self.send_test(id).await,
                 Some(done) = self.sends.join_next() => match done {
                     Ok(sent) => self.record(sent).await,
@@ -172,6 +212,7 @@ impl Dispatcher {
                 },
                 _ = tokio::time::sleep_until(due.unwrap_or_else(Instant::now)), if due.is_some() => {
                     self.flush().await;
+                    self.retry_due();
                 }
             }
         }
@@ -179,7 +220,12 @@ impl Dispatcher {
 
     /// When the earliest pending push may go out.
     fn next_due(&self) -> Option<Instant> {
-        self.pending.iter().map(|(e, p)| self.due(e, p)).min()
+        let retries = self.retries.iter().map(|(at, _)| *at);
+        self.pending
+            .iter()
+            .map(|(e, p)| self.due(e, p))
+            .chain(retries)
+            .min()
     }
 
     fn due(&self, endpoint: &str, pending: &Pending) -> Instant {
@@ -274,19 +320,94 @@ impl Dispatcher {
             let payload = pending.payload(target.preview);
             let topic = payload.account_id.map(|a| format!("inbox-{a}"));
             self.last_sent.insert(endpoint, now);
-            self.spawn_send(target.clone(), payload, topic);
+            self.spawn_send(target.clone(), payload, topic, MAIL, None);
+        }
+    }
+
+    fn retry_due(&mut self) {
+        let now = Instant::now();
+        let (due, later) = std::mem::take(&mut self.retries)
+            .into_iter()
+            .partition(|(at, _)| *at <= now);
+        self.retries = later;
+        for (_, reminder) in due {
+            self.send_reminder_to(reminder);
+        }
+    }
+
+    /// Sends now, or once the push service's backoff ends if that is
+    /// within the grace; dropped otherwise.
+    fn send_reminder_to(&mut self, reminder: Reminder) {
+        let now = Instant::now();
+        let origin = origin_of(&reminder.target.endpoint);
+        if let Some(until) = self.backoff.get(&origin).copied().filter(|u| *u > now) {
+            if until < reminder.deadline {
+                self.retries.push((until, reminder));
+            } else {
+                tracing::warn!(
+                    subscription = reminder.target.id,
+                    "reminder dropped: push service backoff"
+                );
+            }
+            return;
+        }
+        let Some(left) = reminder.deadline.checked_duration_since(now) else {
+            return;
+        };
+        let delivery = Delivery {
+            ttl: u32::try_from(left.as_secs()).unwrap_or(u32::MAX).max(1),
+            urgency: "high",
+        };
+        self.spawn_send(
+            reminder.target.clone(),
+            reminder.payload.clone(),
+            None,
+            delivery,
+            Some(reminder),
+        );
+    }
+
+    /// Goes out at once, outside the mail cooldown, with a TTL of what is
+    /// left of the grace.
+    async fn send_reminder(&mut self, due: &ReminderPush) {
+        let left = due.fire_at + REMINDER_GRACE_SECS - session::now();
+        let Ok(left) = u64::try_from(left) else {
+            return;
+        };
+        let deadline = Instant::now() + Duration::from_secs(left);
+        let Some((targets, _)) = self.targets().await else {
+            return;
+        };
+        for target in targets
+            .into_iter()
+            .filter(|t| t.reminders && due.sessions.contains(&t.session))
+        {
+            let payload = payload::reminder(due, target.preview);
+            self.send_reminder_to(Reminder {
+                target,
+                payload,
+                deadline,
+                retried: false,
+            });
         }
     }
 
     async fn send_test(&mut self, id: i64) {
         match store::target_by_id(&self.push.db, id, self.push.session_idle).await {
-            Ok(Some(target)) => self.spawn_send(target, payload::test(), None),
+            Ok(Some(target)) => self.spawn_send(target, payload::test(), None, MAIL, None),
             Ok(None) => {}
             Err(e) => tracing::error!(error = %e, "loading push subscription"),
         }
     }
 
-    fn spawn_send(&mut self, target: Target, payload: PushPayloadDto, topic: Option<String>) {
+    fn spawn_send(
+        &mut self,
+        target: Target,
+        payload: PushPayloadDto,
+        topic: Option<String>,
+        delivery: Delivery,
+        reminder: Option<Reminder>,
+    ) {
         let push = self.push.clone();
         let permits = self.permits.clone();
         self.sends.spawn(async move {
@@ -295,23 +416,42 @@ impl Dispatcher {
             let host = host_of(&target.endpoint);
             let outcome = tokio::time::timeout(
                 SEND_TIMEOUT,
-                send(&push, &target, &payload, topic.as_deref()),
+                send(&push, &target, &payload, topic.as_deref(), delivery),
             )
             .await
             .unwrap_or_else(|_| {
                 tracing::warn!(subscription = target.id, %host, "push send timed out");
-                Outcome::Failed
+                Outcome::Transient
             });
             Sent {
                 id: target.id,
                 endpoint: target.endpoint,
                 origin,
                 outcome,
+                reminder,
             }
         });
     }
 
     async fn record(&mut self, sent: Sent) {
+        if let Some(mut reminder) = sent.reminder.clone().filter(|r| !r.retried) {
+            reminder.retried = true;
+            match sent.outcome {
+                Outcome::Transient => {
+                    let at = Instant::now() + REMINDER_RETRY;
+                    if at < reminder.deadline {
+                        self.retries.push((at, reminder));
+                    }
+                }
+                Outcome::RetryAfter(wait) => {
+                    let at = Instant::now() + wait.min(MAX_BACKOFF);
+                    if at < reminder.deadline {
+                        self.retries.push((at, reminder));
+                    }
+                }
+                _ => {}
+            }
+        }
         let db = &self.push.db;
         let result = match sent.outcome {
             Outcome::Delivered => store::record_success(db, sent.id, sent.endpoint).await,
@@ -324,17 +464,19 @@ impl Dispatcher {
                     .insert(sent.origin, Instant::now() + wait.min(MAX_BACKOFF));
                 Ok(())
             }
-            Outcome::Failed => store::record_failure(db, sent.id, sent.endpoint.clone())
-                .await
-                .map(|dropped| {
-                    if dropped {
-                        self.pending.remove(&sent.endpoint);
-                        tracing::warn!(
-                            subscription = sent.id,
-                            "dropping push subscription after repeated failures"
-                        );
-                    }
-                }),
+            Outcome::Failed | Outcome::Transient => {
+                store::record_failure(db, sent.id, sent.endpoint.clone())
+                    .await
+                    .map(|dropped| {
+                        if dropped {
+                            self.pending.remove(&sent.endpoint);
+                            tracing::warn!(
+                                subscription = sent.id,
+                                "dropping push subscription after repeated failures"
+                            );
+                        }
+                    })
+            }
             Outcome::LocalFault => Ok(()),
         };
         if let Err(e) = result {
@@ -358,6 +500,7 @@ async fn send(
     target: &Target,
     payload: &PushPayloadDto,
     topic: Option<&str>,
+    delivery: Delivery,
 ) -> Outcome {
     let id = target.id;
     let host = host_of(&target.endpoint);
@@ -409,8 +552,8 @@ async fn send(
         };
     let mut request = client
         .post(url.clone())
-        .header("ttl", TTL_SECS.to_string())
-        .header("urgency", "normal")
+        .header("ttl", delivery.ttl.to_string())
+        .header("urgency", delivery.urgency)
         .header(header::CONTENT_ENCODING, "aes128gcm")
         .header(header::CONTENT_TYPE, "application/octet-stream")
         .header(
@@ -425,7 +568,7 @@ async fn send(
         Ok(resp) => resp,
         Err(e) => {
             tracing::warn!(subscription = id, %host, timeout = e.is_timeout(), "push send failed");
-            return Outcome::Failed;
+            return Outcome::Transient;
         }
     };
     let status = resp.status();
@@ -459,7 +602,11 @@ async fn send(
         s => {
             tracing::warn!(subscription = id, %host, status = s.as_u16(), "push refused");
             tracing::debug!(subscription = id, %answer, "push service answer");
-            Outcome::Failed
+            if s.is_server_error() {
+                Outcome::Transient
+            } else {
+                Outcome::Failed
+            }
         }
     }
 }
@@ -494,6 +641,7 @@ mod tests {
             endpoint: format!("https://push.example/{SECRET}"),
             origin: "https://push.example".into(),
             outcome: Outcome::Delivered,
+            reminder: None,
         };
         let pending = Pending {
             count: 1,

@@ -9,6 +9,7 @@ mod pairing;
 pub mod proxy;
 pub mod push;
 pub mod ratelimit;
+mod reminders;
 pub mod replica;
 pub mod session;
 pub use tagmail_api_core::sqlite_store;
@@ -128,6 +129,9 @@ impl Server {
         let store = Arc::new(store);
         let feed = Arc::new(ChangeFeed::new(store.cache().head().await?));
         store.set_feed(feed.clone());
+        // Before the engine starts: what it publishes until the dispatcher
+        // runs waits in these receivers instead of being dropped.
+        let (arrivals, reminders) = (feed.subscribe_arrivals(), feed.subscribe_reminders());
         let (registry, engine) = match sync {
             Sync::Registry(registry) => (registry, None),
             Sync::Engine(engine_config) => {
@@ -181,7 +185,8 @@ impl Server {
         );
         let dispatcher = push::dispatch::spawn(
             push.clone(),
-            feed.subscribe_arrivals(),
+            arrivals,
+            reminders,
             push_tests,
             shutdown.clone(),
         );

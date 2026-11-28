@@ -356,3 +356,73 @@ async fn confirm_host_compares_idn_and_ipv6_spellings() {
         f.engine.shutdown().await;
     }
 }
+
+const HOLIDAY: &str = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nBEGIN:VEVENT\r\n\
+     UID:holiday\r\nDTSTAMP:20261101T120000Z\r\nDTSTART;VALUE=DATE:20261215\r\n\
+     SUMMARY:Holiday\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:x\r\n\
+     TRIGGER:-PT15H\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+/// 2026-12-14T09:00Z: 15 hours before midnight UTC.
+const HOLIDAY_UTC: i64 = 1_797_238_800;
+
+impl Fixture {
+    async fn alarm_fires(&self) -> Vec<i64> {
+        self.stores
+            .cache
+            .read(|c| {
+                let mut stmt = c.prepare("SELECT fire_at FROM cal_alarm ORDER BY fire_at")?;
+                Ok(stmt
+                    .query_map([], |r| r.get(0))?
+                    .collect::<tagmail_store::rusqlite::Result<_>>()?)
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn eventually_fires(&self, expected: &[i64]) {
+        for _ in 0..POLL_TRIES {
+            if self.alarm_fires().await == expected {
+                return;
+            }
+            tokio::time::sleep(POLL_STEP).await;
+        }
+        assert_eq!(self.alarm_fires().await, expected);
+    }
+
+    async fn set_zone(&self, zone: &'static str) {
+        self.stores
+            .config
+            .write(move |tx| tagmail_store::alarms::set_owner_zone(tx, zone).map(drop))
+            .await
+            .unwrap();
+        self.engine.owner_zone_changed().await;
+    }
+}
+
+#[tokio::test]
+async fn a_zone_change_recomputes_alarms_even_during_a_poll() {
+    let f = fixture().await;
+    f.connector.dav.calendar(None, None);
+    f.connector.dav.put("holiday.ics", "\"1\"", HOLIDAY);
+    f.connector.discovers(Ok(found()));
+    f.engine.discover(ACCOUNT).await.unwrap();
+    f.eventually_fires(&[HOLIDAY_UTC]).await;
+
+    f.set_zone("Europe/Zurich").await;
+    f.eventually_fires(&[HOLIDAY_UTC - 3600]).await;
+
+    f.connector.dav.took();
+    f.connector.dav.hold();
+    f.engine.wake_calendar();
+    for _ in 0..POLL_TRIES {
+        if f.connector.dav.took().contains(&"list_calendars") {
+            break;
+        }
+        tokio::time::sleep(POLL_STEP).await;
+    }
+    f.connector.dav.put("holiday.ics", "\"2\"", HOLIDAY);
+    f.set_zone("America/New_York").await;
+    f.connector.dav.release();
+    // Midnight EST is 05:00Z; 15 hours earlier.
+    f.eventually_fires(&[HOLIDAY_UTC + 5 * 3600]).await;
+    f.engine.shutdown().await;
+}

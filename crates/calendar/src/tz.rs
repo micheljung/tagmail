@@ -47,6 +47,17 @@ impl Zones {
         let offset = self.custom.get(tzid)?.offset_at(local);
         Some(local - Duration::seconds(i64::from(offset)))
     }
+
+    /// The wall clock in zone `tzid` at `utc`, or `None` if the zone is
+    /// unknown.
+    pub(crate) fn to_local(&self, tzid: &str, utc: NaiveDateTime) -> Option<NaiveDateTime> {
+        if let Some(tz) = self.known.resolve(tzid).filter(|tz| !tz.is_floating()) {
+            return Some(tz.from_utc_datetime(&utc).naive_local());
+        }
+        let zone = self.custom.get(tzid)?;
+        let guess = utc + Duration::seconds(i64::from(zone.offset_at(utc)));
+        Some(utc + Duration::seconds(i64::from(zone.offset_at(guess))))
+    }
 }
 
 struct CustomZone {

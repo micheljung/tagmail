@@ -2,6 +2,7 @@
 //! one sync runner for every account. [`CalDav`] is the seam between them
 //! and the network; [`tagmail_dav::Client`] implements it.
 
+pub mod alarms;
 #[cfg(test)]
 mod engine_tests;
 pub(crate) mod executor;
@@ -210,6 +211,10 @@ pub(crate) struct State {
     wake: Arc<Notify>,
     /// Runs due ops without a poll.
     ops: Arc<Notify>,
+    /// Re-arms the reminder timer.
+    alarms: Arc<Notify>,
+    /// The owner's time zone changed; the runner recomputes alarms.
+    rezone: Arc<std::sync::atomic::AtomicBool>,
     running: Mutex<Option<Running>>,
     removing: sync::Removing,
 }
@@ -463,6 +468,8 @@ impl<F: ConnectorFactory> Engine<F> {
             broken: sync::BrokenReports::new(),
             mail: Arc::new(invite::WeakEngine(Arc::downgrade(&self.inner))),
             inbox: inbox.clone(),
+            rezone: state.rezone.clone(),
+            zone: None,
         };
         let invitations = sync::invitations(
             self.inner.stores.clone(),
@@ -471,9 +478,20 @@ impl<F: ConnectorFactory> Engine<F> {
             state.ops.clone(),
             stopped.clone(),
         );
-        let runs = sync::run(runner, state.wake.clone(), state.ops.clone(), stopped);
+        let reminders = alarms::run(
+            self.inner.stores.clone(),
+            state.alarms.clone(),
+            stopped.clone(),
+        );
+        let runs = sync::run(
+            runner,
+            state.wake.clone(),
+            state.ops.clone(),
+            state.alarms.clone(),
+            stopped,
+        );
         let task = self.inner.runtime.spawn(async move {
-            tokio::join!(runs, invitations);
+            tokio::join!(runs, invitations, reminders);
         });
         *running = Some(Running {
             connector,
@@ -697,6 +715,15 @@ impl<F: ConnectorFactory> CalendarService for Engine<F> {
     fn settings_changed(&self, account: AccountId) {
         tracing::debug!(account = account.0, "CalDAV settings changed");
         self.wake_calendar();
+    }
+
+    fn owner_zone_changed(&self) -> BoxFuture<()> {
+        let state = &self.inner.calendar;
+        state
+            .rezone
+            .store(true, std::sync::atomic::Ordering::Release);
+        state.ops.notify_one();
+        Box::pin(std::future::ready(()))
     }
 
     fn submit(

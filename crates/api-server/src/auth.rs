@@ -27,7 +27,8 @@ use ipnet::IpNet;
 use serde::de::DeserializeOwned;
 use tagmail_api_core::Response;
 use tagmail_api_core::auth_dto::{
-    AuthVia, CurrentAuthDto, DevicesDto, LoginDto, SessionDto, SessionsDto, SetupDto,
+    AuthVia, CurrentAuthDto, DevicePatchDto, DevicesDto, LoginDto, SessionDto, SessionsDto,
+    SetupDto,
 };
 use tagmail_store::ConfigDb;
 use tagmail_store::rusqlite::{OptionalExtension, params};
@@ -748,6 +749,31 @@ pub async fn revoke_session(
 pub async fn devices(State(state): State<AppState>) -> HttpResponse {
     match session::devices(&state.auth.db).await {
         Ok(devices) => to_http(Response::json(200, &DevicesDto { devices })),
+        Err(e) => internal(e),
+    }
+}
+
+/// `PATCH /api/devices/{id}`: a session changes any device, a device only
+/// itself.
+pub async fn patch_device(
+    State(state): State<AppState>,
+    principal: axum::Extension<Principal>,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> HttpResponse {
+    let Ok(id) = id.parse::<i64>() else {
+        return error(404, "not_found", "no such device");
+    };
+    if matches!(&*principal, Principal::Device(own) if *own != id) {
+        return error(403, "forbidden", "a device can change only itself");
+    }
+    let dto: DevicePatchDto = match parse(&body) {
+        Ok(dto) => dto,
+        Err(resp) => return *resp,
+    };
+    match session::set_device_reminders(&state.auth.db, id, dto.reminders).await {
+        Ok(Some(device)) => to_http(Response::json(200, &device)),
+        Ok(None) => error(404, "not_found", "no such device"),
         Err(e) => internal(e),
     }
 }

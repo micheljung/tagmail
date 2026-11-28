@@ -10,6 +10,7 @@
 	import { registerServiceWorker, shareRegistration, shouldRegister } from '#lib/pwa/register.ts';
 	import { pushEnv, pushSyncer, syncPush, unsubscribeQuietly } from '#lib/push/client.ts';
 	import { pushPrefs } from '#lib/push/prefs.ts';
+	import { claimTimeZone } from '#lib/push/zone.ts';
 	import { theme, toasts } from '#lib/stores/index.ts';
 	import { TauriTransport, api } from '#lib/transport/index.ts';
 	import PairConfirm from '#lib/ui/PairConfirm.svelte';
@@ -51,6 +52,13 @@
 		api.beforeLogout = () =>
 			unsubscribeQuietly(async () => (await registration)?.pushManager ?? null);
 	}
+
+	let zoneClaimed = false;
+	$effect(() => {
+		if (zoneClaimed || !page.data.session) return;
+		zoneClaimed = true;
+		void claimTimeZone(api);
+	});
 
 	$effect(() => {
 		const auth = page.data.session as CurrentAuthDto | null | undefined;

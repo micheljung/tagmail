@@ -50,6 +50,14 @@ pub trait Backend: Send + Sync + 'static {
         &self,
         patch: DesktopSettingsPatchDto,
     ) -> Result<DesktopSettingsDto, api::Response>;
+
+    /// Passes a request on to the paired server, e.g. reminder settings.
+    fn forward(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: &[u8],
+    ) -> impl Future<Output = api::Response> + Send;
 }
 
 /// A fixed, always "paired" local store with in-memory settings.
@@ -132,5 +140,9 @@ impl Backend for LocalBackend {
         let mut current = self.settings.lock().unwrap_or_else(|e| e.into_inner());
         *current = settings::apply(&current, patch)?;
         Ok(current.clone())
+    }
+
+    async fn forward(&self, _method: reqwest::Method, _path: &str, _body: &[u8]) -> api::Response {
+        api::Response::error(404, "not_found", "no server is paired")
     }
 }

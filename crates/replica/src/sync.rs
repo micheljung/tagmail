@@ -67,7 +67,8 @@ pub enum Phase {
 pub enum ReplicaEvent {
     /// Unread INBOX mail first seen by a pull.
     NewMail(Vec<Arrival>),
-    /// Server `op`/`outbox` changes for the durable intents and outbox.
+    /// Server `op`/`outbox`/`cal_op`/`reminder` changes for the durable
+    /// intents, the outbox and notifications.
     Writes(Vec<ChangeDto>),
     /// A bootstrap replaced the replica.
     Replaced,
@@ -297,7 +298,7 @@ impl Replica {
         let cursor = self
             .server_cursor()
             .ok_or(Error::Client(ClientError::Gone))?;
-        let mut bells = events::connect(&self.client, cursor).await?;
+        let mut bells = events::connect(&self.client, cursor, self.calendar()).await?;
         self.set_phase(Phase::Live);
         while let Some(bell) = bells.next().await? {
             match bell {

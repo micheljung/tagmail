@@ -5,8 +5,10 @@
 use std::sync::Arc;
 
 use tagmail_api_core::desktop_dto::DesktopSettingsDto;
+use tagmail_api_core::dto::ChangeDto;
 use tagmail_desktop::desktop::Desktop;
 use tagmail_desktop::mailto::{LinkQueue, parse_link};
+use tagmail_desktop::notify::ReminderAction;
 use tagmail_desktop::{notify, tray};
 use tagmail_replica::ReplicaEvent;
 use tauri::image::Image;
@@ -169,6 +171,10 @@ async fn notify_new_mail(app: AppHandle, desktop: Arc<Desktop>) {
     loop {
         let arrivals = match events.recv().await {
             Ok(ReplicaEvent::NewMail(arrivals)) => arrivals,
+            Ok(ReplicaEvent::Writes(writes)) => {
+                remind(&app, &desktop, &writes).await;
+                continue;
+            }
             Ok(_) => continue,
             Err(RecvError::Lagged(_)) => continue,
             Err(RecvError::Closed) => return,
@@ -187,6 +193,24 @@ async fn notify_new_mail(app: AppHandle, desktop: Arc<Desktop>) {
             {
                 tracing::warn!(error = %e, "showing a notification failed");
             }
+        }
+    }
+}
+
+async fn remind(app: &AppHandle, desktop: &Desktop, writes: &[ChangeDto]) {
+    for action in desktop.reminders(writes).await {
+        let shown = match action {
+            ReminderAction::Show { id, notification } => app
+                .notification()
+                .builder()
+                .id(id)
+                .title(&notification.title)
+                .body(&notification.body)
+                .show(),
+            ReminderAction::Close { id } => app.notification().remove_active(vec![id]),
+        };
+        if let Err(e) = shown {
+            tracing::warn!(error = %e, "updating a reminder notification failed");
         }
     }
 }

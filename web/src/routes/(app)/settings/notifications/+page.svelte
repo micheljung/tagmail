@@ -22,6 +22,7 @@
 		type Step
 	} from '#lib/push/diagnose.ts';
 	import { pushPrefs } from '#lib/push/prefs.ts';
+	import { timeZones } from '#lib/push/zone.ts';
 	import { appRegistration } from '#lib/pwa/register.ts';
 	import { accounts } from '#lib/stores/index.ts';
 	import { api, isDesktop } from '#lib/transport/index.ts';
@@ -43,6 +44,9 @@
 		checks: Check[];
 	}
 	let trouble = $state<Trouble | null>(null);
+	let timeZone = $state<string | null>(null);
+	let zoneError = $state<string | null>(null);
+	const zones = $derived(timeZones(timeZone));
 
 	const accountIds = $derived(accounts.accounts.map((a) => a.id));
 
@@ -73,7 +77,24 @@
 		if (mine) mine = all.find((s) => s.id === mine?.id) ?? null;
 	}
 
+	async function loadZone() {
+		timeZone = (await api.reminderSettings()).timeZone;
+	}
+
+	async function setZone(zone: string) {
+		busy = 'zone';
+		zoneError = null;
+		try {
+			timeZone = (await api.updateReminderSettings({ timeZone: zone })).timeZone;
+		} catch (e) {
+			zoneError = errorText(e);
+		} finally {
+			busy = null;
+		}
+	}
+
 	async function start() {
+		void loadZone().catch(() => undefined);
 		if (isDesktop()) {
 			availability = 'unsupported';
 			return;
@@ -139,6 +160,14 @@
 		});
 	}
 
+	function setReminders(reminders: boolean) {
+		const row = mine;
+		if (!row) return;
+		void act('reminders', async () => {
+			mine = await updatePush(api, pushPrefs, row.id, { reminders });
+		});
+	}
+
 	function notifies(row: PushSubscriptionDto, id: number): boolean {
 		return row.accountIds === null || row.accountIds.includes(id);
 	}
@@ -174,8 +203,8 @@
 <div class="settings">
 	<h1 tabindex="-1">Notifications</h1>
 	<p class="lead">
-		Get notified about new mail in your inbox. Notifications stop when this browser's session ends;
-		opening Tagmail keeps it going.
+		Get notified about new mail in your inbox and upcoming events. Notifications stop when this
+		browser's session ends; opening Tagmail keeps it going.
 	</p>
 
 	{#if error}<p class="error" role="alert">{error}</p>{/if}
@@ -244,6 +273,15 @@
 					/>
 					<span>Show sender and subject</span>
 				</label>
+				<label class="check">
+					<input
+						type="checkbox"
+						checked={mine.reminders}
+						disabled={busy === 'reminders'}
+						onchange={(e) => setReminders(e.currentTarget.checked)}
+					/>
+					<span>Calendar reminders</span>
+				</label>
 				{#if accounts.multi}
 					<fieldset>
 						<legend>Accounts</legend>
@@ -278,6 +316,35 @@
 					</button>
 				</div>
 			</div>
+		{/if}
+	</section>
+
+	<section aria-labelledby="zone-title">
+		<h2 id="zone-title">Reminders</h2>
+		<label class="field">
+			<span>Time zone for all-day and floating events</span>
+			<select
+				data-time-zone
+				value={timeZone ?? ''}
+				disabled={busy === 'zone'}
+				aria-describedby="zone-hint"
+				onchange={(e) => void setZone(e.currentTarget.value)}
+			>
+				{#if timeZone === null}<option value="" disabled>Not set</option>{/if}
+				{#each zones as zone (zone)}
+					<option value={zone}>{zone}</option>
+				{/each}
+			</select>
+		</label>
+		{#if zoneError}
+			<p class="error" role="alert" data-zone-error>{zoneError}</p>
+		{:else if timeZone === null}
+			<p class="muted" id="zone-hint" data-zone-unset>
+				Not set yet, so all-day and floating events remind in UTC. Choose your time zone.
+			</p>
+		{/if}
+		{#if isDesktop()}
+			<p class="muted">Turn reminders on or off for this computer under Settings → Desktop.</p>
 		{/if}
 	</section>
 
@@ -351,6 +418,17 @@
 		display: flex;
 		align-items: center;
 		gap: 10px;
+	}
+
+	label.field {
+		display: grid;
+		gap: 6px;
+		max-width: 360px;
+	}
+
+	label.field span {
+		color: var(--muted);
+		font-size: 13px;
 	}
 
 	fieldset {

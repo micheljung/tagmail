@@ -27,6 +27,9 @@ pub enum Route {
     /// Browser credential management and the SSE stream; they belong to
     /// the server and are managed on the web.
     ServerOnly,
+    /// Reminder settings and dismissals, passed on to the server.
+    Server,
+    NotFound,
     Api,
 }
 
@@ -43,7 +46,20 @@ pub fn classify(path: &str) -> Route {
         "desktop" => Route::Desktop,
         "auth" if rest == "auth/session" => Route::Session,
         "auth" | "passkeys" | "sessions" | "devices" | "pairing" | "events" => Route::ServerOnly,
+        "reminders" if forwarded(rest) => Route::Server,
+        "reminders" => Route::NotFound,
         _ => Route::Api,
+    }
+}
+
+/// `reminders/settings` and `reminders/{alarm key}/dismiss`.
+fn forwarded(rest: &str) -> bool {
+    match rest.split('/').collect::<Vec<_>>()[..] {
+        ["reminders", "settings"] => true,
+        ["reminders", key, "dismiss"] => {
+            key.len() == 32 && key.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        }
+        _ => false,
     }
 }
 
@@ -103,6 +119,17 @@ impl<B: Backend> Shell<B> {
             },
             Route::Session => self.session(),
             Route::ServerOnly => api::Response::error(404, "not_found", "manage this on the web"),
+            Route::NotFound => api::Response::error(404, "not_found", "no such route"),
+            Route::Server => {
+                let target = if query.is_empty() {
+                    path.to_owned()
+                } else {
+                    format!("{path}?{query}")
+                };
+                self.backend
+                    .forward(req.method().clone(), &target, req.body())
+                    .await
+            }
             Route::Api => {
                 let content_type = req
                     .headers()
@@ -362,6 +389,18 @@ mod tests {
             ("/api/devices", Route::ServerOnly),
             ("/api/pairing", Route::ServerOnly),
             ("/api/events", Route::ServerOnly),
+            ("/api/reminders/settings", Route::Server),
+            (
+                "/api/reminders/0123456789abcdef0123456789abcdef/dismiss",
+                Route::Server,
+            ),
+            ("/api/reminders/abc/dismiss", Route::NotFound),
+            (
+                "/api/reminders/0123456789ABCDEF0123456789ABCDEF/dismiss",
+                Route::NotFound,
+            ),
+            ("/api/reminders/settings/x", Route::NotFound),
+            ("/api/reminders", Route::NotFound),
         ] {
             assert_eq!(classify(path), route, "{path}");
         }

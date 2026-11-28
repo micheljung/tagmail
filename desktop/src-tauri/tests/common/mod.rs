@@ -166,6 +166,19 @@ impl Owner {
         body["devices"].as_array().unwrap().clone()
     }
 
+    /// Dismisses a reminder as the web does.
+    pub async fn dismiss(&self, alarm_key: &str) -> u16 {
+        reqwest::Client::new()
+            .post(format!("{}/api/reminders/{alarm_key}/dismiss", self.url()))
+            .header("cookie", &self.cookie)
+            .header("x-requested-with", "tagmail")
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16()
+    }
+
     /// Delivers an unseen INBOX message in a new thread `id`, as a sync
     /// would, and wakes the event streams.
     pub async fn arrive(&self, id: i64, subject: &str, from: &str) {

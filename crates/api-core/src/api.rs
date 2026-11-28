@@ -222,6 +222,11 @@ impl<S: Store> Api<S> {
         self
     }
 
+    /// The calendar side, when one is wired.
+    pub fn calendar(&self) -> Option<&Arc<dyn crate::caldav::CalendarService>> {
+        self.calendar.as_ref()
+    }
+
     pub fn store(&self) -> &Arc<S> {
         &self.store
     }

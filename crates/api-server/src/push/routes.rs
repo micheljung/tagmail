@@ -113,6 +113,7 @@ fn validate(
         account_ids,
         user_agent,
         old_endpoint: dto.old_endpoint,
+        reminders: dto.reminders,
     })
 }
 
@@ -219,7 +220,16 @@ pub async fn patch(
         },
         other => other,
     };
-    match store::patch(&state.push.db, id, session, dto.preview, account_ids).await {
+    match store::patch(
+        &state.push.db,
+        id,
+        session,
+        dto.preview,
+        account_ids,
+        dto.reminders,
+    )
+    .await
+    {
         Ok(Patched::Done(dto)) => json(200, &dto),
         Ok(Patched::NotFound) => not_found(),
         Ok(Patched::UnknownAccounts(unknown)) => {

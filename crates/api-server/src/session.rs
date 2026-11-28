@@ -255,21 +255,50 @@ pub async fn device_active(db: &ConfigDb, id: i64) -> tagmail_store::Result<bool
 
 pub async fn devices(db: &ConfigDb) -> tagmail_store::Result<Vec<DeviceDto>> {
     db.read(|conn| {
-        let mut stmt = conn.prepare(
-            "SELECT id, name, created_at, last_seen_at FROM device
-             WHERE revoked_at IS NULL ORDER BY created_at DESC, id DESC",
-        )?;
+        let mut stmt = conn.prepare(&format!(
+            "{DEVICE_SELECT} WHERE revoked_at IS NULL ORDER BY created_at DESC, id DESC"
+        ))?;
         let rows = stmt
-            .query_map([], |r| {
-                Ok(DeviceDto {
-                    id: r.get(0)?,
-                    name: r.get(1)?,
-                    created_at: r.get(2)?,
-                    last_seen_at: r.get(3)?,
-                })
-            })?
+            .query_map([], device_dto)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    })
+    .await
+}
+
+const DEVICE_SELECT: &str = "SELECT id, name, created_at, last_seen_at, reminders FROM device";
+
+fn device_dto(r: &rusqlite::Row<'_>) -> rusqlite::Result<DeviceDto> {
+    Ok(DeviceDto {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        created_at: r.get(2)?,
+        last_seen_at: r.get(3)?,
+        reminders: r.get(4)?,
+    })
+}
+
+/// Turns calendar reminders on or off for a device; `None` if it does not
+/// exist or is revoked.
+pub async fn set_device_reminders(
+    db: &ConfigDb,
+    id: i64,
+    reminders: Option<bool>,
+) -> tagmail_store::Result<Option<DeviceDto>> {
+    db.write(move |tx| {
+        if let Some(on) = reminders {
+            tx.execute(
+                "UPDATE device SET reminders = ?2 WHERE id = ?1 AND revoked_at IS NULL",
+                params![id, on],
+            )?;
+        }
+        Ok(tx
+            .query_row(
+                &format!("{DEVICE_SELECT} WHERE id = ?1 AND revoked_at IS NULL"),
+                [id],
+                device_dto,
+            )
+            .optional()?)
     })
     .await
 }

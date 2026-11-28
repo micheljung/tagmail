@@ -85,7 +85,8 @@ export interface NotificationSpec {
 		renotify: boolean;
 		icon: string;
 		badge: string;
-		data: { url: string };
+		/** `reminder`: the alarm key, to dismiss it with. */
+		data: { url: string; reminder?: string };
 	};
 }
 
@@ -98,7 +99,26 @@ const positiveInt = (value: unknown) =>
  * "New mail": Safari revokes the permission after silent pushes. Text
  * only, nothing is rendered as HTML.
  */
-export function notificationFor(data: string | null | undefined, origin: string): NotificationSpec {
+/** When a reminded event starts: its time today, else its day too. */
+const localDay = (start: number) => {
+	const at = new Date(start * 1000);
+	const two = (n: number) => String(n).padStart(2, '0');
+	return `${at.getFullYear()}-${two(at.getMonth() + 1)}-${two(at.getDate())}`;
+};
+
+export function reminderBody(start: number, now = Date.now()): string {
+	const at = new Date(start * 1000);
+	const time = { hour: '2-digit', minute: '2-digit' } as const;
+	if (at.toDateString() === new Date(now).toDateString())
+		return `Starts ${at.toLocaleTimeString([], time)}`;
+	return `Starts ${at.toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', ...time })}`;
+}
+
+export function notificationFor(
+	data: string | null | undefined,
+	origin: string,
+	now = Date.now()
+): NotificationSpec {
 	let payload: Record<string, unknown> = {};
 	try {
 		const parsed: unknown = JSON.parse(data ?? '');
@@ -112,7 +132,10 @@ export function notificationFor(data: string | null | undefined, origin: string)
 	const accountId = positiveInt(payload.accountId);
 	const from = text(payload.from);
 	const subject = text(payload.subject);
-	const url = kind === 'newMail' || kind === 'test' ? payload.url : undefined;
+	const reminder = (kind === 'reminder' ? payload.reminder : undefined) as
+		Record<string, unknown> | undefined;
+	const alarmKey = text(reminder?.tag);
+	const url = kind === 'newMail' || kind === 'test' ? payload.url : reminder?.url;
 	const spec = (title: string, body: string, tag: string, renotify: boolean): NotificationSpec => ({
 		title,
 		options: {
@@ -125,6 +148,18 @@ export function notificationFor(data: string | null | undefined, origin: string)
 		}
 	});
 	if (kind === 'test') return spec('Test notification', '', DEFAULT_TAG, false);
+	if (alarmKey) {
+		const start = Number.isSafeInteger(reminder?.start) ? (reminder?.start as number) : 0;
+		const shown = spec(
+			text(reminder?.title) ?? 'Reminder',
+			reminderBody(start, now),
+			alarmKey,
+			true
+		);
+		shown.options.data.reminder = alarmKey;
+		if (start > 0) shown.options.data.url = `/calendar?view=day&date=${localDay(start)}`;
+		return shown;
+	}
 	if (kind !== 'newMail') return spec('New mail', '', DEFAULT_TAG, false);
 	const tag = accountId === undefined ? DEFAULT_TAG : `inbox-${accountId}`;
 	const title = count > 1 ? `${count} new messages` : (from ?? 'New mail');

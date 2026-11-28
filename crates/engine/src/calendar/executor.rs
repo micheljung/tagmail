@@ -674,9 +674,10 @@ impl Exec<'_> {
         if let Some(calendar_id) = calendar {
             let me = self.target.addresses.clone();
             let window = Window::around(OffsetDateTime::now_utc().date());
+            let zone = super::sync::owner_zone(self.stores).await;
             let parsed = resource
                 .as_ref()
-                .and_then(|r| parse(&key, r.etag.clone(), &r.data, &me, &window));
+                .and_then(|r| parse(&key, r.etag.clone(), &r.data, &me, &window, &zone));
             let account = self.target.id;
             let gone = key.clone();
             let epoch = self.stores.cache.epoch();
@@ -690,13 +691,14 @@ impl Exec<'_> {
                     if live {
                         match &parsed {
                             Some(p) => {
-                                calendar::put_event(
+                                let id = calendar::put_event(
                                     tx,
                                     calendar_id,
                                     &p.event,
                                     &p.ics,
                                     &p.instances,
                                 )?;
+                                tagmail_store::alarms::replace_alarms(tx, id, &p.alarms)?;
                             }
                             None => {
                                 calendar::delete_events(tx, calendar_id, &[gone])?;

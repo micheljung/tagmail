@@ -37,6 +37,8 @@ mod sync_tests;
 mod testutil;
 mod threading;
 
+#[cfg(feature = "calendar")]
+pub use calendar::alarms;
 pub use error::{Error, Result};
 pub use jobs::{JobFuture, MAX_QUEUED, Priority};
 pub use smtp::{LettreSender, SMTP_TIMEOUT, SmtpError, SmtpSender, SmtpServer};

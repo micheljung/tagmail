@@ -4,4 +4,4 @@
  * `PATCH /api/push/subscriptions/{id}` body: the fields to change.
  * `accountIds: null` means all accounts.
  */
-export type PushSubscriptionPatchDto = { preview?: boolean, accountIds?: Array<number> | null, };
+export type PushSubscriptionPatchDto = { preview?: boolean, accountIds?: Array<number> | null, reminders?: boolean, };

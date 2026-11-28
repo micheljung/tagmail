@@ -25,6 +25,9 @@ pub struct Target {
     pub auth: [u8; 16],
     pub preview: bool,
     pub account_ids: Option<Vec<i64>>,
+    pub reminders: bool,
+    /// The session hash in lowercase hex, the subscription's reminder target.
+    pub session: String,
 }
 
 impl std::fmt::Debug for Target {
@@ -54,6 +57,7 @@ pub struct NewSubscription {
     pub account_ids: Option<Vec<i64>>,
     pub user_agent: Option<String>,
     pub old_endpoint: Option<String>,
+    pub reminders: Option<bool>,
 }
 
 impl std::fmt::Debug for NewSubscription {
@@ -105,7 +109,7 @@ fn parse_account_ids(json: Option<String>) -> rusqlite::Result<Option<Vec<i64>>>
 }
 
 const DTO_COLUMNS: &str = "id, endpoint, preview, account_ids, user_agent, created_at, \
-                           last_success_at, session_hash";
+                           last_success_at, session_hash, reminders";
 
 fn host_of(endpoint: &str) -> String {
     url::Url::parse(endpoint)
@@ -126,6 +130,7 @@ fn dto(r: &Row<'_>, current: Option<&TokenHash>) -> rusqlite::Result<PushSubscri
         created_at: r.get(5)?,
         last_success_at: r.get(6)?,
         current: current.is_some_and(|c| c.as_slice() == session.as_slice()),
+        reminders: r.get(8)?,
     })
 }
 
@@ -186,7 +191,8 @@ pub async fn upsert(
                     "UPDATE push_subscription SET session_hash = ?2, p256dh = ?3, auth = ?4, \
                      preview = coalesce(?5, preview), \
                      account_ids = CASE WHEN ?6 THEN ?7 ELSE account_ids END, \
-                     user_agent = ?8, failures = 0, updated_at = ?9 WHERE id = ?1",
+                     user_agent = ?8, failures = 0, updated_at = ?9, \
+                     reminders = coalesce(?10, reminders) WHERE id = ?1",
                     params![
                         id,
                         session.as_slice(),
@@ -196,7 +202,8 @@ pub async fn upsert(
                         sub.account_ids.is_some(),
                         ids,
                         sub.user_agent,
-                        now
+                        now,
+                        sub.reminders
                     ],
                 )?;
                 id
@@ -210,19 +217,21 @@ pub async fn upsert(
                 if others >= MAX_SUBSCRIPTIONS {
                     return Ok(Upserted::TooMany);
                 }
-                let renewed: Option<(bool, Option<String>)> = match &sub.old_endpoint {
+                let renewed: Option<(bool, Option<String>, bool)> = match &sub.old_endpoint {
                     Some(old) => tx
                         .query_row(
                             "DELETE FROM push_subscription WHERE endpoint = ?1 \
-                             RETURNING preview, account_ids",
+                             RETURNING preview, account_ids, reminders",
                             [old],
-                            |r| Ok((r.get(0)?, r.get(1)?)),
+                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                         )
                         .optional()?,
                     None => None,
                 };
-                let (old_preview, old_ids) = renewed.unzip();
+                let old_reminders = renewed.as_ref().map(|r| r.2);
+                let (old_preview, old_ids) = renewed.map(|(p, i, _)| (p, i)).unzip();
                 let preview = sub.preview.or(old_preview).unwrap_or(true);
+                let reminders = sub.reminders.or(old_reminders).unwrap_or(false);
                 let ids = if sub.account_ids.is_some() {
                     ids
                 } else {
@@ -230,8 +239,8 @@ pub async fn upsert(
                 };
                 tx.execute(
                     "INSERT INTO push_subscription (session_hash, endpoint, p256dh, auth, \
-                     preview, account_ids, user_agent, created_at, updated_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+                     preview, account_ids, user_agent, created_at, updated_at, reminders) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9)",
                     params![
                         session.as_slice(),
                         sub.endpoint,
@@ -240,7 +249,8 @@ pub async fn upsert(
                         preview,
                         ids,
                         sub.user_agent,
-                        now
+                        now,
+                        reminders
                     ],
                 )?;
                 tx.last_insert_rowid()
@@ -263,6 +273,7 @@ pub async fn patch(
     current: TokenHash,
     preview: Option<bool>,
     account_ids: Option<Option<Vec<i64>>>,
+    reminders: Option<bool>,
 ) -> Result<Patched, StoreError> {
     db.write(move |tx| {
         if let Some(Some(ids)) = &account_ids {
@@ -281,9 +292,16 @@ pub async fn patch(
             .and_then(|ids| account_ids_json(ids.as_deref()));
         let changed = tx.execute(
             "UPDATE push_subscription SET preview = coalesce(?2, preview), \
-             account_ids = CASE WHEN ?3 THEN ?4 ELSE account_ids END, updated_at = ?5 \
-             WHERE id = ?1",
-            params![id, preview, account_ids.is_some(), ids, session::now()],
+             account_ids = CASE WHEN ?3 THEN ?4 ELSE account_ids END, updated_at = ?5, \
+             reminders = coalesce(?6, reminders) WHERE id = ?1",
+            params![
+                id,
+                preview,
+                account_ids.is_some(),
+                ids,
+                session::now(),
+                reminders
+            ],
         )?;
         if changed == 0 {
             return Ok(Patched::NotFound);
@@ -309,6 +327,8 @@ fn target(r: &Row<'_>) -> rusqlite::Result<Target> {
         })?,
         preview: r.get(4)?,
         account_ids: parse_account_ids(r.get(5)?)?,
+        reminders: r.get(6)?,
+        session: r.get(7)?,
     })
 }
 
@@ -322,7 +342,10 @@ fn idle_secs(idle: Duration) -> i64 {
 }
 
 fn target_sql() -> String {
-    format!("SELECT p.id, p.endpoint, p.p256dh, p.auth, p.preview, p.account_ids {LIVE_FROM}")
+    format!(
+        "SELECT p.id, p.endpoint, p.p256dh, p.auth, p.preview, p.account_ids, p.reminders, \
+         lower(hex(p.session_hash)) {LIVE_FROM}"
+    )
 }
 
 /// Subscriptions of live sessions, and the owner's own addresses.
@@ -473,6 +496,7 @@ mod tests {
             account_ids: None,
             user_agent: None,
             old_endpoint: Some(OLD.into()),
+            reminders: None,
         };
         let debug = format!("{sub:?}");
         for secret in ["push.example", "171", "205"] {
@@ -499,9 +523,9 @@ mod tests {
         .unwrap();
         let session: TokenHash = [1; 32];
 
-        let removed = patch(&db, id, session, None, Some(Some(vec![1, 2]))).await;
+        let removed = patch(&db, id, session, None, Some(Some(vec![1, 2])), None).await;
         assert!(matches!(removed, Ok(Patched::UnknownAccounts(ids)) if ids == [1]));
-        let kept = patch(&db, id, session, None, Some(Some(vec![2]))).await;
+        let kept = patch(&db, id, session, None, Some(Some(vec![2])), None).await;
         assert!(matches!(kept, Ok(Patched::Done(dto)) if dto.account_ids == Some(vec![2])));
     }
 

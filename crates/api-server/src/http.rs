@@ -86,6 +86,7 @@ server_routes! {
     get "/api/sessions" => auth::sessions,
     delete "/api/sessions/{id}" => auth::revoke_session,
     get "/api/devices" => auth::devices,
+    patch "/api/devices/{id}" => auth::patch_device,
     delete "/api/devices/{id}" => auth::revoke_device,
     post "/api/pairing" => pairing::create,
     post "/api/pairing/exchange" => pairing::exchange,
@@ -100,6 +101,9 @@ server_routes! {
     patch "/api/push/subscriptions/{id}" => push::routes::patch,
     delete "/api/push/subscriptions/{id}" => push::routes::delete,
     post "/api/push/subscriptions/{id}/test" => push::routes::test,
+    post "/api/reminders/{key}/dismiss" => crate::reminders::dismiss,
+    get "/api/reminders/settings" => crate::reminders::settings,
+    patch "/api/reminders/settings" => crate::reminders::update_settings,
 }
 
 /// Every `/api` route as (method, path template): the server's own and

@@ -15,4 +15,8 @@ rawCapMb: number, notify: boolean,
 /**
  * Show sender and subject in notifications.
  */
-notifyContent: boolean, autostart: boolean, closeToTray: boolean, };
+notifyContent: boolean, 
+/**
+ * Calendar reminders on this device; the server sends none when off.
+ */
+reminders: boolean, autostart: boolean, closeToTray: boolean, };

@@ -3,4 +3,4 @@
 /**
  * `PATCH /api/desktop/settings`: the fields to change.
  */
-export type DesktopSettingsPatchDto = { windowDays?: number, rawCapMb?: number, notify?: boolean, notifyContent?: boolean, autostart?: boolean, closeToTray?: boolean, };
+export type DesktopSettingsPatchDto = { windowDays?: number, rawCapMb?: number, notify?: boolean, notifyContent?: boolean, reminders?: boolean, autostart?: boolean, closeToTray?: boolean, };

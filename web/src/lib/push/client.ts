@@ -7,7 +7,7 @@ import type {
 	PushSubscriptionPatchDto
 } from '@tagmail/api-types';
 import { CSRF_HEADER, CSRF_VALUE } from '../transport/http';
-import type { PushPrefStore, PushPrefs } from './prefs';
+import { defaultReminders, type PushPrefStore, type PushPrefs } from './prefs';
 
 export type PushAvailability = 'unsupported' | 'ios-tab' | 'blocked' | 'ready';
 
@@ -63,7 +63,7 @@ function sameKey(subscription: PushSubscription, publicKey: string): boolean {
 	return key !== null && base64url(key) === publicKey;
 }
 
-type Settings = Pick<PushSubscribeDto, 'preview' | 'accountIds'>;
+type Settings = Pick<PushSubscribeDto, 'preview' | 'accountIds' | 'reminders'>;
 type RegisterApi = Pick<PushApi, 'accounts' | 'subscribePush'>;
 
 const REJECTED_STATUSES = [400, 422];
@@ -82,15 +82,17 @@ function rejectsAccounts(error: unknown): boolean {
  */
 async function settingsOf(api: RegisterApi, prefs: PushPrefs | undefined): Promise<Settings> {
 	if (!prefs) return {};
-	if (prefs.accountIds === null) return { preview: prefs.preview };
+	const base = {
+		preview: prefs.preview,
+		...(prefs.reminders === undefined ? {} : { reminders: prefs.reminders })
+	};
+	if (prefs.accountIds === null) return base;
 	const known = await api.accounts().then(
 		(accounts) => new Set(accounts.map((a) => a.id)),
 		() => null
 	);
 	const accountIds = known ? prefs.accountIds.filter((id) => known.has(id)) : prefs.accountIds;
-	return accountIds.length > 0
-		? { preview: prefs.preview, accountIds }
-		: { preview: prefs.preview };
+	return accountIds.length > 0 ? { ...base, accountIds } : base;
 }
 
 /** A change that hangs longer than this gives way to the ones behind it. */
@@ -128,11 +130,13 @@ async function register(
 	prefs: PushPrefStore,
 	subscription: PushSubscription,
 	saved: PushPrefs | undefined,
-	previousEndpoint = saved?.endpoint
+	previousEndpoint = saved?.endpoint,
+	reminders?: boolean
 ): Promise<PushSubscriptionDto> {
 	const json = subscription.toJSON();
 	const { endpoint } = subscription;
 	const { accountIds, ...settings } = await settingsOf(api, saved);
+	if (settings.reminders === undefined && reminders !== undefined) settings.reminders = reminders;
 	const dto: PushSubscribeDto = {
 		endpoint,
 		keys: { p256dh: json.keys?.p256dh ?? '', auth: json.keys?.auth ?? '' },
@@ -145,31 +149,47 @@ async function register(
 				return api.subscribePush(dto);
 			})
 		: api.subscribePush(dto));
-	await prefs.set({ endpoint, preview: row.preview, accountIds: row.accountIds });
+	await prefs.set({
+		endpoint,
+		preview: row.preview,
+		accountIds: row.accountIds,
+		...(settings.reminders === undefined ? {} : { reminders: row.reminders })
+	});
 	return row;
 }
 
 /**
  * App start: registers this browser's subscription again, so a new session
  * keeps receiving pushes, and renews it when the server key changed.
+ * Settings saved before reminders existed get `reminders` once: the server
+ * keeps them off for such a subscription.
  */
 export async function syncPush(
 	manager: PushManager,
 	api: PushApi,
-	prefs: PushPrefStore
+	prefs: PushPrefStore,
+	reminders = defaultReminders()
 ): Promise<PushSubscriptionDto | null> {
 	return serialized(async () => {
 		const existing = await manager.getSubscription();
 		if (!existing) return null;
 		const saved = await prefs.get();
 		const { publicKey } = await api.pushKey();
-		if (sameKey(existing, publicKey)) return register(api, prefs, existing, saved);
-		await existing.unsubscribe();
-		const renewed = await manager.subscribe({
-			userVisibleOnly: true,
-			applicationServerKey: publicKey
-		});
-		return register(api, prefs, renewed, saved, existing.endpoint);
+		let row: PushSubscriptionDto;
+		if (sameKey(existing, publicKey)) row = await register(api, prefs, existing, saved);
+		else {
+			await existing.unsubscribe();
+			const renewed = await manager.subscribe({
+				userVisibleOnly: true,
+				applicationServerKey: publicKey
+			});
+			row = await register(api, prefs, renewed, saved, existing.endpoint);
+		}
+		if (!saved || saved.reminders !== undefined) return row;
+		row = await api.updatePushSubscription(row.id, { reminders });
+		const stored = await prefs.get();
+		if (stored) await prefs.set({ ...stored, reminders: row.reminders });
+		return row;
 	});
 }
 
@@ -208,20 +228,22 @@ export async function enablePush(
 	manager: PushManager,
 	api: PushApi,
 	prefs: PushPrefStore,
-	requestPermission: () => Promise<NotificationPermission>
+	requestPermission: () => Promise<NotificationPermission>,
+	reminders = defaultReminders()
 ): Promise<PushSubscriptionDto | null> {
 	if ((await requestPermission()) !== 'granted') return null;
 	return serialized(async () => {
 		const saved = await prefs.get();
 		const { publicKey } = await api.pushKey();
 		const existing = await manager.getSubscription();
-		if (existing && sameKey(existing, publicKey)) return register(api, prefs, existing, saved);
+		if (existing && sameKey(existing, publicKey))
+			return register(api, prefs, existing, saved, saved?.endpoint, reminders);
 		await existing?.unsubscribe();
 		const created = await manager.subscribe({
 			userVisibleOnly: true,
 			applicationServerKey: publicKey
 		});
-		return register(api, prefs, created, saved, existing?.endpoint ?? saved?.endpoint);
+		return register(api, prefs, created, saved, existing?.endpoint ?? saved?.endpoint, reminders);
 	});
 }
 
@@ -235,7 +257,13 @@ export async function updatePush(
 	return serialized(async () => {
 		const row = await api.updatePushSubscription(id, patch);
 		const saved = await prefs.get();
-		if (saved) await prefs.set({ ...saved, preview: row.preview, accountIds: row.accountIds });
+		if (saved)
+			await prefs.set({
+				...saved,
+				preview: row.preview,
+				accountIds: row.accountIds,
+				reminders: row.reminders
+			});
 		return row;
 	});
 }
@@ -285,6 +313,29 @@ export function fetchPushApi(
 				body: JSON.stringify(subscription)
 			})
 	};
+}
+
+/** Dismisses a reminder on every device. */
+export async function dismissReminder(
+	alarmKey: string,
+	fetcher: typeof fetch = fetch
+): Promise<void> {
+	await fetcher(`/api/reminders/${encodeURIComponent(alarmKey)}/dismiss`, {
+		method: 'POST',
+		credentials: 'same-origin',
+		headers: { [CSRF_HEADER]: CSRF_VALUE }
+	});
+}
+
+/** Closes reminders dismissed elsewhere. */
+export async function closeReminders(
+	alarmKeys: string[],
+	registration: Promise<ServiceWorkerRegistration | null>
+): Promise<void> {
+	const shown = await registration;
+	if (!shown) return;
+	for (const tag of alarmKeys)
+		for (const notification of await shown.getNotifications({ tag })) notification.close();
 }
 
 export async function disablePush(

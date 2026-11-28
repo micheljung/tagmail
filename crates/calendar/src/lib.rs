@@ -2,6 +2,7 @@
 //! a normalised model, time zone resolution (IANA, Windows, custom
 //! VTIMEZONE) and recurrence expansion. No IO.
 
+mod alarm;
 mod error;
 mod expand;
 mod itip;
@@ -10,6 +11,7 @@ mod parse;
 mod tz;
 mod window;
 
+pub use alarm::{Alarm, is_time_zone};
 pub use error::{EventError, ItipError, ParseError};
 pub use expand::Expansion;
 pub use itip::{apply_cancel, apply_update, for_import, reply, schedule_status, set_my_partstat};

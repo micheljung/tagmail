@@ -2,6 +2,7 @@
 //! WAL, one writer actor plus a small reader pool each), the change log,
 //! full-text search, the message blob store and credential encryption.
 
+pub mod alarms;
 pub mod blobs;
 pub mod calendar;
 pub mod changes;

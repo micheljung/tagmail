@@ -123,6 +123,15 @@
 			<label class="check">
 				<input
 					type="checkbox"
+					checked={settings.reminders}
+					disabled={!settings.notify}
+					onchange={(e) => update({ reminders: e.currentTarget.checked })}
+				/>
+				<span>Calendar reminders</span>
+			</label>
+			<label class="check">
+				<input
+					type="checkbox"
 					checked={settings.autostart}
 					onchange={(e) => update({ autostart: e.currentTarget.checked })}
 				/>
