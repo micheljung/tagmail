@@ -5,6 +5,7 @@
 mod cache;
 #[cfg(feature = "calendar")]
 mod calendar;
+mod calendar_hook;
 mod compose;
 #[cfg(test)]
 mod compose_tests;

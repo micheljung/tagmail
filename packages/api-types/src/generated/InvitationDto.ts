@@ -36,4 +36,9 @@ target: CalendarTargetDto | null,
 /**
  * `null` until the account's CalDAV server is known.
  */
-scheduling: SchedulingDto | null, autoApply: AutoApplyDto, };
+scheduling: SchedulingDto | null, autoApply: AutoApplyDto, 
+/**
+ * The update names another ORGANIZER than the stored event: never
+ * applied without asking, and `/apply` needs `allowOrganizerChange`.
+ */
+organizerChanged: boolean, };

@@ -7,7 +7,7 @@
 //! reader pool nor sees a half-applied sync. Lines are sent in chunks
 //! through a bounded channel, which keeps memory flat whatever the size.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -24,12 +24,14 @@ use futures_util::stream;
 use tagmail_api_core::api::{API_CSP, OCTET_STREAM, offline_error};
 use tagmail_api_core::compose_dto::IdentityDto;
 use tagmail_api_core::replica_dto::{
-    DEFAULT_WINDOW_DAYS, EndRecord, ImageSenderRecord, LabelRecord, LabelRegistryRecord,
-    LocationRecord, MAX_ROWS_IDS, MailboxRecord, MessageRowRecord, NDJSON, ReplicaImageDto,
-    ReplicaRecord, ReplicaRowsDto, SNAPSHOT_FORMAT, SnapshotHeader, TextRecord, ThreadRecord,
+    CaldavRecord, CalendarRecord, DEFAULT_WINDOW_DAYS, EndRecord, EventRecord, ImageSenderRecord,
+    LabelRecord, LabelRegistryRecord, LocationRecord, MAX_ROWS_IDS, MailboxRecord,
+    MessageRowRecord, NDJSON, ReplicaImageDto, ReplicaRecord, ReplicaRowsDto, SNAPSHOT_FORMAT,
+    SnapshotHeader, TextRecord, ThreadRecord,
 };
 use tagmail_api_core::{API_VERSION, ProxyError, Response, Store};
-use tagmail_core::Flags;
+use tagmail_core::{AccountId, ChangeFilter, Flags};
+use tagmail_store::calendar::{self as cal, CalendarPref, Scheduling};
 use tagmail_store::rusqlite::{self, Connection, OpenFlags, OptionalExtension, ToSql};
 use tagmail_store::{BlobKey, BlobStore, CONFIG_SCHEMA, changes};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
@@ -47,8 +49,8 @@ const CHUNKS_IN_FLIGHT: usize = 4;
 const READ_CACHE_KIB: i64 = 2048;
 const BUSY_TIMEOUT_MS: i64 = 5000;
 const DAY_SECS: i64 = 86_400;
-/// Six id lists of [`MAX_ROWS_IDS`] each.
-const MAX_ROWS_BODY: usize = 256 * 1024;
+/// Eight id lists of [`MAX_ROWS_IDS`] each.
+const MAX_ROWS_BODY: usize = 384 * 1024;
 
 /// Shared state of the replica routes.
 pub struct Replica {
@@ -136,9 +138,11 @@ pub async fn snapshot(
         Ok(id) => id,
         Err(resp) => return *resp,
     };
-    let days = form_urlencoded::parse(query.as_deref().unwrap_or("").as_bytes())
+    let query = query.as_deref().unwrap_or("");
+    let days = form_urlencoded::parse(query.as_bytes())
         .find(|(k, _)| k == "windowDays")
         .map(|(_, v)| v.parse::<u32>().unwrap_or(0));
+    let calendar = tagmail_api_core::api::change_filter(query).calendar();
     let (window_days, window_start) = match window(days) {
         Ok(w) => w,
         Err(resp) => return *resp,
@@ -153,7 +157,7 @@ pub async fn snapshot(
     let blobs = store.blobs().clone();
     let path = state.replica.cache_path.clone();
     let (cursor_fixed, cursor_rx) = oneshot::channel();
-    let (config_tx, config_rx) = oneshot::channel::<Vec<ReplicaRecord>>();
+    let (config_tx, config_rx) = oneshot::channel::<ConfigRecords>();
     let response = ndjson(slot, path, move |conn, sink| {
         let tx = conn.unchecked_transaction()?;
         let epoch = changes::read_epoch(&tx)?;
@@ -173,7 +177,7 @@ pub async fn snapshot(
             cache_schema,
             config_schema: CONFIG_SCHEMA,
         }))?;
-        for record in &config {
+        for record in &config.records {
             sink.record(record)?;
         }
         mailboxes(&tx, &Scope::All, sink)?;
@@ -181,13 +185,17 @@ pub async fn snapshot(
         threads(&tx, &Scope::All, sink)?;
         messages(&tx, &Scope::All, sink)?;
         texts(&tx, &blobs, &Scope::All, window_start, sink)?;
+        if let Some(prefs) = &config.prefs {
+            calendars(&tx, &Scope::All, prefs, sink)?;
+            events(&tx, &Scope::All, sink)?;
+        }
         tx.finish()?;
         Ok(())
     });
     if cursor_rx.await.is_err() {
         return error(500, "internal", "internal error");
     }
-    match config_records(store, None).await {
+    match config_records(store, None, calendar).await {
         Ok(records) => {
             let _ = config_tx.send(records);
             response
@@ -222,6 +230,8 @@ pub async fn rows(
         ("labels", &req.labels),
         ("threads", &req.threads),
         ("messages", &req.messages),
+        ("calendars", &req.calendars),
+        ("events", &req.events),
     ] {
         if ids.len() > MAX_ROWS_IDS {
             return invalid(field, format!("at most {MAX_ROWS_IDS} ids"));
@@ -232,10 +242,16 @@ pub async fn rows(
         Err(resp) => return *resp,
     };
     let store = state.api.store();
-    let config = if req.accounts.is_empty() && req.identities.is_empty() {
-        Vec::new()
+    let calendar = req
+        .include
+        .iter()
+        .any(|i| i == ChangeFilter::INCLUDE_CALENDAR)
+        || !req.calendars.is_empty();
+    let config = if req.accounts.is_empty() && req.identities.is_empty() && !calendar {
+        ConfigRecords::default()
     } else {
-        match config_records(store, Some((&req.accounts, &req.identities))).await {
+        let only = (req.accounts.as_slice(), req.identities.as_slice());
+        match config_records(store, Some(only), calendar).await {
             Ok(records) => records,
             Err(e) => {
                 tracing::error!(error = %e, "reading config rows");
@@ -247,7 +263,7 @@ pub async fn rows(
     let path = state.replica.cache_path.clone();
     ndjson((), path, move |conn, sink| {
         let tx = conn.unchecked_transaction()?;
-        for record in &config {
+        for record in &config.records {
             sink.record(record)?;
         }
         mailboxes(&tx, &Scope::Ids(&req.mailboxes), sink)?;
@@ -264,6 +280,10 @@ pub async fn rows(
             messages(&tx, scope, sink)?;
             texts(&tx, &blobs, scope, window_start, sink)?;
         }
+        if let Some(prefs) = &config.prefs {
+            calendars(&tx, &Scope::Ids(&req.calendars), prefs, sink)?;
+        }
+        events(&tx, &Scope::Ids(&req.events), sink)?;
         tx.finish()?;
         Ok(())
     })
@@ -343,23 +363,41 @@ fn binary_headers(content_type: impl Into<String>) -> Vec<(&'static str, String)
     ]
 }
 
+type Prefs = HashMap<(AccountId, String), CalendarPref>;
+
+/// `config.db` rows of a stream: its records, and the calendar
+/// preferences that `calendar` records join when calendars are included.
+#[derive(Default)]
+struct ConfigRecords {
+    records: Vec<ReplicaRecord>,
+    prefs: Option<Prefs>,
+}
+
+fn scheduling_text(s: Option<Scheduling>) -> Option<String> {
+    s.map(|s| s.as_str().to_owned())
+}
+
 /// Accounts with their label registry and identities; `only` restricts
 /// them to (account ids, identity ids), else all plus the image senders.
+/// With `calendar`, every account's calendar settings too: a calendar
+/// change may move an account's default.
 async fn config_records(
     store: &tagmail_api_core::sqlite_store::SqliteStore,
     only: Option<(&[i64], &[i64])>,
-) -> anyhow::Result<Vec<ReplicaRecord>> {
+    calendar: bool,
+) -> anyhow::Result<ConfigRecords> {
     let mut accounts = store
         .accounts_full()
         .await
         .map_err(anyhow::Error::from_boxed)?;
+    let caldav_ids: Vec<i64> = accounts.iter().map(|a| a.id).collect();
     if let Some((ids, _)) = only {
         accounts.retain(|a| ids.contains(&a.id));
     }
     let account_ids: Vec<i64> = accounts.iter().map(|a| a.id).collect();
     let identity_ids = only.map(|(_, ids)| ids.to_vec());
     let all = only.is_none();
-    let rest = store
+    let (rest, prefs) = store
         .config()
         .read(move |conn| {
             let mut out = Vec::new();
@@ -410,13 +448,28 @@ async fn config_records(
                     }));
                 }
             }
-            Ok(out)
+            if !calendar {
+                return Ok((out, None));
+            }
+            for id in caldav_ids {
+                let Some(c) = cal::load_caldav(conn, AccountId(id))? else {
+                    continue;
+                };
+                out.push(ReplicaRecord::Caldav(CaldavRecord {
+                    account_id: id,
+                    default_calendar_href: c.default_calendar_href,
+                    fallback_account_id: c.fallback_account.map(|a| a.0),
+                    scheduling: scheduling_text(c.scheduling),
+                    scheduling_detected: scheduling_text(c.scheduling_detected),
+                }));
+            }
+            Ok((out, Some(cal::calendar_prefs(conn)?)))
         })
         .await?;
     let mut records: Vec<ReplicaRecord> =
         accounts.into_iter().map(ReplicaRecord::Account).collect();
     records.extend(rest);
-    Ok(records)
+    Ok(ConfigRecords { records, prefs })
 }
 
 fn json_ids(ids: &[i64]) -> String {
@@ -559,7 +612,7 @@ fn messages(conn: &Connection, scope: &Scope<'_>, sink: &mut Sink) -> anyhow::Re
     let mut stmt = conn.prepare(&format!(
         "SELECT id, account_id, email_id, msgid_hdr, in_reply_to, thread_id, date, \
          subject_norm, from_json, to_json, cc_json, subject, snippet, size, has_attachment, \
-         tombstoned_at FROM message WHERE {cond} ORDER BY id"
+         tombstoned_at, has_calendar FROM message WHERE {cond} ORDER BY id"
     ))?;
     let mut locations = conn.prepare(
         "SELECT mailbox_id, uid, flags, keywords, modseq, srv_flags, srv_keywords, hidden \
@@ -603,9 +656,77 @@ fn messages(conn: &Connection, scope: &Scope<'_>, sink: &mut Sink) -> anyhow::Re
             snippet: r.get(12)?,
             size: r.get(13)?,
             has_attachment: r.get(14)?,
+            has_calendar: r.get(16)?,
             tombstoned_at: r.get(15)?,
             locations,
             labels,
+        }))?;
+    }
+    Ok(())
+}
+
+fn calendars(
+    conn: &Connection,
+    scope: &Scope<'_>,
+    prefs: &Prefs,
+    sink: &mut Sink,
+) -> anyhow::Result<()> {
+    if scope.is_empty() {
+        return Ok(());
+    }
+    let (cond, param) = scope.filter("SELECT ?1");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, account_id, href, display_name, color_srv, writable FROM calendar \
+         WHERE {cond} ORDER BY id"
+    ))?;
+    let mut rows = stmt.query([&param])?;
+    while let Some(r) = rows.next()? {
+        let account_id: i64 = r.get(1)?;
+        let href: String = r.get(2)?;
+        let pref = prefs.get(&(AccountId(account_id), href.clone()));
+        sink.record(&ReplicaRecord::Calendar(CalendarRecord {
+            id: r.get(0)?,
+            account_id,
+            href,
+            display_name: r.get(3)?,
+            color_srv: r.get(4)?,
+            writable: r.get(5)?,
+            color: pref.and_then(|p| p.color.clone()),
+            visible: pref.is_none_or(|p| p.visible),
+            sort: pref.and_then(|p| p.sort),
+        }))?;
+    }
+    Ok(())
+}
+
+fn events(conn: &Connection, scope: &Scope<'_>, sink: &mut Sink) -> anyhow::Result<()> {
+    if scope.is_empty() {
+        return Ok(());
+    }
+    let (cond, param) = scope.filter("SELECT ?1");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, calendar_id, href, etag, uid, ics, sequence, dtstamp, status, my_partstat, \
+         organizer, is_recurring, first_start, last_end FROM cal_event WHERE {cond} ORDER BY id"
+    ))?;
+    let mut rows = stmt.query([&param])?;
+    let engine = base64::engine::general_purpose::STANDARD;
+    while let Some(r) = rows.next()? {
+        let ics: Vec<u8> = r.get(5)?;
+        sink.record(&ReplicaRecord::Event(EventRecord {
+            id: r.get(0)?,
+            calendar_id: r.get(1)?,
+            href: r.get(2)?,
+            etag: r.get(3)?,
+            uid: r.get(4)?,
+            ics_zstd: engine.encode(ics),
+            sequence: r.get(6)?,
+            dtstamp: r.get(7)?,
+            status: r.get(8)?,
+            my_partstat: r.get(9)?,
+            organizer: r.get(10)?,
+            is_recurring: r.get(11)?,
+            first_start: r.get(12)?,
+            last_end: r.get(13)?,
         }))?;
     }
     Ok(())

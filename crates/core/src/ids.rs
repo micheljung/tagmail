@@ -156,6 +156,24 @@ impl FromStr for ChangeCursor {
     }
 }
 
+/// Which change-log entities a reader sees: clients that never asked for
+/// calendar data never receive its entities (appointments plan Decision e).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ChangeFilter {
+    #[default]
+    Mail,
+    WithCalendar,
+}
+
+impl ChangeFilter {
+    /// The `include` query value that selects [`ChangeFilter::WithCalendar`].
+    pub const INCLUDE_CALENDAR: &'static str = "calendar";
+
+    pub fn calendar(self) -> bool {
+        self == ChangeFilter::WithCalendar
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

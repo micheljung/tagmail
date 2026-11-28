@@ -337,17 +337,24 @@ async fn events(
             "too many event streams are open",
         ));
     };
-    let session =
-        match EventSession::open(state.api.store().clone(), state.events.as_ref(), resume).await {
-            Err(e) => {
-                tracing::error!(error = %e, "opening event stream");
-                return to_http(Response::error(500, "internal", "internal error"));
-            }
-            Ok(Err(OpenError::Gone)) => {
-                return to_http(Response::json(410, &tagmail_api_core::api::gone_error()));
-            }
-            Ok(Ok(session)) => session,
-        };
+    let filter = tagmail_api_core::api::change_filter(query.as_deref().unwrap_or(""));
+    let session = match EventSession::open(
+        state.api.store().clone(),
+        state.events.as_ref(),
+        resume,
+        filter,
+    )
+    .await
+    {
+        Err(e) => {
+            tracing::error!(error = %e, "opening event stream");
+            return to_http(Response::error(500, "internal", "internal error"));
+        }
+        Ok(Err(OpenError::Gone)) => {
+            return to_http(Response::json(410, &tagmail_api_core::api::gone_error()));
+        }
+        Ok(Ok(session)) => session,
+    };
     let mut guard = StreamAuth {
         revocations: state.auth.revocations(),
         auth: state.auth.clone(),

@@ -2,10 +2,13 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io::{BufReader, Read};
+use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::calendar_dto::{CaldavSettingsDto, CalendarDto};
+use crate::calendar_dto::{
+    CalEventDto, CaldavSettingsDto, CalendarDto, CalendarTargetDto, EventInstanceDto,
+};
 use crate::dto::{
     AccountDto, AccountStateDto, AddressDto, ChangeDto, ChangeOpDto, EntityDto, LabelDto,
     MailboxDto, SpecialUseDto, ThreadRowDto, TlsMode,
@@ -20,8 +23,8 @@ use crate::{
 };
 use tagmail_core::query::{Query, Term};
 use tagmail_core::{
-    AccountId, ChangeCursor, EmailId, Flags, KeywordClass, LabelKey, MessageRowId, SpecialUse,
-    ThreadId, classify_keyword, decode_mailbox_name,
+    AccountId, ChangeCursor, ChangeFilter, EmailId, Flags, KeywordClass, LabelKey, MessageRowId,
+    SpecialUse, ThreadId, classify_keyword, decode_mailbox_name,
 };
 use tagmail_store::rusqlite::{
     self, Connection, OptionalExtension, named_params, params, params_from_iter,
@@ -158,12 +161,17 @@ impl SqliteStore {
 
     /// Logs an account upsert and wakes the event streams.
     async fn emit_account(&self, account: &AccountDto) -> StoreResult<()> {
-        let change = NewChange {
+        self.emit(NewChange {
             entity: Entity::Account,
             entity_id: account.id,
             op: ChangeOp::Upsert,
             payload: Some(serde_json::to_string(account)?),
-        };
+        })
+        .await
+    }
+
+    /// Logs `change` and wakes the event streams.
+    async fn emit(&self, change: NewChange) -> StoreResult<()> {
         let epoch = self.cache.epoch();
         let head = self
             .cache
@@ -243,6 +251,10 @@ fn entity_dto(e: Entity) -> EntityDto {
         Entity::Op => EntityDto::Op,
         Entity::LabelJob => EntityDto::LabelJob,
         Entity::Identity => EntityDto::Identity,
+        Entity::Calendar => EntityDto::Calendar,
+        Entity::Event => EntityDto::Event,
+        Entity::CalOp => EntityDto::CalOp,
+        Entity::Reminder => EntityDto::Reminder,
     }
 }
 
@@ -746,22 +758,29 @@ impl Store for SqliteStore {
             .await?)
     }
 
-    async fn changes_since(&self, since: ChangeCursor, limit: usize) -> StoreResult<ChangePage> {
-        Ok(match self.cache.changes_since(since, limit).await? {
-            Changes::Gone => ChangePage::Gone,
-            Changes::Page {
-                changes,
-                next,
-                more,
-            } => ChangePage::Page {
-                changes: changes
-                    .into_iter()
-                    .map(change_dto)
-                    .collect::<tagmail_store::Result<_>>()?,
-                next,
-                more,
+    async fn changes_since(
+        &self,
+        since: ChangeCursor,
+        limit: usize,
+        filter: ChangeFilter,
+    ) -> StoreResult<ChangePage> {
+        Ok(
+            match self.cache.changes_since(since, limit, filter).await? {
+                Changes::Gone => ChangePage::Gone,
+                Changes::Page {
+                    changes,
+                    next,
+                    more,
+                } => ChangePage::Page {
+                    changes: changes
+                        .into_iter()
+                        .map(change_dto)
+                        .collect::<tagmail_store::Result<_>>()?,
+                    next,
+                    more,
+                },
             },
-        })
+        )
     }
 
     async fn accounts(&self) -> StoreResult<Vec<AccountSummary>> {
@@ -1159,10 +1178,16 @@ impl Store for SqliteStore {
             (Some(_), Some(password)) => Some(self.vault.seal_caldav(id, password.expose())?),
             _ => None,
         };
-        let config = self
+        let (config, account) = self
             .config
-            .write(move |tx| sqlite_calendar::save_settings(tx, id, update, sealed))
+            .write(move |tx| {
+                let config = sqlite_calendar::save_settings(tx, id, update, sealed)?;
+                Ok((config, read_account(tx, id)?))
+            })
             .await?;
+        if let (Some(_), Some(account)) = (&config, &account) {
+            self.emit_account(account).await?;
+        }
         Ok(config.as_ref().map(sqlite_calendar::settings_dto))
     }
 
@@ -1209,6 +1234,13 @@ impl Store for SqliteStore {
             .config
             .write(move |tx| sqlite_calendar::patch_pref(tx, &patch))
             .await?;
+        self.emit(NewChange {
+            entity: Entity::Calendar,
+            entity_id: row.id,
+            op: ChangeOp::Upsert,
+            payload: None,
+        })
+        .await?;
         Ok(Some(sqlite_calendar::calendar_dto(
             &row,
             Some(&pref),
@@ -1216,18 +1248,54 @@ impl Store for SqliteStore {
         )))
     }
 
+    async fn events_in(
+        &self,
+        range: Range<i64>,
+        calendars: Vec<CalendarTargetDto>,
+    ) -> StoreResult<Vec<EventInstanceDto>> {
+        Ok(self
+            .cache
+            .read(move |conn| sqlite_calendar::events_in(conn, range.start, range.end, &calendars))
+            .await?)
+    }
+
+    async fn event(&self, account: AccountId, href: String) -> StoreResult<Option<CalEventDto>> {
+        Ok(self
+            .cache
+            .read(move |conn| sqlite_calendar::events_where(conn, account, Some(&href), None))
+            .await?
+            .into_iter()
+            .next())
+    }
+
+    async fn event_by_uid(&self, account: AccountId, uid: String) -> StoreResult<Vec<CalEventDto>> {
+        Ok(self
+            .cache
+            .read(move |conn| sqlite_calendar::events_where(conn, account, None, Some(&uid)))
+            .await?)
+    }
+
     async fn invitation_context(
         &self,
         account: AccountId,
+        message: MessageRowId,
         uids: Vec<String>,
     ) -> StoreResult<InvitationContext> {
-        let mapped = self
+        let of = uids.clone();
+        let (mapped, replies) = self
             .config
-            .read(move |conn| sqlite_calendar::mapped_accounts(conn, account))
+            .read(move |conn| {
+                Ok((
+                    sqlite_calendar::mapped_accounts(conn, account)?,
+                    sqlite_calendar::reply_states(conn, account, &of)?,
+                ))
+            })
             .await?;
         Ok(self
             .cache
-            .read(move |conn| sqlite_calendar::invitation_context(conn, &mapped, &uids))
+            .read(move |conn| {
+                sqlite_calendar::invitation_context(conn, &mapped, message, &uids, &replies)
+            })
             .await?)
     }
 

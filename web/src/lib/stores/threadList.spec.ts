@@ -56,7 +56,9 @@ function ack(request: NewOpDto, status: OpDto['status']): OpDto {
 		threadIds: request.threadIds ?? [],
 		label: null,
 		mailboxId: null,
-		createdAt: 1
+		createdAt: 1,
+		domain: 'mail',
+		calendar: null
 	};
 }
 

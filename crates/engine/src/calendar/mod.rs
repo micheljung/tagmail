@@ -4,8 +4,12 @@
 
 #[cfg(test)]
 mod engine_tests;
+pub(crate) mod executor;
 #[cfg(test)]
 pub(crate) mod fake;
+pub(crate) mod invite;
+#[cfg(test)]
+mod ops_tests;
 pub(crate) mod sync;
 
 use std::future::Future;
@@ -19,7 +23,7 @@ use tagmail_api_core::{BoxFuture, CalendarError, CalendarService};
 use tagmail_core::AccountId;
 use tagmail_dav::{
     CalendarInfo, Client, ClientOptions, DavError, Discovery, DiscoveryEnv, DiscoveryTarget,
-    MultigetItem, ResourceRef, SchedulingMode, SyncPage,
+    MultigetItem, PutCondition, Resource, ResourceRef, SchedulingMode, SyncPage, UidMatch,
 };
 use tagmail_store::calendar::{self, CaldavConfig, CaldavStatus, DiscoveryResult, Scheduling};
 use tagmail_store::rusqlite::{Connection, OptionalExtension};
@@ -48,6 +52,26 @@ pub(crate) trait CalDav: Send + Sync {
         calendar: &'a Url,
         token: Option<&'a str>,
     ) -> DavFuture<'a, SyncPage>;
+    fn get<'a>(&'a self, href: &'a Url) -> DavFuture<'a, Resource>;
+    fn put<'a>(
+        &'a self,
+        href: &'a Url,
+        ics: &'a str,
+        condition: PutCondition,
+    ) -> DavFuture<'a, Option<String>>;
+    fn delete<'a>(&'a self, href: &'a Url, etag: Option<&'a str>) -> DavFuture<'a, ()>;
+    /// MOVE, falling back to GET + PUT + DELETE where the server cannot.
+    fn move_resource<'a>(
+        &'a self,
+        from: &'a Url,
+        to: &'a Url,
+        etag: Option<&'a str>,
+    ) -> DavFuture<'a, ()>;
+    fn find_by_uid<'a>(
+        &'a self,
+        calendars: &'a [Url],
+        uid: &'a str,
+    ) -> DavFuture<'a, Option<UidMatch>>;
 }
 
 impl CalDav for Client {
@@ -73,6 +97,40 @@ impl CalDav for Client {
         token: Option<&'a str>,
     ) -> DavFuture<'a, SyncPage> {
         Box::pin(Client::sync_collection(self, calendar, token))
+    }
+
+    fn get<'a>(&'a self, href: &'a Url) -> DavFuture<'a, Resource> {
+        Box::pin(Client::get(self, href))
+    }
+
+    fn put<'a>(
+        &'a self,
+        href: &'a Url,
+        ics: &'a str,
+        condition: PutCondition,
+    ) -> DavFuture<'a, Option<String>> {
+        Box::pin(async move { Client::put(self, href, ics, condition).await })
+    }
+
+    fn delete<'a>(&'a self, href: &'a Url, etag: Option<&'a str>) -> DavFuture<'a, ()> {
+        Box::pin(Client::delete(self, href, etag))
+    }
+
+    fn move_resource<'a>(
+        &'a self,
+        from: &'a Url,
+        to: &'a Url,
+        etag: Option<&'a str>,
+    ) -> DavFuture<'a, ()> {
+        Box::pin(Client::move_resource(self, from, to, etag))
+    }
+
+    fn find_by_uid<'a>(
+        &'a self,
+        calendars: &'a [Url],
+        uid: &'a str,
+    ) -> DavFuture<'a, Option<UidMatch>> {
+        Box::pin(Client::find_by_uid(self, calendars, uid))
     }
 }
 
@@ -150,11 +208,26 @@ struct Running {
 #[derive(Default)]
 pub(crate) struct State {
     wake: Arc<Notify>,
+    /// Runs due ops without a poll.
+    ops: Arc<Notify>,
     running: Mutex<Option<Running>>,
     removing: sync::Removing,
 }
 
+/// Wakes the runner when mail sync queued invitations.
+struct InviteWake(Arc<Notify>);
+
+impl crate::calendar_hook::InviteHook for InviteWake {
+    fn queued(&self) {
+        self.0.notify_one();
+    }
+}
+
 impl State {
+    pub(crate) fn invite_hook(&self) -> Arc<dyn crate::calendar_hook::InviteHook> {
+        Arc::new(InviteWake(self.wake.clone()))
+    }
+
     /// Stops calendar writes for `account` before its cache rows are
     /// purged.
     pub(crate) fn removing(&self, account: AccountId) {
@@ -324,6 +397,48 @@ impl<F: ConnectorFactory> Engine<F> {
         self.start_calendar_with_env(env)
     }
 
+    /// Stops only the calendar runner, so tests can change the server
+    /// between an op's submission and its run.
+    #[cfg(feature = "caldav-tests")]
+    pub async fn stop_calendar(&self) {
+        self.inner.calendar.shutdown().await;
+    }
+
+    /// Queues a full edit of `href` (the `put` op of plan §4 M-C step 1)
+    /// conditional on `if_match`, until the edit API exists.
+    #[cfg(feature = "caldav-tests")]
+    pub async fn queue_calendar_put(
+        &self,
+        op_id: &str,
+        account: AccountId,
+        calendar_href: &str,
+        href: &str,
+        ics: &str,
+        if_match: Option<&str>,
+    ) -> Result<()> {
+        let dir = executor::ics_dir(&self.inner.stores);
+        std::fs::create_dir_all(&dir).map_err(tagmail_store::Error::from)?;
+        let name = format!("{op_id}.ics");
+        std::fs::write(dir.join(&name), ics).map_err(tagmail_store::Error::from)?;
+        let mut op = executor::CalOp::new(
+            op_id.to_owned(),
+            account,
+            executor::CalOpKind::Put,
+            String::new(),
+        );
+        op.calendar_href = Some(calendar_href.to_owned());
+        op.href = Some(href.to_owned());
+        op.if_match = if_match.map(str::to_owned);
+        op.ics_file = Some(name);
+        self.inner
+            .stores
+            .config
+            .write(move |tx| Ok(executor::insert(tx, &op)?))
+            .await?;
+        self.wake_calendar_ops();
+        Ok(())
+    }
+
     fn start_calendar_with_env(&self, env: DiscoveryEnv) -> Result<()> {
         let tls = tagmail_imap::client_config(None)?;
         self.start_calendar_on(Arc::new(SystemConnector {
@@ -340,16 +455,26 @@ impl<F: ConnectorFactory> Engine<F> {
             return;
         }
         let (stop, stopped) = watch::channel(false);
+        let inbox = Arc::new(Notify::new());
         let runner = sync::Runner {
             stores: self.inner.stores.clone(),
             connector: connector.clone(),
             removing: state.removing.clone(),
             broken: sync::BrokenReports::new(),
+            mail: Arc::new(invite::WeakEngine(Arc::downgrade(&self.inner))),
+            inbox: inbox.clone(),
         };
-        let task = self
-            .inner
-            .runtime
-            .spawn(sync::run(runner, state.wake.clone(), stopped));
+        let invitations = sync::invitations(
+            self.inner.stores.clone(),
+            runner.mail.clone(),
+            inbox,
+            state.ops.clone(),
+            stopped.clone(),
+        );
+        let runs = sync::run(runner, state.wake.clone(), state.ops.clone(), stopped);
+        let task = self.inner.runtime.spawn(async move {
+            tokio::join!(runs, invitations);
+        });
         *running = Some(Running {
             connector,
             stop,
@@ -359,6 +484,11 @@ impl<F: ConnectorFactory> Engine<F> {
 
     pub(crate) fn wake_calendar(&self) {
         self.inner.calendar.wake.notify_one();
+    }
+
+    /// Runs the due calendar ops now.
+    pub(crate) fn wake_calendar_ops(&self) {
+        self.inner.calendar.ops.notify_one();
     }
 
     async fn discover_caldav(
@@ -380,8 +510,12 @@ impl<F: ConnectorFactory> Engine<F> {
         let mut config = account.config;
         let read_url = config.url.clone();
         if let Some(host) = confirm {
+            let host = tagmail_dav::normalize_host(&host);
             let asked = config.status == CaldavStatus::NeedsConfirmation
-                && config.pending_host.as_deref() == Some(host.as_str());
+                && config
+                    .pending_host
+                    .as_deref()
+                    .is_some_and(|pending| tagmail_dav::normalize_host(pending) == host);
             if !asked {
                 return Err(CalendarError::HostMismatch);
             }
@@ -563,5 +697,29 @@ impl<F: ConnectorFactory> CalendarService for Engine<F> {
     fn settings_changed(&self, account: AccountId) {
         tracing::debug!(account = account.0, "CalDAV settings changed");
         self.wake_calendar();
+    }
+
+    fn submit(
+        &self,
+        request: tagmail_api_core::CalRequest,
+    ) -> BoxFuture<tagmail_api_core::WriteResult<tagmail_api_core::Submitted>> {
+        let engine = self.clone();
+        Box::pin(async move { engine.submit_calendar(request).await })
+    }
+
+    fn existing(
+        &self,
+        op_id: String,
+    ) -> BoxFuture<tagmail_api_core::WriteResult<Option<tagmail_api_core::ops_dto::OpDto>>> {
+        let engine = self.clone();
+        Box::pin(async move {
+            Ok(match engine.existing_cal(&op_id).await? {
+                Some(
+                    tagmail_api_core::Submitted::Existing(op)
+                    | tagmail_api_core::Submitted::Created(op),
+                ) => Some(op),
+                None => None,
+            })
+        })
     }
 }

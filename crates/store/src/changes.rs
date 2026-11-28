@@ -6,7 +6,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use rusqlite::{Connection, OptionalExtension, params};
-use tagmail_core::{CacheEpoch, ChangeCursor};
+use tagmail_core::{CacheEpoch, ChangeCursor, ChangeFilter};
 
 use crate::db::parse_meta;
 use crate::error::{Error, Result};
@@ -27,10 +27,18 @@ pub enum Entity {
     LabelJob,
     /// A `config.db` identity.
     Identity,
+    /// A cached calendar collection (`calendar.id`).
+    Calendar,
+    /// A cached calendar object resource (`cal_event.id`).
+    Event,
+    /// A calendar write's status (`config.db` `cal_op`).
+    CalOp,
+    /// A due reminder.
+    Reminder,
 }
 
 impl Entity {
-    const ALL: [Entity; 9] = [
+    const ALL: [Entity; 13] = [
         Entity::Account,
         Entity::Mailbox,
         Entity::Thread,
@@ -40,6 +48,18 @@ impl Entity {
         Entity::Op,
         Entity::LabelJob,
         Entity::Identity,
+        Entity::Calendar,
+        Entity::Event,
+        Entity::CalOp,
+        Entity::Reminder,
+    ];
+
+    /// Entities only readers with [`ChangeFilter::WithCalendar`] see.
+    pub const CALENDAR: [Entity; 4] = [
+        Entity::Calendar,
+        Entity::Event,
+        Entity::CalOp,
+        Entity::Reminder,
     ];
 
     fn as_str(self) -> &'static str {
@@ -53,6 +73,10 @@ impl Entity {
             Entity::Op => "op",
             Entity::LabelJob => "label_job",
             Entity::Identity => "identity",
+            Entity::Calendar => "calendar",
+            Entity::Event => "event",
+            Entity::CalOp => "cal_op",
+            Entity::Reminder => "reminder",
         }
     }
 }
@@ -206,35 +230,44 @@ pub fn head(conn: &Connection, epoch: CacheEpoch) -> Result<ChangeCursor> {
     })
 }
 
+/// Up to `limit` of the changes after `since` that `filter` lets through.
+/// When none are left beyond the page, `next` is the head, past any
+/// filtered-out tail.
 pub fn changes_since(
     conn: &Connection,
     epoch: CacheEpoch,
     since: ChangeCursor,
     limit: usize,
+    filter: ChangeFilter,
 ) -> Result<Changes> {
     let _snapshot = if conn.is_autocommit() {
         Some(conn.unchecked_transaction()?)
     } else {
         None
     };
-    if since.epoch != epoch || since.seq < min_seq(conn)? || since.seq > head_seq(conn)? {
+    let head = head_seq(conn)?;
+    if since.epoch != epoch || since.seq < min_seq(conn)? || since.seq > head {
         return Ok(Changes::Gone);
     }
     let fetch = i64::try_from(limit).unwrap_or(i64::MAX).saturating_add(1);
+    let [a, b, c, d] = Entity::CALENDAR.map(Entity::as_str);
     let mut stmt = conn.prepare_cached(
         "SELECT seq, entity, entity_id, op, payload FROM change_log \
-         WHERE seq > ?1 ORDER BY seq LIMIT ?2",
+         WHERE seq > ?1 AND (?3 OR entity NOT IN (?4, ?5, ?6, ?7)) ORDER BY seq LIMIT ?2",
     )?;
     let mut changes = stmt
-        .query_map(params![since.seq, fetch], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, i64>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, Option<String>>(4)?,
-            ))
-        })?
+        .query_map(
+            params![since.seq, fetch, filter.calendar(), a, b, c, d],
+            |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )?
         .map(|row| {
             let (seq, entity, entity_id, op, payload) = row?;
             Ok(Change {
@@ -248,10 +281,11 @@ pub fn changes_since(
         .collect::<Result<Vec<_>>>()?;
     let more = changes.len() > limit;
     changes.truncate(limit);
-    let next = ChangeCursor {
-        epoch,
-        seq: changes.last().map_or(since.seq, |c| c.seq),
+    let seq = match changes.last() {
+        Some(last) if more => last.seq,
+        _ => head,
     };
+    let next = ChangeCursor { epoch, seq };
     Ok(Changes::Page {
         changes,
         next,

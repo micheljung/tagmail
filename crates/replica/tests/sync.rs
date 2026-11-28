@@ -2,6 +2,9 @@
 //! pulls, re-bootstrap on an epoch change, the window sweep and new-mail
 //! detection.
 
+#[cfg(feature = "calendar")]
+mod calendar_seed;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -737,5 +740,263 @@ async fn stopping_does_not_wait_for_a_rebootstrap() {
         .await
         .expect("run stops promptly")
         .unwrap();
+    server.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "calendar")]
+async fn local_counts(replica: &Replica) -> [i64; 3] {
+    calendar_seed::counts(&replica.store().unwrap()).await
+}
+
+/// A proxy to `upstream` whose version answer drops the `calendar`
+/// feature once `drop` is set, as a server rebuilt without it would.
+#[cfg(feature = "calendar")]
+async fn feature_proxy(upstream: std::net::SocketAddr) -> (std::net::SocketAddr, Arc<AtomicBool>) {
+    const OFFERED: &[u8] = br#""features":["calendar"]"#;
+    const DROPPED: &[u8] = br#""features":["xxxxxxxx"]"#;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let drop = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&drop);
+    tokio::spawn(async move {
+        while let Ok((client, _)) = listener.accept().await {
+            let drop = Arc::clone(&flag);
+            tokio::spawn(async move {
+                let server = tokio::net::TcpStream::connect(upstream).await.unwrap();
+                let (mut client_read, mut client_write) = client.into_split();
+                let (mut server_read, mut server_write) = server.into_split();
+                tokio::spawn(async move {
+                    let _ = tokio::io::copy(&mut client_read, &mut server_write).await;
+                });
+                let mut buf = vec![0; 64 * 1024];
+                while let Ok(n) = server_read.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    if drop.load(Ordering::Acquire)
+                        && let Some(at) = buf[..n].windows(OFFERED.len()).position(|w| w == OFFERED)
+                    {
+                        buf[at..at + DROPPED.len()].copy_from_slice(DROPPED);
+                    }
+                    if client_write.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    (addr, drop)
+}
+
+#[cfg(feature = "calendar")]
+#[tokio::test]
+async fn upgrade_with_existing_cursor_backfills_calendar() {
+    const CALENDARS: [&str; 2] = ["/cal/work/", "/cal/home/"];
+    let env = Env::new();
+    let server = env.start().await;
+    seed(&server).await;
+    calendar_seed::seed(server.store(), 1, &CALENDARS, 10, now()).await;
+    let token = pair(&server).await;
+    let replica = replica(&env, &server, &token).await;
+    replica.rebootstrap().await.unwrap();
+    assert!(!replica.calendar(), "a replica from before calendars");
+    replica.sync_once().await.unwrap();
+    assert_eq!(local_counts(&replica).await, [0, 0, 0]);
+
+    replica.gate().await.unwrap();
+
+    assert!(replica.calendar());
+    let theirs = calendar_seed::counts(server.store()).await;
+    assert_eq!(local_counts(&replica).await, theirs);
+    let local = replica.store().unwrap();
+    assert_eq!(
+        local.calendars().await.unwrap(),
+        server.store().calendars().await.unwrap()
+    );
+
+    let added = calendar_seed::ics("late@example.com", now() + DAY, None);
+    let (row, instances) = calendar_seed::parsed("/cal/work/late.ics", &added, now());
+    server
+        .store()
+        .cache()
+        .write(move |tx| {
+            let id = tagmail_store::calendar::calendars(tx, Some(AccountId(1)))?
+                .into_iter()
+                .find(|c| c.href == "/cal/work/")
+                .unwrap()
+                .id;
+            tagmail_store::calendar::put_event(tx, id, &row, added.as_bytes(), &instances)?;
+            tagmail_store::calendar::delete_events(tx, id, &["/cal/work/0.ics".to_owned()])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    replica.sync_once().await.unwrap();
+
+    let found = local
+        .event_by_uid(AccountId(1), "late@example.com".into())
+        .await
+        .unwrap();
+    assert_eq!(found.len(), 1);
+    assert!(
+        local
+            .event(AccountId(1), "/cal/work/0.ics".into())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        local_counts(&replica).await,
+        calendar_seed::counts(server.store()).await
+    );
+    server.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "calendar")]
+#[tokio::test]
+async fn server_drops_calendar_purges_local_records() {
+    let env = Env::new();
+    let server = env.start().await;
+    seed(&server).await;
+    calendar_seed::seed(server.store(), 1, &["/cal/work/"], 5, now()).await;
+    server
+        .store()
+        .cache()
+        .write(|tx| {
+            tx.execute("UPDATE message SET has_calendar = 1 WHERE id = 10", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let token = pair(&server).await;
+    let (proxy, drop_calendar) = feature_proxy(env.listen).await;
+    let client = ServerClient::new(
+        &Url::parse(&format!("http://{proxy}/")).unwrap(),
+        Some(token),
+    )
+    .unwrap();
+    let replica = Replica::open(env.layout(), client, Settings::default())
+        .await
+        .unwrap();
+    replica.gate().await.unwrap();
+    assert!(replica.calendar());
+    assert_ne!(local_counts(&replica).await, [0, 0, 0]);
+    let queued = replica
+        .submit_cal(
+            tagmail_replica::cal_intents::CalKind::Rsvp,
+            br#"{"opId":"rsvp-1","messageId":"10","partstat":"accepted"}"#,
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        queued,
+        tagmail_api_core::writes::Submitted::Created(_)
+    ));
+
+    drop_calendar.store(true, Ordering::Release);
+    replica.gate().await.unwrap();
+
+    assert!(!replica.calendar());
+    assert_eq!(local_counts(&replica).await, [0, 0, 0]);
+    let rsvp = replica.durable().cal_intent("rsvp-1").unwrap().unwrap();
+    assert_eq!(rsvp.state, tagmail_replica::intents::IntentState::Failed);
+    assert_eq!(
+        rsvp.error.as_deref(),
+        Some(tagmail_replica::sync::CALENDAR_DISABLED)
+    );
+    server
+        .store()
+        .cache()
+        .write(|tx| {
+            let id = tagmail_store::calendar::upsert_calendar(
+                tx,
+                AccountId(1),
+                "/cal/new/",
+                None,
+                None,
+                true,
+            )?;
+            tagmail_store::calendar::put_event(
+                tx,
+                id,
+                &tagmail_store::calendar::EventRow {
+                    href: "/cal/new/a.ics".into(),
+                    uid: "a".into(),
+                    ..Default::default()
+                },
+                b"BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n",
+                &[],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    replica.sync_once().await.unwrap();
+    assert_eq!(
+        local_counts(&replica).await,
+        [0, 0, 0],
+        "pulls no longer include calendars"
+    );
+    server.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "calendar")]
+#[tokio::test]
+async fn old_client_never_receives_calendar_entities() {
+    let env = Env::new();
+    let server = env.start().await;
+    seed(&server).await;
+    let token = pair(&server).await;
+    let start = server.store().cache().head().await.unwrap();
+    calendar_seed::seed(server.store(), 1, &["/cal/work/"], 3, now()).await;
+    let device = |path: String| {
+        reqwest::Client::new()
+            .get(url(&server, &path))
+            .bearer_auth(&token)
+            .send()
+    };
+    let entities = |page: &Value| -> Vec<String> {
+        page["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["entity"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    let old: Value = device(format!("/api/changes?since={start}"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(entities(&old).is_empty(), "{old}");
+    assert_eq!(
+        old["next"],
+        server.store().cache().head().await.unwrap().to_string()
+    );
+    let new: Value = device(format!("/api/changes?since={start}&include=calendar"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(entities(&new).iter().any(|e| e == "event"), "{new}");
+
+    let snapshot = device("/api/replica/snapshot".into())
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(!snapshot.contains(r#""t":"event""#));
+    assert!(!snapshot.contains(r#""t":"calendar""#));
+    let snapshot = device("/api/replica/snapshot?include=calendar".into())
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(snapshot.contains(r#""t":"event""#));
     server.shutdown().await.unwrap();
 }

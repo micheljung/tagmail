@@ -50,6 +50,7 @@
     }
   ],
   "method": "request",
+  "organizerChanged": false,
   "outdated": false,
   "scheduling": null,
   "senderAuth": "untrusted_config",

@@ -34,25 +34,27 @@ test('card shows title, times with original TZ, organizer, attendees, recurrence
 	await expect(card.getByRole('button', { name: 'Show fewer' })).toBeVisible();
 });
 
-test('a REQUEST offers the RSVP buttons, disabled until a calendar is set up', async ({ page }) => {
+test('a REQUEST offers the RSVP buttons', async ({ page }) => {
 	const card = await openInvitation(page, 'request');
 	for (const name of ['Accept', 'Tentative', 'Decline']) {
-		await expect(card.getByRole('button', { name })).toBeDisabled();
+		await expect(card.getByRole('button', { name })).toBeEnabled();
 	}
-	await expect(card).toContainText('Calendar not set up');
+	await expect(card).not.toContainText('No calendar set up');
 	await expect(card.getByRole('alert')).toHaveCount(0);
 });
 
 test('a CANCEL shows a cancelled banner and no actions', async ({ page }) => {
 	const card = await openInvitation(page, 'cancel');
 	await expect(card.getByRole('status')).toHaveText('This event was cancelled.');
-	await expect(card.getByRole('button', { name: 'Accept' })).toHaveCount(0);
+	for (const name of ['Accept', 'Update calendar', 'Mark cancelled in calendar']) {
+		await expect(card.getByRole('button', { name })).toHaveCount(0);
+	}
 });
 
-test('a PUBLISH of an all-day event offers a disabled Add to calendar', async ({ page }) => {
+test('a PUBLISH of an all-day event offers Add to calendar', async ({ page }) => {
 	const card = await openInvitation(page, 'publish');
 	await expect(card).toContainText('Thu, Dec 24, 2026 – Fri, Dec 25, 2026 · All day');
-	await expect(card.getByRole('button', { name: 'Add to calendar' })).toBeDisabled();
+	await expect(card.getByRole('button', { name: 'Add to calendar' })).toBeEnabled();
 	await expect(page.getByText('This message has more invitations than are shown.')).toBeVisible();
 });
 

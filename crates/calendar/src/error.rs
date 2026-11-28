@@ -17,3 +17,14 @@ pub enum EventError {
     #[error("VEVENT {uid} has no valid DTSTART")]
     InvalidStart { uid: String },
 }
+
+/// Why an iTIP or `.ics` transform failed.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ItipError {
+    #[error(transparent)]
+    Parse(#[from] ParseError),
+    #[error("no VEVENT {uid} with that RECURRENCE-ID")]
+    EventNotFound { uid: String },
+    #[error("{address} is not an attendee")]
+    NotAttendee { address: String },
+}

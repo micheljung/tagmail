@@ -181,6 +181,39 @@ impl Outgoing {
     }
 }
 
+/// An iMIP message (RFC 6047): `text/plain` with `subject` for mail clients
+/// that ignore calendars, and the iTIP object as
+/// `text/calendar; method=<method>`, as alternatives of one another.
+#[cfg(feature = "calendar")]
+pub(crate) fn itip_mime(
+    from: &AddressDto,
+    to: &[AddressDto],
+    subject: &str,
+    message_id: &str,
+    date: i64,
+    ics: &str,
+    method: &tagmail_calendar::Method,
+) -> io::Result<Vec<u8>> {
+    let calendar = mail_builder::headers::content_type::ContentType::new("text/calendar")
+        .attribute("method", method.as_str())
+        .attribute("charset", "UTF-8");
+    let body = MimePart::new(
+        "multipart/alternative",
+        vec![
+            MimePart::new("text/plain", subject),
+            MimePart::new(calendar, ics),
+        ],
+    );
+    MessageBuilder::new()
+        .from(address(from))
+        .to(list(to))
+        .subject(subject)
+        .date(date)
+        .message_id(message_id)
+        .body(body)
+        .write_to_vec()
+}
+
 fn placeholder_token() -> String {
     let mut random = [0u8; MESSAGE_ID_RANDOM];
     getrandom::fill(&mut random).expect("the OS random source is available");
@@ -321,6 +354,45 @@ mod tests {
                 path: file(dir, "report.pdf", PDF),
             }],
         }
+    }
+
+    #[cfg(feature = "calendar")]
+    #[test]
+    fn itip_message_offers_text_and_the_calendar_method() {
+        let ics = "BEGIN:VCALENDAR\r\nMETHOD:REPLY\r\nEND:VCALENDAR\r\n";
+        let raw = super::itip_mime(
+            &addr(Some("Bob"), "bob@example.org"),
+            &[addr(None, "alice@example.com")],
+            "Accepted: Quarterly planning",
+            "r1@example.org",
+            1_790_000_000,
+            ics,
+            &tagmail_calendar::Method::Reply,
+        )
+        .unwrap();
+
+        let parsed = mail_parser::MessageParser::default().parse(&raw).unwrap();
+        assert_eq!(parsed.message_id(), Some("r1@example.org"));
+        assert_eq!(parsed.subject(), Some("Accepted: Quarterly planning"));
+        let root = parsed.content_type().unwrap();
+        assert_eq!(root.ctype(), "multipart");
+        assert_eq!(root.subtype(), Some("alternative"));
+        assert_eq!(
+            parsed.body_text(0).as_deref(),
+            Some("Accepted: Quarterly planning")
+        );
+        let calendar = parsed
+            .parts()
+            .find(|part| part.content_type().and_then(|c| c.subtype()) == Some("calendar"))
+            .expect("text/calendar part");
+        let content_type = calendar.content_type().unwrap();
+        assert_eq!(content_type.attribute("method"), Some("REPLY"));
+        assert!(
+            content_type
+                .attribute("charset")
+                .is_some_and(|c| c.eq_ignore_ascii_case("utf-8"))
+        );
+        assert_eq!(calendar.text().as_deref(), Some(ics));
     }
 
     #[test]

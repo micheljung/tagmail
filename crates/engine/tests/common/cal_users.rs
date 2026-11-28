@@ -25,7 +25,7 @@ pub static CAL_USERS: &[(&str, &str)] = &[
         "cal11",
     ),
     ("rsvp_server_mode_queues_no_outbox", "cal12"),
-    ("rsvp_412_rebases_partstat", "cal13"),
+    ("organizer_takeover_is_not_auto_applied", "cal13"),
     ("put_412_server_wins_and_keeps_rejected_ics", "cal14"),
     (
         "client_mode_put_failure_shows_reply_sent_not_saved",
@@ -53,6 +53,33 @@ pub static CAL_USERS: &[(&str, &str)] = &[
     ("ctag_etag_fallback_when_sync_collection_disabled", "cal26"),
     ("cache_wipe_rebuilds_identical_href_etag_set", "cal27"),
     ("dav_radicale_suite", "cal28"),
+    ("accept_stores_partstat", "cal29"),
+    ("decline_keeps_declined", "cal30"),
+    ("decline_tolerates_server_removal", "cal31"),
+    ("higher_sequence_auto_applies_when_responded", "cal32"),
+    ("cancel_sets_cancelled", "cal33"),
+    ("lower_sequence_marks_outdated", "cal34"),
+    ("spoofed_organizer_is_not_auto_applied", "cal35"),
+    (
+        "forged_from_without_authentication_results_is_manual",
+        "cal36",
+    ),
+    (
+        "authentication_results_from_untrusted_authserv_id_ignored",
+        "cal37",
+    ),
+    ("dkim_pass_unaligned_domain_is_manual", "cal38"),
+    ("invitation_get_has_no_side_effects", "cal39"),
+    ("resync_does_not_requeue_apply", "cal40"),
+    (
+        "fallback_mapping_targets_other_account_and_op_is_owned_by_source",
+        "cal41",
+    ),
+    (
+        "fallback_mapping_targets_other_account_and_op_is_owned_by_source/calendar",
+        "cal42",
+    ),
+    ("no_calendar_still_sends_reply", "cal43"),
 ];
 
 pub fn user_of(test: &str) -> &'static str {

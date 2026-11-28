@@ -294,7 +294,13 @@ async fn identity_changes_are_published() {
     let ids = f.engine.identities().await.unwrap();
     assert_eq!(ids.len(), 1);
     assert!(ids[0].id == first && ids[0].is_default);
-    let page = f.cache.ctx.cache.changes_since(since, 100).await.unwrap();
+    let page = f
+        .cache
+        .ctx
+        .cache
+        .changes_since(since, 100, tagmail_core::ChangeFilter::WithCalendar)
+        .await
+        .unwrap();
     let Changes::Page { changes, .. } = page else {
         panic!("gone")
     };

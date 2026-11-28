@@ -13,6 +13,7 @@ calendar = [
     "dep:tagmail-calendar",
     "dep:tagmail-dav",
     "dep:time",
+    "tagmail-api-core/calendar",
     "dep:url",
     "dep:zeroize",
 ]
@@ -51,6 +52,7 @@ url = { workspace = true, optional = true }
 zeroize = { workspace = true, optional = true }
 
 [dev-dependencies]
+tagmail-api-core = { workspace = true, features = ["sqlite"] }
 proptest.workspace = true
 time = { workspace = true, features = ["macros"] }
 zeroize.workspace = true

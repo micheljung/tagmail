@@ -2,6 +2,8 @@
 //! TypeScript types do not depend on the `calendar` feature.
 
 use serde::{Deserialize, Deserializer, Serialize};
+
+use crate::ops_dto::CalReplyStateDto;
 use ts_rs::TS;
 
 /// `GET /api/messages/{id}/invitation`: the invitation card and what
@@ -26,6 +28,9 @@ pub struct InvitationDto {
     /// `null` until the account's CalDAV server is known.
     pub scheduling: Option<SchedulingDto>,
     pub auto_apply: AutoApplyDto,
+    /// The update names another ORGANIZER than the stored event: never
+    /// applied without asking, and `/apply` needs `allowOrganizerChange`.
+    pub organizer_changed: bool,
 }
 
 /// The iTIP `METHOD`; `none` for a calendar without one.
@@ -254,6 +259,11 @@ pub struct StoredEventDto {
     pub partstat: Option<PartstatDto>,
     pub sequence: u32,
     pub status: Option<EventStatusDto>,
+    /// The REPLY of my last RSVP to this event; `cancelled` is "Reply not
+    /// sent" (cancelled in the outbox after the calendar was written).
+    pub reply_state: Option<CalReplyStateDto>,
+    /// My PARTSTAT before the RSVP whose reply was not sent.
+    pub revert_partstat: Option<PartstatDto>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
@@ -353,4 +363,107 @@ pub enum WeekdayDto {
     Fr,
     Sa,
     Su,
+}
+
+/// One instance of a cached event; times are Unix seconds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct EventInstanceDto {
+    pub account_id: i64,
+    pub calendar_href: String,
+    pub href: String,
+    pub uid: String,
+    pub recurrence_id: Option<String>,
+    pub start: i64,
+    pub end: i64,
+    pub all_day: bool,
+    pub status: Option<EventStatusDto>,
+    pub partstat: Option<PartstatDto>,
+}
+
+/// A cached calendar object resource with its iCalendar text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CalEventDto {
+    pub account_id: i64,
+    pub calendar_href: String,
+    pub href: String,
+    pub etag: Option<String>,
+    pub uid: String,
+    pub sequence: u32,
+    pub status: Option<EventStatusDto>,
+    pub partstat: Option<PartstatDto>,
+    pub organizer: Option<String>,
+    pub ics: String,
+}
+
+/// The answers an RSVP can give.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RsvpPartstatDto {
+    Accepted,
+    Tentative,
+    Declined,
+    /// Only with `sendReply: false`.
+    NeedsAction,
+}
+
+/// `POST /api/calendar/rsvp`. Answers `OpDto`: `202` when queued, `200`
+/// for a known `opId`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CalRsvpDto {
+    /// Client-generated, as for `POST /api/ops`.
+    pub op_id: String,
+    pub message_id: String,
+    pub partstat: RsvpPartstatDto,
+    /// The identity the REPLY is sent from; default: the account identity
+    /// that is my ATTENDEE.
+    #[serde(default)]
+    #[ts(optional)]
+    pub identity_id: Option<i64>,
+    /// Answers an update whose ORGANIZER differs from the stored event's;
+    /// without it such an RSVP answers 422.
+    #[serde(default)]
+    #[ts(optional)]
+    pub allow_organizer_change: Option<bool>,
+    /// `false` writes the answer to the calendar only, e.g. to revert to
+    /// `StoredEventDto::revert_partstat`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub send_reply: Option<bool>,
+}
+
+/// `POST /api/calendar/import`: puts the events of a calendar part into a
+/// calendar without sending mail. Answers `OpDto`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CalImportDto {
+    pub op_id: String,
+    pub message_id: String,
+    /// The calendar part; default: every calendar part.
+    #[serde(default)]
+    #[ts(optional)]
+    pub part_id: Option<u32>,
+    /// Default: the invitation's target calendar; both or neither.
+    #[serde(default)]
+    #[ts(optional)]
+    pub account_id: Option<i64>,
+    #[serde(default)]
+    #[ts(optional)]
+    pub calendar_href: Option<String>,
+}
+
+/// `POST /api/calendar/apply`: applies an updated invitation or a
+/// cancellation to the stored event ("Update calendar"). Answers `OpDto`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CalApplyDto {
+    pub op_id: String,
+    pub message_id: String,
+    /// Applies an update whose ORGANIZER differs from the stored event's;
+    /// without it such an update answers 422.
+    #[serde(default)]
+    #[ts(optional)]
+    pub allow_organizer_change: Option<bool>,
 }

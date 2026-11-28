@@ -1,6 +1,6 @@
 import type { ThreadRowDto } from '@tagmail/api-types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, type NewOpDto, type OpDto, type ViewId } from '../transport';
+import { ApiError, type CalOpInfoDto, type NewOpDto, type OpDto, type ViewId } from '../transport';
 import type { OpIntent } from './effects';
 import {
 	MAX_RESENDS,
@@ -8,7 +8,8 @@ import {
 	type OpList,
 	type OpPhase,
 	type OpsApi,
-	type Removed
+	type Removed,
+	type TrackedOp
 } from './ops.svelte';
 
 function row(id: number, patch: Partial<ThreadRowDto> = {}): ThreadRowDto {
@@ -84,7 +85,9 @@ function dto(request: NewOpDto, status: OpDto['status'], error: string | null = 
 		threadIds: request.threadIds ?? [],
 		label: request.label ?? null,
 		mailboxId: request.mailboxId ?? null,
-		createdAt: 1
+		createdAt: 1,
+		domain: 'mail',
+		calendar: null
 	};
 }
 
@@ -318,6 +321,89 @@ describe('OpsStore', () => {
 		expect(store.project(row(9)).starred).toBe(false);
 		store.changes(page('delete', { opId: 'tab-2' }));
 		expect(store.unsynced).toEqual([]);
+	});
+
+	it('ignores change entities it does not know', () => {
+		const { store } = setup();
+		const change = (entity: string) => ({
+			seq: 1,
+			entity: entity as 'unknown',
+			id: 1,
+			op: { kind: 'upsert' as const },
+			payload: dto({ opId: 'x', kind: 'star', threadIds: [1] }, 'pending')
+		});
+		store.changes({
+			changes: [change('event'), change('calendar'), change('something_new')],
+			next: 'e:1',
+			more: false
+		});
+		expect(store.unsynced).toEqual([]);
+	});
+
+	describe('calendar ops', () => {
+		const calendar: CalOpInfoDto = {
+			targetAccountId: 1,
+			calendarHref: '/dav/personal/',
+			uid: 'standup-1',
+			conflict: null,
+			replyOpId: null,
+			reply: null
+		};
+		const rsvp = (status: OpDto['status'], patch: Partial<CalOpInfoDto> = {}): OpDto => ({
+			...dto({ opId: 'cal-1', kind: 'cal.rsvp', threadIds: [] }, status),
+			domain: 'cal',
+			calendar: { ...calendar, ...patch }
+		});
+		const event = (payload: OpDto | { opId: string }, kind: 'upsert' | 'delete' = 'upsert') => ({
+			changes: [{ seq: 2, entity: 'cal_op' as const, id: 1, op: { kind }, payload }],
+			next: 'e:2',
+			more: false
+		});
+
+		it('follows a tracked op through cal_op events and says when it is done', () => {
+			const { store } = setup();
+			const done = vi.fn();
+			store.onCalendarDone(done);
+			store.track(rsvp('pending'));
+			expect(store.calendarOp('standup-1')).toMatchObject({ status: 'pending' });
+			store.changes(event(rsvp('done')));
+			expect(store.calendarOp('standup-1')).toBeUndefined();
+			expect(done).toHaveBeenCalledOnce();
+			const finished = done.mock.calls[0] as [TrackedOp];
+			expect(finished[0].calendar?.uid).toBe('standup-1');
+		});
+
+		it('keeps a server_won conflict as a failed op with the conflict flag', () => {
+			const { store, toasts } = setup();
+			store.track(rsvp('pending'));
+			store.changes(event({ ...rsvp('failed', { conflict: 'server_won' }), error: 'etag' }));
+			expect(store.unsynced).toMatchObject([
+				{ status: 'failed', calendar: { conflict: 'server_won' } }
+			]);
+			expect(store.describe(store.unsynced[0])).toBe('Reply to invitation standup-1');
+			expect(toasts).toEqual([]);
+		});
+
+		it('re-applies through the retry route and discards through delete', async () => {
+			const { store, mocks } = setup();
+			store.track(rsvp('failed', { conflict: 'server_won' }));
+			mocks.retryOp.mockResolvedValueOnce(rsvp('pending'));
+			await store.retry(store.unsynced[0]);
+			expect(mocks.retryOp).toHaveBeenCalledWith('cal-1');
+			expect(store.unsynced[0]).toMatchObject({ status: 'pending' });
+			await store.discard(store.unsynced[0]);
+			expect(mocks.discardOp).toHaveBeenCalledWith('cal-1');
+			expect(store.unsynced).toEqual([]);
+		});
+
+		it('tells listeners about an op that finished before its answer arrived', () => {
+			const { store } = setup();
+			const done = vi.fn();
+			store.onCalendarDone(done);
+			store.changes(event(rsvp('done')));
+			expect(done).toHaveBeenCalledOnce();
+			expect(store.unsynced).toEqual([]);
+		});
 	});
 
 	it('removing the filtered label drops the thread from that label list only', () => {

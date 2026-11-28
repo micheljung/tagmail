@@ -116,7 +116,10 @@
 				</div>
 			{/if}
 			{#if detail}
-				{#if detail.hasInvitation}<InvitationCard messageId={message.id} />{/if}
+				{#if detail.hasInvitation}<InvitationCard
+						messageId={message.id}
+						accountId={detail.accountId}
+					/>{/if}
 				<MessageFrame
 					messageId={message.id}
 					images={showImages || detail.imagesAllowed}

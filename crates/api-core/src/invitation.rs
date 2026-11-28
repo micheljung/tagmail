@@ -19,20 +19,12 @@ impl<S: Store> Api<S> {
         if !record.has_calendar {
             return Ok(card::no_invitation());
         }
-        let source = match self.store.calendar_source(record.id).await? {
-            Some(source) => source,
-            None => {
-                if let Err(resp) = self.fetch(&record).await? {
-                    return Ok(resp);
-                }
-                match self.store.calendar_source(record.id).await? {
-                    Some(source) => source,
-                    None => return Ok(crate::messages::evicted()),
-                }
-            }
+        let source = match self.calendar_source_of(&record).await? {
+            Ok(source) => source,
+            Err(resp) => return Ok(resp),
         };
         let card = crate::messages::blocking(move || card::invitation(&source)).await?;
-        let (mut dto, versions) = match card {
+        let (mut dto, versions, sender) = match card {
             Ok(card) => card,
             Err(resp) => return Ok(resp),
         };
@@ -40,10 +32,32 @@ impl<S: Store> Api<S> {
         uids.dedup();
         let context = self
             .store
-            .invitation_context(record.account_id, uids)
+            .invitation_context(record.account_id, record.id, uids)
             .await?;
-        card::apply_context(&mut dto, &versions, context);
+        card::apply_context(&mut dto, &versions, &sender, context);
         Ok(Response::json(200, &dto))
+    }
+}
+
+impl<S: Store> Api<S> {
+    /// The calendar parts of `record`, fetching the raw message first when
+    /// it is not cached.
+    #[cfg(feature = "calendar")]
+    pub(crate) async fn calendar_source_of(
+        &self,
+        record: &crate::store::MessageRecord,
+    ) -> Result<Result<crate::mime::reduce::CalendarParts, Response>, StoreError> {
+        if let Some(source) = self.store.calendar_source(record.id).await? {
+            return Ok(Ok(source));
+        }
+        if let Err(resp) = self.fetch(record).await? {
+            return Ok(Err(resp));
+        }
+        Ok(self
+            .store
+            .calendar_source(record.id)
+            .await?
+            .ok_or_else(crate::messages::evicted))
     }
 }
 
@@ -51,7 +65,7 @@ impl<S: Store> Api<S> {
 pub(crate) mod card {
     use std::collections::HashMap;
 
-    use mail_parser::{MessageParser, html_to_text};
+    use mail_parser::html_to_text;
     use tagmail_calendar::{
         Event, EventStatus, EventTime, Frequency, Method, ParticipationStatus, Recurrence,
     };
@@ -59,14 +73,13 @@ pub(crate) mod card {
 
     use crate::api::Response;
     use crate::calendar_dto::{
-        AutoApplyDto, FrequencyDto, InvitationAttendeeDto, InvitationDto, InvitationEventDto,
-        InvitationMethodDto, InvitationOrganizerDto, PartstatDto, RecurrenceDto, SenderAuthDto,
-        WeekdayDto, WeekdayNumDto,
+        AutoApplyDto, EventStatusDto, FrequencyDto, InvitationAttendeeDto, InvitationDto,
+        InvitationEventDto, InvitationMethodDto, InvitationOrganizerDto, PartstatDto,
+        RecurrenceDto, SenderAuthDto, WeekdayDto, WeekdayNumDto,
     };
+    use crate::itip_auth::{self, IncomingVersion, StoredVersion};
     use crate::mime::reduce::CalendarParts;
     use crate::store::{InvitationContext, StoredCopy};
-
-    const FROM: &[u8] = b"from";
 
     pub(crate) fn no_invitation() -> Response {
         Response::error(404, "no_invitation", "the message has no invitation")
@@ -93,13 +106,32 @@ pub(crate) mod card {
         pub sequence: u32,
         /// Unix seconds.
         pub dtstamp: Option<i64>,
+        pub method: Option<Method>,
+    }
+
+    /// Who sent the invitation, for [`itip_auth::sender_auth`] once the
+    /// trusted authserv-id is known.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub(crate) struct Sender {
+        pub headers: Vec<u8>,
+        /// `None` when no event's method changes a calendar; else whether
+        /// `From` is the organizer (attendee of a REPLY) of every such
+        /// event, leniently and strictly (see [`itip_auth::from_matches`]).
+        pub matches: Option<(bool, bool)>,
+        /// The first UID's ORGANIZER.
+        pub organizer: Option<tagmail_calendar::Organizer>,
+        /// Every VEVENT of the first UID is an override.
+        pub overrides_only: bool,
+        /// When the first UID's last instance ends, Unix seconds; `None`
+        /// for a recurring event.
+        pub last_end: Option<i64>,
     }
 
     /// The card of `source` with each event's version; what is stored
     /// comes from [`apply_context`].
     pub(crate) fn invitation(
         source: &CalendarParts,
-    ) -> Result<(InvitationDto, Vec<Version>), Response> {
+    ) -> Result<(InvitationDto, Vec<Version>, Sender), Response> {
         if source.parts.is_empty() {
             return Err(no_invitation());
         }
@@ -158,11 +190,45 @@ pub(crate) mod card {
                 master: s.event.recurrence_id.is_none(),
                 sequence: s.event.sequence,
                 dtstamp: s.event.dtstamp.map(OffsetDateTime::unix_timestamp),
+                method: s.method.clone(),
             })
             .collect();
+        let checked: Vec<&Sourced> = events.iter().filter(|s| changes_calendar(s)).collect();
+        let from = itip_auth::from_address(&source.headers);
+        let check = |strict: bool| {
+            from.as_deref().is_some_and(|from| {
+                checked
+                    .iter()
+                    .all(|s| itip_auth::from_matches(s.method.as_ref(), &s.event, from, strict))
+            })
+        };
+        let first: Vec<&Event> = events
+            .first()
+            .map(|f| {
+                events
+                    .iter()
+                    .filter(|s| s.event.uid == f.event.uid)
+                    .map(|s| &s.event)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let sender = Sender {
+            headers: source.headers.clone(),
+            matches: (!checked.is_empty()).then(|| (check(false), check(true))),
+            organizer: itip_auth::uid_organizer(&first).cloned(),
+            overrides_only: !first.is_empty() && first.iter().all(|e| e.recurrence_id.is_some()),
+            last_end: (!first.iter().any(|e| e.recurrence.is_some()))
+                .then(|| {
+                    first
+                        .iter()
+                        .map(|e| e.end.as_ref().unwrap_or(&e.start).instant.unix_timestamp())
+                        .max()
+                })
+                .flatten(),
+        };
         let dto = InvitationDto {
             method,
-            sender_auth: sender_auth(&events, &source.headers),
+            sender_auth: SenderAuthDto::UntrustedConfig,
             events: events.iter().map(event_dto).collect(),
             too_large,
             truncated: source.omitted > 0,
@@ -171,8 +237,9 @@ pub(crate) mod card {
             target: None,
             scheduling: None,
             auto_apply: AutoApplyDto::None,
+            organizer_changed: false,
         };
-        Ok((dto, versions))
+        Ok((dto, versions, sender))
     }
 
     /// Fills in the stored copy (in the target calendar when it has one)
@@ -180,8 +247,14 @@ pub(crate) mod card {
     pub(crate) fn apply_context(
         dto: &mut InvitationDto,
         versions: &[Version],
+        sender: &Sender,
         context: InvitationContext,
     ) {
+        dto.sender_auth = itip_auth::sender_auth_of(
+            sender.matches,
+            &sender.headers,
+            context.authserv_id.as_deref(),
+        );
         let in_target = |copy: &&StoredCopy| {
             context.target.as_ref().is_some_and(|t| {
                 t.account_id == copy.stored.account_id
@@ -204,6 +277,34 @@ pub(crate) mod card {
                 })
             })
             .any(|newest| stored_of(&newest.uid).is_some_and(|copy| older(newest, copy)));
+        let first_uid = versions.first().map(|v| v.uid.as_str());
+        let newest = newest_master(versions, first_uid).or_else(|| {
+            versions
+                .iter()
+                .filter(|v| Some(v.uid.as_str()) == first_uid)
+                .max_by_key(|v| (v.sequence, v.dtstamp))
+        });
+        let held = stored.map(stored_version);
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let decision = newest.map(|newest| {
+            itip_auth::decide(&itip_auth::UpdateCheck {
+                method: newest.method.as_ref(),
+                incoming: IncomingVersion {
+                    sequence: newest.sequence,
+                    dtstamp: newest.dtstamp,
+                },
+                organizer: sender.organizer.as_ref(),
+                overrides_only: sender.overrides_only,
+                past: sender.last_end.is_some_and(|end| end < now),
+                stored: held.as_ref(),
+                sender: dto.sender_auth,
+                received: context.received,
+                now,
+                has_target: context.target.is_some(),
+            })
+        });
+        dto.auto_apply = decision.map_or(AutoApplyDto::None, |d| d.auto_apply);
+        dto.organizer_changed = decision.is_some_and(|d| d.organizer_changed);
         dto.stored = stored.map(|c| c.stored.clone());
         dto.target = context.target;
         dto.scheduling = context.scheduling;
@@ -222,52 +323,38 @@ pub(crate) mod card {
         }
     }
 
-    /// The single `From` mailbox; `None` for no `From`, several `From`
-    /// fields, or a `From` with several mailboxes.
-    fn from_address(headers: &[u8]) -> Option<String> {
-        let from_fields = headers
-            .split(|b| *b == b'\n')
-            .filter(|line| {
-                line.len() > FROM.len()
-                    && line[..FROM.len()].eq_ignore_ascii_case(FROM)
-                    && line[FROM.len()..].trim_ascii_start().starts_with(b":")
-            })
-            .count();
-        if from_fields != 1 {
-            return None;
-        }
-        let message = MessageParser::new().parse(headers)?;
-        let [address] = crate::mime::addresses(message.from()).try_into().ok()?;
-        Some(address.email)
+    fn changes_calendar(s: &Sourced) -> bool {
+        matches!(
+            s.method,
+            Some(Method::Request | Method::Cancel | Method::Reply)
+        )
     }
 
-    /// Plan §3.4: only iTIP methods that change a calendar are checked
-    /// against `From`. No authserv-id can be trusted before the owner
-    /// confirms one, so a matching sender is still only `untrusted_config`.
-    fn sender_auth(events: &[Sourced], headers: &[u8]) -> SenderAuthDto {
-        let checked: Vec<&Sourced> = events
+    /// The newest master version of `uid`.
+    fn newest_master<'a>(versions: &'a [Version], uid: Option<&str>) -> Option<&'a Version> {
+        versions
             .iter()
-            .filter(|s| {
-                matches!(
-                    s.method,
-                    Some(Method::Request | Method::Cancel | Method::Reply)
-                )
-            })
-            .collect();
-        if checked.is_empty() {
-            return SenderAuthDto::UntrustedConfig;
-        }
-        let Some(from) = from_address(headers) else {
-            return SenderAuthDto::AddressMismatch;
-        };
-        let matches = |s: &&Sourced| match s.method {
-            Some(Method::Reply) => s.event.attendees.iter().any(|a| a.matches(&from)),
-            _ => s.event.organizer.as_ref().is_some_and(|o| o.matches(&from)),
-        };
-        if checked.iter().all(matches) {
-            SenderAuthDto::UntrustedConfig
-        } else {
-            SenderAuthDto::AddressMismatch
+            .filter(|v| v.master && Some(v.uid.as_str()) == uid)
+            .max_by_key(|v| (v.sequence, v.dtstamp))
+    }
+
+    fn stored_version(copy: &StoredCopy) -> StoredVersion {
+        StoredVersion {
+            sequence: copy.stored.sequence,
+            dtstamp: copy.dtstamp,
+            cancelled: copy.stored.status == Some(EventStatusDto::Cancelled),
+            partstat: copy.stored.partstat.map(|p| {
+                match p {
+                    PartstatDto::NeedsAction => "NEEDS-ACTION",
+                    PartstatDto::Accepted => "ACCEPTED",
+                    PartstatDto::Declined => "DECLINED",
+                    PartstatDto::Tentative => "TENTATIVE",
+                    PartstatDto::Delegated => "DELEGATED",
+                    PartstatDto::Other => "OTHER",
+                }
+                .to_owned()
+            }),
+            organizer: copy.organizer.clone(),
         }
     }
 

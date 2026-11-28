@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
 use tagmail_api_core::replica_dto::SNAPSHOT_FORMAT;
 use tagmail_api_core::sqlite_store::SqliteStore;
-use tagmail_core::{CacheEpoch, ChangeCursor};
+use tagmail_core::{CacheEpoch, ChangeCursor, ChangeFilter};
 use tagmail_store::credentials::KEY_LEN;
 use tagmail_store::{BlobStore, CacheDb, ConfigDb, MasterKey};
 use zeroize::Zeroizing;
@@ -29,6 +29,9 @@ const RANDOM_NAME_BYTES: usize = 8;
 const KEY_FORMAT: &str = "replica_snapshot_format";
 const KEY_SERVER_EPOCH: &str = "replica_server_epoch";
 const KEY_CURSOR: &str = "replica_cursor";
+/// `calendar` when the replica holds calendar records; absent in replicas
+/// from before calendars.
+const KEY_INCLUDE: &str = "replica_include";
 
 /// Paths below the desktop data directory.
 #[derive(Debug, Clone)]
@@ -168,14 +171,26 @@ pub struct ReplicaMeta {
     pub snapshot_format: u32,
     pub server_epoch: CacheEpoch,
     pub cursor: ChangeCursor,
+    /// The replica holds calendar records and pulls with `include=calendar`.
+    pub calendar: bool,
 }
 
 impl ReplicaMeta {
     pub fn write(&self, tx: &Transaction<'_>) -> tagmail_store::Result<()> {
         set(tx, KEY_FORMAT, &self.snapshot_format.to_string())?;
         set(tx, KEY_SERVER_EPOCH, &self.server_epoch.to_string())?;
+        set_include(tx, self.calendar)?;
         set_cursor(tx, self.cursor)
     }
+}
+
+pub fn set_include(conn: &Connection, calendar: bool) -> tagmail_store::Result<()> {
+    let value = if calendar {
+        ChangeFilter::INCLUDE_CALENDAR
+    } else {
+        ""
+    };
+    set(conn, KEY_INCLUDE, value)
 }
 
 pub fn set_cursor(tx: &Transaction<'_>, cursor: ChangeCursor) -> tagmail_store::Result<()> {
@@ -309,6 +324,7 @@ fn inspect(
         snapshot_format: parse(KEY_FORMAT, &format)?,
         server_epoch: parse(KEY_SERVER_EPOCH, &epoch)?,
         cursor: parse(KEY_CURSOR, &cursor)?,
+        calendar: get(&conn, KEY_INCLUDE)?.as_deref() == Some(ChangeFilter::INCLUDE_CALENDAR),
     };
     if meta.snapshot_format != expected.snapshot_format {
         return Ok(Err(Discard::SnapshotFormat));
@@ -359,6 +375,7 @@ mod tests {
                 epoch: EPOCH,
                 seq: 42,
             },
+            calendar: false,
         }
     }
 

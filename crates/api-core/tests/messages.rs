@@ -18,7 +18,7 @@ use tagmail_api_core::{
     ImageProxy, MarkDeleting, MessageRecord, Method, NewAccount, ProxiedImage, ProxyError, Request,
     Response, RuntimeStatus, Store, StoreResult, ThreadDetail, ThreadRows, View, ViewIndex,
 };
-use tagmail_core::{AccountId, CacheEpoch, ChangeCursor, MessageRowId, ThreadId};
+use tagmail_core::{AccountId, CacheEpoch, ChangeCursor, ChangeFilter, MessageRowId, ThreadId};
 use zeroize::Zeroizing;
 
 const PNG: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
@@ -168,7 +168,12 @@ impl Store for Mail {
         })
     }
 
-    async fn changes_since(&self, _: ChangeCursor, _: usize) -> StoreResult<ChangePage> {
+    async fn changes_since(
+        &self,
+        _: ChangeCursor,
+        _: usize,
+        _: ChangeFilter,
+    ) -> StoreResult<ChangePage> {
         Ok(ChangePage::Gone)
     }
 

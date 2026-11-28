@@ -17,6 +17,7 @@ import type {
 	SendDto,
 	SendStatusDto
 } from '../../../packages/api-types/src/index.ts';
+import { calOp, calOpList, discardCalOp, hasCalOp, retryCalOp, resetCalOps } from './calOps.ts';
 import { accountState, currentIdentities, isMulti, replyIdentity } from './accounts.ts';
 import { ACCOUNT_B, LABELS, bPositionOf, messageById, type Address, type Row } from './fixture.ts';
 import { quotedBody } from './render.ts';
@@ -103,6 +104,8 @@ let sendMode: 'ok' | 'fail' = 'ok';
 let nextId = 1;
 let opSeq = 1;
 
+export const mailOpExists = (opId: string): boolean => ops.has(opId);
+
 export function accountOf(id: number): number {
 	return bPositionOf(id) === undefined ? 1 : ACCOUNT_B;
 }
@@ -145,6 +148,7 @@ export function resetWrites(): void {
 	sent.length = 0;
 	opsMode = 'ok';
 	sendMode = 'ok';
+	resetCalOps();
 }
 resetWrites();
 
@@ -443,6 +447,7 @@ export async function writeApi(
 		}
 		const seen = ops.get(b.opId);
 		if (seen) return ok(200, seen.dto);
+		if (hasCalOp(b.opId)) return fail(409, 'conflict', 'the op id belongs to a calendar op');
 		if (opsMode === 'reject') return fail(503, 'unavailable', 'the account is offline');
 		const accountIds = new Set(b.threadIds.map(accountOf));
 		if (accountIds.size > 1) return fail(409, 'conflict', 'send one op per account');
@@ -460,7 +465,9 @@ export async function writeApi(
 				threadIds: b.threadIds,
 				label: b.label ?? null,
 				mailboxId: b.mailboxId ?? null,
-				createdAt: Math.floor(Date.now() / 1000)
+				createdAt: Math.floor(Date.now() / 1000),
+				domain: 'mail',
+				calendar: null
 			},
 			before: new Map()
 		};
@@ -471,17 +478,35 @@ export async function writeApi(
 	if (path === '/api/ops' && method === 'GET') {
 		const status = url.searchParams.get('status');
 		return ok(200, {
-			ops: [...ops.values()]
-				.map((o) => o.dto)
-				.filter((o) => o.status !== 'done' && (!status || o.status === status))
+			ops: [
+				...[...ops.values()]
+					.map((o) => o.dto)
+					.filter((o) => o.status !== 'done' && (!status || o.status === status)),
+				...calOpList(status)
+			]
 		});
 	}
 	let m = /^\/api\/ops\/([^/]+)(\/retry)?$/.exec(path);
+	if (m && hasCalOp(decodeURIComponent(m[1]))) {
+		const opId = decodeURIComponent(m[1]);
+		const status = calOp(opId)!.status;
+		if (m[2] && method === 'POST') {
+			if (status !== 'failed') return fail(409, 'conflict', 'only a failed op can be retried');
+			return ok(202, retryCalOp(ctx, opId));
+		}
+		if (!m[2] && method === 'DELETE') {
+			discardCalOp(ctx, opId);
+			return ok(204, '');
+		}
+		return ok(200, calOp(opId));
+	}
 	if (m) {
 		const op = ops.get(decodeURIComponent(m[1]));
 		if (!op) return fail(404, 'not_found', 'no such op');
 		if (m[2] && method === 'POST') {
-			if (op.dto.status === 'failed') activate(ctx, op);
+			if (op.dto.status !== 'failed')
+				return fail(409, 'conflict', 'only a failed op can be retried');
+			activate(ctx, op);
 			return ok(202, op.dto);
 		}
 		if (!m[2] && method === 'DELETE') {

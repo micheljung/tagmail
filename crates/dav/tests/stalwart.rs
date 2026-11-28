@@ -1,6 +1,6 @@
 //! CalDAV client against Stalwart (`cargo xtask stalwart up`):
-//! `TAGMAIL_IMAP_SERVER=stalwart cargo test -p tagmail-dav --features
-//! caldav-tests --test stalwart`. `TAGMAIL_CALDAV_ADDR` overrides the
+//! `cargo test -p tagmail-dav --features caldav-tests --test stalwart`; CI
+//! selects it in the Stalwart leg only. `TAGMAIL_CALDAV_ADDR` overrides the
 //! published HTTP port. The suite uses the calendars of `user1`, which no
 //! other CalDAV test touches; every test works in its own collection.
 
@@ -17,28 +17,24 @@ const USER: &str = "user1";
 const PASSWORD: &str = "pass1";
 const MAIL_DOMAIN: &str = "tagmail.test";
 
-fn server() -> Option<Server> {
-    if !std::env::var("TAGMAIL_IMAP_SERVER").is_ok_and(|s| s == "stalwart") {
-        eprintln!("skipped: set TAGMAIL_IMAP_SERVER=stalwart");
-        return None;
-    }
-    Some(Server {
+fn server() -> Server {
+    Server {
         addr: std::env::var("TAGMAIL_CALDAV_ADDR").unwrap_or_else(|_| DEFAULT_ADDR.to_owned()),
         user: USER,
         password: PASSWORD,
         home: format!("/dav/cal/{USER}/"),
-    })
+    }
 }
 
 #[tokio::test]
 async fn manual_url() {
-    let Some(server) = server() else { return };
+    let server = server();
     common::manual_url(&server, "manual_url").await;
 }
 
 #[tokio::test]
 async fn well_known_stalwart() {
-    let Some(server) = server() else { return };
+    let server = server();
     let calendar = server.calendar("well_known").await;
     let env = DiscoveryEnv::system().with_base_url(MAIL_DOMAIN, server.base());
     let target = DiscoveryTarget {
@@ -67,25 +63,25 @@ async fn well_known_stalwart() {
 
 #[tokio::test]
 async fn put_get_delete_with_if_match() {
-    let Some(server) = server() else { return };
+    let server = server();
     common::put_get_delete_with_if_match(&server, "put_get_delete").await;
 }
 
 #[tokio::test]
 async fn stale_if_match_is_412() {
-    let Some(server) = server() else { return };
+    let server = server();
     common::stale_if_match_is_412(&server, "stale_if_match").await;
 }
 
 #[tokio::test]
 async fn etag_listing_and_multiget() {
-    let Some(server) = server() else { return };
+    let server = server();
     common::etag_listing_and_multiget(&server, "etag_listing").await;
 }
 
 #[tokio::test]
 async fn sync_collection_incremental() {
-    let Some(server) = server() else { return };
+    let server = server();
     common::sync_collection_incremental(
         &server,
         "sync_collection",
@@ -96,7 +92,7 @@ async fn sync_collection_incremental() {
 
 #[tokio::test]
 async fn no_uid_conflict() {
-    let Some(server) = server() else { return };
+    let server = server();
     let calendar = server.calendar("no_uid_conflict").await;
     let client = server.client();
     let uid = "no-uid-conflict@tagmail.test";

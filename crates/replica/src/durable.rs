@@ -13,6 +13,8 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/durable/V1__init.sql"),
     include_str!("../migrations/durable/V2__server_binding.sql"),
     include_str!("../migrations/durable/V3__intent_sent_at.sql"),
+    include_str!("../migrations/durable/V4__cal_intent.sql"),
+    include_str!("../migrations/durable/V5__cal_intent_server.sql"),
 ];
 
 pub const BOUND_SERVER_KEY: &str = "bound_server";
@@ -102,6 +104,11 @@ impl Durable {
                 )?;
                 tx.execute("UPDATE intent SET other_server = 1", [])?;
                 tx.execute(
+                    "UPDATE cal_intent SET state = 'failed', error = ?1, next_at = NULL
+                     WHERE state IN ('pending', 'sent')",
+                    [FROM_OTHER_SERVER],
+                )?;
+                tx.execute(
                     "UPDATE outbox SET state = 'failed', error = ?1, next_at = NULL
                      WHERE state != 'sent'",
                     [FROM_OTHER_SERVER],
@@ -132,6 +139,20 @@ impl Durable {
         )?;
         Ok(())
     }
+}
+
+/// The next seq of a mail or calendar intent, from one counter that never
+/// goes back, so listed ops keep their order and seqs are never reused.
+pub(crate) fn next_op_seq(conn: &Connection) -> Result<i64> {
+    let value: String = conn.query_row(
+        "UPDATE meta SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) \
+         WHERE key = 'op_seq' RETURNING value",
+        [],
+        |r| r.get(0),
+    )?;
+    value
+        .parse()
+        .map_err(|_| Error::Corrupt(format!("meta op_seq = {value:?}")))
 }
 
 fn migrate(conn: &mut Connection) -> Result<()> {
@@ -232,6 +253,93 @@ mod tests {
             ("failed", FROM_OTHER_SERVER, true)
         );
         assert_eq!(durable.bind_server(&b).unwrap(), Binding::Bound);
+    }
+
+    /// A durable store left at `version` by an older build.
+    fn at_version(path: &Path, version: usize) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        for sql in &MIGRATIONS[..version] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", version as i64)
+            .unwrap();
+        conn
+    }
+
+    #[test]
+    fn an_upgrade_from_before_calendars_keeps_queued_intents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("replica-durable.db");
+        at_version(&path, 3)
+            .execute_batch(
+                "INSERT INTO intent (op_id, seq, kind, account_id, email_ids, created_at, state)
+                 VALUES ('m-1', 1, 'archive', 1, '[]', 0, 'pending'),
+                        ('m-2', 4, 'star', 1, '[]', 0, 'sent');",
+            )
+            .unwrap();
+
+        let durable = Durable::open(&path).unwrap();
+
+        assert_eq!(durable.schema().unwrap(), DURABLE_SCHEMA);
+        let mail: i64 = durable
+            .conn()
+            .query_row("SELECT count(*) FROM intent", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mail, 2);
+        assert_eq!(next_op_seq(&durable.conn()).unwrap(), 5);
+    }
+
+    #[test]
+    fn an_upgrade_of_calendar_intents_never_reuses_a_seq() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("replica-durable.db");
+        at_version(&path, 4)
+            .execute_batch(
+                "INSERT INTO intent (op_id, seq, kind, account_id, email_ids, created_at, state)
+                 VALUES ('m-1', 2, 'archive', 1, '[]', 0, 'pending');
+                 INSERT INTO cal_intent (op_id, seq, kind, account_id, email_id, payload,
+                     created_at, state)
+                 VALUES ('c-1', 5, 'rsvp', 1, 'g:1', '{}', 0, 'sent'),
+                        ('c-2', 6, 'apply', 1, 'g:2', '{}', 0, 'pending');
+                 INSERT INTO cal_intent (op_id, seq, kind, account_id, email_id, payload,
+                     created_at, state, sent_at, error)
+                 VALUES ('c-3', 3, 'rsvp', 1, 'g:3', '{}', 0, 'failed', 1, 'PUT failed'),
+                        ('c-4', 4, 'rsvp', 1, 'g:4', '{}', 0, 'failed', 1,
+                         'No longer on the server');",
+            )
+            .unwrap();
+
+        let durable = Durable::open(&path).unwrap();
+
+        let kept: Vec<(String, bool)> = {
+            let conn = durable.conn();
+            let mut stmt = conn
+                .prepare("SELECT op_id, on_server FROM cal_intent ORDER BY seq")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(
+            kept,
+            [
+                ("c-3".into(), true),
+                ("c-4".into(), false),
+                ("c-1".into(), true),
+                ("c-2".into(), false)
+            ]
+        );
+        durable
+            .conn()
+            .execute(
+                "DELETE FROM cal_intent WHERE op_id IN ('c-2', 'c-3', 'c-4')",
+                [],
+            )
+            .unwrap();
+        let next = || next_op_seq(&durable.conn()).unwrap();
+        assert_eq!(next(), 7, "after every seq of both tables");
+        assert_eq!(next(), 8);
     }
 
     #[test]

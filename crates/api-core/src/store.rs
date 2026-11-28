@@ -4,15 +4,19 @@
 
 use std::fmt;
 use std::future::Future;
+use std::ops::Range;
 use std::pin::Pin;
 use std::str::FromStr;
 
 use tagmail_core::query::{self, Query, QueryError};
-use tagmail_core::{AccountId, ChangeCursor, LabelKey, MailboxRowId, MessageRowId, ThreadId};
+use tagmail_core::{
+    AccountId, ChangeCursor, ChangeFilter, LabelKey, MailboxRowId, MessageRowId, ThreadId,
+};
 use zeroize::Zeroizing;
 
 use crate::calendar_dto::{
-    CaldavSettingsDto, CalendarDto, CalendarTargetDto, SchedulingDto, StoredEventDto,
+    CalEventDto, CaldavSettingsDto, CalendarDto, CalendarTargetDto, EventInstanceDto,
+    SchedulingDto, StoredEventDto,
 };
 use crate::dto::{
     AccountDto, AccountStateDto, AccountTestDto, AddressDto, ChangeDto, LabelDto, MailboxDto,
@@ -309,6 +313,8 @@ pub struct StoredCopy {
     pub uid: String,
     /// The stored master's DTSTAMP, Unix seconds.
     pub dtstamp: Option<i64>,
+    /// The stored ORGANIZER calendar address.
+    pub organizer: Option<String>,
     pub stored: StoredEventDto,
 }
 
@@ -319,6 +325,10 @@ pub struct InvitationContext {
     pub stored: Vec<StoredCopy>,
     pub target: Option<CalendarTargetDto>,
     pub scheduling: Option<SchedulingDto>,
+    /// The receiving account's trusted `Authentication-Results` id.
+    pub authserv_id: Option<String>,
+    /// The message's INTERNALDATE, Unix seconds, when known.
+    pub received: Option<i64>,
 }
 
 /// Read access to mail data and the change log, plus account persistence.
@@ -340,11 +350,13 @@ pub trait Store: Send + Sync + 'static {
     /// order, read in one snapshot with their cursor.
     fn threads(&self, ids: Vec<ThreadId>) -> impl Future<Output = StoreResult<ThreadRows>> + Send;
 
-    /// Up to `limit` changes after `since`.
+    /// Up to `limit` of the changes after `since` that `filter` lets
+    /// through; with none left beyond them, `next` is the head.
     fn changes_since(
         &self,
         since: ChangeCursor,
         limit: usize,
+        filter: ChangeFilter,
     ) -> impl Future<Output = StoreResult<ChangePage>> + Send;
 
     fn accounts(&self) -> impl Future<Output = StoreResult<Vec<AccountSummary>>> + Send;
@@ -474,14 +486,46 @@ pub trait Store: Send + Sync + 'static {
         feature_disabled()
     }
 
+    /// Instances overlapping `range` (Unix seconds) of the given calendars,
+    /// or of every calendar when `calendars` is empty, by start.
+    fn events_in(
+        &self,
+        range: Range<i64>,
+        calendars: Vec<CalendarTargetDto>,
+    ) -> impl Future<Output = StoreResult<Vec<EventInstanceDto>>> + Send {
+        let _ = (range, calendars);
+        feature_disabled()
+    }
+
+    /// The event stored at `href` in one of `account`'s calendars.
+    fn event(
+        &self,
+        account: AccountId,
+        href: String,
+    ) -> impl Future<Output = StoreResult<Option<CalEventDto>>> + Send {
+        let _ = (account, href);
+        feature_disabled()
+    }
+
+    /// Every copy of `uid` in `account`'s calendars.
+    fn event_by_uid(
+        &self,
+        account: AccountId,
+        uid: String,
+    ) -> impl Future<Output = StoreResult<Vec<CalEventDto>>> + Send {
+        let _ = (account, uid);
+        feature_disabled()
+    }
+
     /// The stored copies of `uids` in the calendars an invitation to
     /// `account` maps to. Stores without calendar data know none.
     fn invitation_context(
         &self,
         account: AccountId,
+        message: MessageRowId,
         uids: Vec<String>,
     ) -> impl Future<Output = StoreResult<InvitationContext>> + Send {
-        let _ = (account, uids);
+        let _ = (account, message, uids);
         std::future::ready(Ok(InvitationContext::default()))
     }
 }

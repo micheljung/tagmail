@@ -12,6 +12,7 @@ use tagmail_store::{BlobStore, CacheDb, changes};
 use tokio::sync::Semaphore;
 
 use crate::cache::{InboxCandidates, W};
+use crate::calendar_hook::InviteHook;
 use crate::error::Result;
 use crate::overlay::Overlays;
 
@@ -39,6 +40,7 @@ pub struct Ctx {
     blob_writes: Arc<Semaphore>,
     clock: Arc<AtomicI64>,
     candidates: Arc<Mutex<InboxCandidates>>,
+    invites: Option<Arc<dyn InviteHook>>,
 }
 
 fn wall_ms() -> i64 {
@@ -63,7 +65,15 @@ impl Ctx {
             blob_writes: Arc::new(Semaphore::new(MAX_BLOB_WRITES)),
             clock: Arc::new(AtomicI64::new(0)),
             candidates: Arc::default(),
+            invites: None,
         }
+    }
+
+    /// Records recent invitations in `cal_inbox` and tells `hook`.
+    #[cfg(feature = "calendar")]
+    pub(crate) fn with_invites(mut self, hook: Arc<dyn InviteHook>) -> Ctx {
+        self.invites = Some(hook);
+        self
     }
 
     /// Counts blob writes in `writes`, so a stop can wait for them.
@@ -129,13 +139,16 @@ impl Ctx {
         let epoch = self.cache.epoch();
         let overlay = self.overlays.get(self.account);
         let candidates = self.candidates.clone();
-        let (out, head, arrivals) = self
+        let invites = self.invites.is_some();
+        let (out, head, arrivals, invited) = self
             .cache
             .write(move |tx| {
                 let mut w = W::new(tx, account, now)
                     .with_overlay(overlay)
-                    .with_candidates(candidates.clone());
+                    .with_candidates(candidates.clone())
+                    .with_invites(invites);
                 let out = f(&mut w)?;
+                let invited = w.invited();
                 let arrivals = w.take_arrivals();
                 let candidate_changes = w.take_candidate_changes();
                 let head = if w.finish()? {
@@ -147,11 +160,14 @@ impl Ctx {
                     .lock()
                     .unwrap_or_else(PoisonError::into_inner)
                     .apply(candidate_changes, now);
-                Ok((out, head, arrivals))
+                Ok((out, head, arrivals, invited))
             })
             .await?;
         if let Some(head) = head {
             self.feed.publish(head);
+        }
+        if invited && let Some(hook) = &self.invites {
+            hook.queued();
         }
         self.feed.publish_arrivals(arrivals);
         Ok(out)

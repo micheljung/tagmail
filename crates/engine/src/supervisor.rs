@@ -834,6 +834,10 @@ impl<F: ConnectorFactory> Engine<F> {
         let lock = self.lifecycle(id);
         let serial = lock.lock().await;
         let removed = self.remove_unlocked(id).await;
+        #[cfg(feature = "calendar")]
+        if removed.is_err() {
+            self.inner.calendar.added(id);
+        }
         if removed.is_ok() {
             let mut lifecycles = self
                 .inner
@@ -892,10 +896,22 @@ impl<F: ConnectorFactory> Engine<F> {
             .cache
             .write(move |tx| tagmail_store::calendar::purge_account(tx, id))
             .await?;
-        self.inner
+        let objects: Vec<String> = self
+            .inner
             .stores
             .config
             .write(move |tx| {
+                let mut stmt = tx.prepare(
+                    "SELECT ics_file FROM cal_op WHERE ics_file IS NOT NULL \
+                     AND (account_id = ?1 OR target_account_id = ?1) \
+                     UNION SELECT conflict_ics_file FROM cal_op \
+                     WHERE conflict_ics_file IS NOT NULL \
+                     AND (account_id = ?1 OR target_account_id = ?1)",
+                )?;
+                let objects = stmt
+                    .query_map([id.0], |r| r.get(0))?
+                    .collect::<tagmail_store::rusqlite::Result<Vec<String>>>()?;
+                drop(stmt);
                 tx.execute("DELETE FROM op_seen WHERE account_id = ?1", [id.0])?;
                 // A filter left empty means "all accounts", as before it was set.
                 tx.execute(
@@ -906,9 +922,13 @@ impl<F: ConnectorFactory> Engine<F> {
                     [id.0],
                 )?;
                 tx.execute("DELETE FROM account WHERE id = ?1", [id.0])?;
-                Ok(())
+                Ok(objects)
             })
             .await?;
+        let dir = self.inner.stores.outbox.join(crate::compose::CAL_OP_DIR);
+        for name in objects {
+            let _ = std::fs::remove_file(dir.join(name));
+        }
         ctx.write(move |w| {
             w.emit(Entity::Account, id.0, ChangeOp::Delete, None);
             Ok(())
@@ -1040,22 +1060,49 @@ impl<F: ConnectorFactory> WriteService for Engine<F> {
 
     fn ops(&self, status: Option<OpStatusDto>) -> BoxFuture<WriteResult<Vec<OpDto>>> {
         let engine = self.clone();
-        Box::pin(async move { engine.list_ops(status).await })
+        Box::pin(async move {
+            #[cfg_attr(not(feature = "calendar"), expect(unused_mut))]
+            let mut ops = engine.list_ops(status).await?;
+            #[cfg(feature = "calendar")]
+            {
+                ops.extend(engine.cal_ops(status).await?);
+                ops.sort_by_key(|o| (o.seq, o.created_at));
+            }
+            Ok(ops)
+        })
     }
 
     fn op(&self, op_id: String) -> BoxFuture<WriteResult<OpDto>> {
         let engine = self.clone();
-        Box::pin(async move { engine.op_dto(op_id).await })
+        Box::pin(async move {
+            #[cfg(feature = "calendar")]
+            if let Some(dto) = engine.cal_op_dto(op_id.clone()).await? {
+                return Ok(dto);
+            }
+            engine.op_dto(op_id).await
+        })
     }
 
     fn retry_op(&self, op_id: String) -> BoxFuture<WriteResult<OpDto>> {
         let engine = self.clone();
-        Box::pin(async move { engine.retry_failed_op(op_id).await })
+        Box::pin(async move {
+            #[cfg(feature = "calendar")]
+            if let Some(dto) = engine.retry_cal_op(op_id.clone()).await? {
+                return Ok(dto);
+            }
+            engine.retry_failed_op(op_id).await
+        })
     }
 
     fn discard_op(&self, op_id: String) -> BoxFuture<WriteResult<()>> {
         let engine = self.clone();
-        Box::pin(async move { engine.discard_op_id(op_id).await })
+        Box::pin(async move {
+            #[cfg(feature = "calendar")]
+            if engine.discard_cal_op(op_id.clone()).await?.is_some() {
+                return Ok(());
+            }
+            engine.discard_op_id(op_id).await
+        })
     }
 
     fn create_label(&self, label: NewLabelDto) -> BoxFuture<WriteResult<LabelDto>> {
@@ -1352,6 +1399,8 @@ async fn run_account<F: ConnectorFactory>(
     )
     .with_overlays(inner.overlays.clone())
     .with_blob_writes(inner.blob_writes(id));
+    #[cfg(feature = "calendar")]
+    let ctx = ctx.with_invites(inner.calendar.invite_hook());
     let account = AccountRun {
         id,
         config: &inner.config,

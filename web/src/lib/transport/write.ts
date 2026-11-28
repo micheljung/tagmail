@@ -1,5 +1,8 @@
 export type {
 	AttachmentDto,
+	CalOpInfoDto,
+	CalendarDto,
+	RsvpPartstatDto,
 	DraftDto,
 	DraftInputDto,
 	IdentityDto,

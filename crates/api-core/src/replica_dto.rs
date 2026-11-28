@@ -31,16 +31,27 @@ pub enum ReplicaRecord {
     Thread(ThreadRecord),
     Message(MessageRowRecord),
     Text(TextRecord),
+    /// An account's calendar settings; only with `include=calendar`.
+    Caldav(CaldavRecord),
+    /// Only with `include=calendar`.
+    Calendar(CalendarRecord),
+    /// Only with `include=calendar`.
+    Event(EventRecord),
     /// Last line; a stream without it, or whose counts differ from the
     /// records received, is incomplete.
     End(EndRecord),
+    /// A record type this client does not know; skipped.
+    #[serde(other)]
+    Unknown,
 }
 
 impl ReplicaRecord {
     /// Key of the record in [`EndRecord::counts`]; `None` for header/end.
     pub fn kind(&self) -> Option<&'static str> {
         Some(match self {
-            ReplicaRecord::Header(_) | ReplicaRecord::End(_) => return None,
+            ReplicaRecord::Header(_) | ReplicaRecord::End(_) | ReplicaRecord::Unknown => {
+                return None;
+            }
             ReplicaRecord::Account(_) => "account",
             ReplicaRecord::Identity(_) => "identity",
             ReplicaRecord::LabelRegistry(_) => "labelRegistry",
@@ -50,6 +61,9 @@ impl ReplicaRecord {
             ReplicaRecord::Thread(_) => "thread",
             ReplicaRecord::Message(_) => "message",
             ReplicaRecord::Text(_) => "text",
+            ReplicaRecord::Caldav(_) => "caldav",
+            ReplicaRecord::Calendar(_) => "calendar",
+            ReplicaRecord::Event(_) => "event",
         })
     }
 }
@@ -149,6 +163,8 @@ pub struct MessageRowRecord {
     pub snippet: Option<String>,
     pub size: i64,
     pub has_attachment: bool,
+    #[serde(default)]
+    pub has_calendar: bool,
     pub tombstoned_at: Option<i64>,
     pub locations: Vec<LocationRecord>,
     /// `label.id`s of the message.
@@ -177,6 +193,55 @@ pub struct TextRecord {
     pub message_id: i64,
     /// Base64 of the zstd-compressed blob exactly as the server stores it.
     pub zstd: String,
+}
+
+/// The calendar settings of an account that the replica needs to answer
+/// invitations; no URL or credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CaldavRecord {
+    pub account_id: i64,
+    pub default_calendar_href: Option<String>,
+    pub fallback_account_id: Option<i64>,
+    /// The owner's override, `server` or `client`.
+    pub scheduling: Option<String>,
+    pub scheduling_detected: Option<String>,
+}
+
+/// A `calendar` row with the owner's preferences for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarRecord {
+    pub id: i64,
+    pub account_id: i64,
+    pub href: String,
+    pub display_name: Option<String>,
+    pub color_srv: Option<String>,
+    pub writable: bool,
+    pub color: Option<String>,
+    pub visible: bool,
+    pub sort: Option<i64>,
+}
+
+/// A `cal_event` row; the replica expands its instances itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EventRecord {
+    pub id: i64,
+    pub calendar_id: i64,
+    pub href: String,
+    pub etag: Option<String>,
+    pub uid: String,
+    /// Base64 of the zstd-compressed iCalendar text as the server stores it.
+    pub ics_zstd: String,
+    pub sequence: u32,
+    pub dtstamp: Option<i64>,
+    pub status: Option<String>,
+    pub my_partstat: Option<String>,
+    pub organizer: Option<String>,
+    pub is_recurring: bool,
+    pub first_start: Option<i64>,
+    pub last_end: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -214,6 +279,16 @@ pub struct ReplicaRowsDto {
     /// Text is sent for messages in this window or starred; default 90.
     #[serde(default)]
     pub window_days: Option<u32>,
+    /// `calendar.id`s; the fields below are left out when empty, so an old
+    /// server, which refuses unknown fields, still reads requests without
+    /// them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calendars: Vec<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<i64>,
+    /// `["calendar"]` adds every account's `caldav` record.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include: Vec<String>,
 }
 
 /// `POST /api/replica/image`: a remote image of a message, fetched by the
@@ -317,6 +392,7 @@ mod tests {
                 snippet: Some("hello".into()),
                 size: 120,
                 has_attachment: false,
+                has_calendar: true,
                 tombstoned_at: None,
                 locations: vec![LocationRecord {
                     mailbox_id: 5,
@@ -333,6 +409,40 @@ mod tests {
             ReplicaRecord::Text(TextRecord {
                 message_id: 21,
                 zstd: "KLUv/QBYAQAAaGk=".into(),
+            }),
+            ReplicaRecord::Caldav(CaldavRecord {
+                account_id: 1,
+                default_calendar_href: Some("/cal/work/".into()),
+                fallback_account_id: None,
+                scheduling: None,
+                scheduling_detected: Some("client".into()),
+            }),
+            ReplicaRecord::Calendar(CalendarRecord {
+                id: 2,
+                account_id: 1,
+                href: "/cal/work/".into(),
+                display_name: Some("Work".into()),
+                color_srv: None,
+                writable: true,
+                color: Some("#112233".into()),
+                visible: true,
+                sort: None,
+            }),
+            ReplicaRecord::Event(EventRecord {
+                id: 3,
+                calendar_id: 2,
+                href: "/cal/work/a.ics".into(),
+                etag: Some("\"1\"".into()),
+                uid: "a@example.com".into(),
+                ics_zstd: "KLUv/QBYAQAAaGk=".into(),
+                sequence: 1,
+                dtstamp: Some(1_700_000_000),
+                status: Some("CONFIRMED".into()),
+                my_partstat: Some("ACCEPTED".into()),
+                organizer: Some("boss@example.com".into()),
+                is_recurring: false,
+                first_start: Some(1_700_000_000),
+                last_end: Some(1_700_003_600),
             }),
             ReplicaRecord::End(EndRecord {
                 counts: BTreeMap::from([("message".into(), 1), ("text".into(), 1)]),
@@ -374,6 +484,9 @@ mod tests {
                 "thread",
                 "message",
                 "text",
+                "caldav",
+                "calendar",
+                "event",
                 "end"
             ]
         );
@@ -385,9 +498,32 @@ mod tests {
     }
 
     #[test]
-    fn unknown_record_types_are_rejected() {
-        assert!(serde_json::from_str::<ReplicaRecord>(r#"{"t":"blob","id":1}"#).is_err());
+    fn unknown_record_types_are_skippable() {
+        let unknown: ReplicaRecord = serde_json::from_str(r#"{"t":"reminder","id":1}"#).unwrap();
+        assert_eq!(unknown, ReplicaRecord::Unknown);
+        assert_eq!(unknown.kind(), None);
         assert!(serde_json::from_str::<ReplicaRecord>(r#"{"id":1}"#).is_err());
+    }
+
+    #[test]
+    fn records_from_an_old_server_read_without_calendar_fields() {
+        let mut message = serde_json::to_value(&records()[8]).unwrap();
+        message.as_object_mut().unwrap().remove("hasCalendar");
+        match serde_json::from_value::<ReplicaRecord>(message).unwrap() {
+            ReplicaRecord::Message(m) => assert!(!m.has_calendar),
+            r => panic!("{r:?}"),
+        }
+    }
+
+    #[test]
+    fn old_clients_skip_unknown_change_entities() {
+        use crate::dto::{ChangesDto, EntityDto};
+        let page: ChangesDto = serde_json::from_str(
+            r#"{"changes":[{"seq":1,"entity":"reminder_v9","id":1,"op":{"kind":"upsert"},
+                "payload":null}],"next":"00ab:1","more":false}"#,
+        )
+        .unwrap();
+        assert_eq!(page.changes[0].entity, EntityDto::Unknown);
     }
 
     fn round_trip<T>(value: T)
@@ -449,6 +585,8 @@ mod tests {
             label: None,
             mailbox_id: None,
             created_at: 5,
+            domain: crate::ops_dto::OpDomainDto::Mail,
+            calendar: None,
         });
         let attachment = AttachmentDto {
             id: "3".into(),
@@ -523,5 +661,17 @@ mod tests {
             }
         );
         assert!(serde_json::from_str::<ReplicaRowsDto>(r#"{"thread":[1]}"#).is_err());
+    }
+
+    #[test]
+    fn mail_only_rows_requests_keep_the_old_shape() {
+        let json = serde_json::to_value(ReplicaRowsDto {
+            threads: vec![1],
+            ..ReplicaRowsDto::default()
+        })
+        .unwrap();
+        for field in ["calendars", "events", "include"] {
+            assert!(json.get(field).is_none(), "{field}");
+        }
     }
 }

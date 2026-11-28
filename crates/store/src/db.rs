@@ -2,7 +2,7 @@ use std::ops::Deref;
 use std::path::Path;
 
 use rusqlite::{Connection, OpenFlags, Transaction};
-use tagmail_core::{CacheEpoch, ChangeCursor};
+use tagmail_core::{CacheEpoch, ChangeCursor, ChangeFilter};
 
 use crate::changes::{self, Changes};
 use crate::error::{Error, Result};
@@ -185,10 +185,15 @@ impl CacheDb {
     }
 
     /// Up to `limit` changes after `since`, or [`Changes::Gone`].
-    pub async fn changes_since(&self, since: ChangeCursor, limit: usize) -> Result<Changes> {
+    pub async fn changes_since(
+        &self,
+        since: ChangeCursor,
+        limit: usize,
+        filter: ChangeFilter,
+    ) -> Result<Changes> {
         let epoch = self.epoch;
         self.db
-            .read(move |conn| changes::changes_since(conn, epoch, since, limit))
+            .read(move |conn| changes::changes_since(conn, epoch, since, limit, filter))
             .await
     }
 

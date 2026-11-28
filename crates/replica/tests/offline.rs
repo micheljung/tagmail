@@ -3,6 +3,8 @@
 //! is sent exactly once, conflicts surface as failed, and a rebuilt server
 //! cache re-bootstraps the replica without losing the queue.
 
+#[cfg(feature = "calendar")]
+mod calendar_seed;
 mod fixture;
 
 use fixture::{DAY, Stack, call, get, ids, json, now, search_path};
@@ -257,5 +259,255 @@ async fn a_rebuilt_server_cache_keeps_the_queue() {
             .iter()
             .any(|o| o["opId"] == "op-star")
     );
+    stack.stop().await;
+}
+
+#[cfg(feature = "calendar")]
+const INVITE: &str = "From: boss@example.com\r\nTo: me@x.example\r\nSubject: Planning\r\n\
+     Authentication-Results: mx.example.com; dmarc=pass header.from=example.com\r\n\
+     MIME-Version: 1.0\r\nContent-Type: text/calendar; method=REQUEST; charset=UTF-8\r\n\r\n\
+     BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//t//EN\r\nMETHOD:REQUEST\r\nBEGIN:VEVENT\r\n\
+     UID:plan@example.com\r\nDTSTAMP:20261101T000000Z\r\nDTSTART:20261201T090000Z\r\n\
+     DTEND:20261201T100000Z\r\nSUMMARY:Planning\r\nORGANIZER:mailto:boss@example.com\r\n\
+     ATTENDEE;PARTSTAT=NEEDS-ACTION:mailto:me@x.example\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+
+/// Message 10 becomes an invitation; 13 is marked as one but its raw is
+/// never downloaded by the replica.
+#[cfg(feature = "calendar")]
+async fn invitations(stack: &Stack) {
+    let key = stack.key("g:10");
+    let blobs = stack.server().store().blobs().clone();
+    tokio::task::spawn_blocking(move || {
+        let mut writer = blobs
+            .raw_writer(key, tagmail_store::DEFAULT_RAW_CAP)
+            .unwrap();
+        writer.write_chunk(INVITE.as_bytes()).unwrap();
+        writer.finish().unwrap();
+    })
+    .await
+    .unwrap();
+    stack
+        .server()
+        .store()
+        .cache()
+        .write(|tx| {
+            tx.execute(
+                "UPDATE message SET has_calendar = 1 WHERE id IN (10, 13)",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+#[cfg(feature = "calendar")]
+#[tokio::test]
+async fn offline_invitation_reports_unknown_sender_auth() {
+    let mut stack = Stack::start().await;
+    invitations(&stack).await;
+    let replica = stack.replica().await;
+    replica.gate().await.unwrap();
+    let router = Router::new(replica.clone());
+    let online = get(&router, "/api/messages/10/invitation").await;
+    assert_eq!(online.status, 200, "{}", body(&online));
+    assert_ne!(json(&online)["senderAuth"], "unknown");
+    let opened = get(&router, "/api/messages/10/render").await;
+    assert_eq!(opened.status, 200, "{}", body(&opened));
+
+    stack.stop().await;
+    replica.client().link().mark_down();
+
+    let offline = get(&router, "/api/messages/10/invitation").await;
+    assert_eq!(offline.status, 200, "{}", body(&offline));
+    let card = json(&offline);
+    assert_eq!(card["senderAuth"], "unknown");
+    assert_eq!(card["autoApply"], "none");
+    assert_eq!(card["events"][0]["uid"], "plan@example.com");
+    let uncached = get(&router, "/api/messages/13/invitation").await;
+    assert_eq!(uncached.status, 503, "{}", body(&uncached));
+    assert_eq!(json(&uncached)["error"], "offline");
+}
+
+#[cfg(feature = "calendar")]
+async fn server_op(stack: &Stack, op_id: &str) -> (u16, Value) {
+    let resp = stack
+        .owner
+        .get(stack.url(&format!("/api/ops/{op_id}")))
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    (status, resp.json().await.unwrap_or(Value::Null))
+}
+
+/// Fails a calendar op on the server as a CalDAV error would.
+#[cfg(feature = "calendar")]
+async fn fail_on_server(stack: &Stack, op_id: &'static str) {
+    stack
+        .server()
+        .store()
+        .config()
+        .write(move |tx| {
+            tx.execute(
+                "UPDATE cal_op SET state = 'failed', error = 'calendar server error' \
+                 WHERE op_id = ?1",
+                [op_id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+}
+
+/// Waits for the server's verdict on an op it holds.
+#[cfg(feature = "calendar")]
+async fn server_failed(stack: &Stack, op_id: &str) -> Value {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let (status, op) = server_op(stack, op_id).await;
+        if status == 200 && op["status"] == "failed" {
+            return op;
+        }
+        assert!(std::time::Instant::now() < deadline, "{status} {op}");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// An invitation answered offline: queued once, flushed once.
+#[cfg(feature = "calendar")]
+async fn queued_rsvp(stack: &mut Stack, replica: &Replica, router: &Router) {
+    stack.stop().await;
+    replica.client().link().mark_down();
+    let rsvp = json!({ "opId": "rsvp-1", "messageId": "10", "partstat": "accepted" });
+    let queued = post(router, "/api/calendar/rsvp", rsvp.clone()).await;
+    assert_eq!(queued.status, 202, "{}", body(&queued));
+    assert_eq!(json(&queued)["domain"], "cal");
+    assert_eq!(json(&queued)["status"], "pending");
+    let again = post(router, "/api/calendar/rsvp", rsvp).await;
+    assert_eq!(again.status, 200, "{}", body(&again));
+    replica.flush().await.unwrap();
+    assert_eq!(
+        replica
+            .durable()
+            .cal_intent("rsvp-1")
+            .unwrap()
+            .unwrap()
+            .state,
+        IntentState::Pending
+    );
+    stack.restart().await;
+    replica.flush().await.unwrap();
+}
+
+#[cfg(feature = "calendar")]
+#[tokio::test]
+async fn calendar_read_offline_and_rsvp_flushed_once() {
+    use tagmail_api_core::Store;
+
+    let mut stack = Stack::start().await;
+    invitations(&stack).await;
+    calendar_seed::seed(
+        stack.server().store(),
+        stack.account,
+        &["/cal/work/"],
+        5,
+        now(),
+    )
+    .await;
+    let replica = stack.replica().await;
+    replica.gate().await.unwrap();
+    let router = Router::new(replica.clone());
+    let online = json(&get(&router, "/api/calendars").await);
+    assert_eq!(online["calendars"].as_array().unwrap().len(), 1, "{online}");
+
+    stack.stop().await;
+    replica.client().link().mark_down();
+    let offline = get(&router, "/api/calendars").await;
+    assert_eq!(offline.status, 200, "{}", body(&offline));
+    assert_eq!(json(&offline), online);
+    let listed = replica
+        .store()
+        .unwrap()
+        .events_in(now() - 400 * DAY..now() + 400 * DAY, Vec::new())
+        .await
+        .unwrap();
+    assert!(!listed.is_empty());
+    stack.restart().await;
+
+    queued_rsvp(&mut stack, &replica, &router).await;
+    let flushed = replica.durable().cal_intent("rsvp-1").unwrap().unwrap();
+    assert_ne!(flushed.state, IntentState::Pending, "{flushed:?}");
+    assert!(flushed.on_server);
+    let (status, first) = server_op(&stack, "rsvp-1").await;
+    assert_eq!(status, 200, "{flushed:?}");
+    assert_eq!(server_outbox_items(&stack, "rsvp-1#reply").await, 1);
+
+    replica
+        .durable()
+        .conn()
+        .execute("UPDATE cal_intent SET state = 'pending'", [])
+        .unwrap();
+    replica.flush().await.unwrap();
+    let (_, again) = server_op(&stack, "rsvp-1").await;
+    assert_eq!(
+        again["seq"], first["seq"],
+        "a lost acknowledgement is one op"
+    );
+    assert_eq!(
+        server_outbox_items(&stack, "rsvp-1#reply").await,
+        1,
+        "and one REPLY"
+    );
+    assert_ne!(
+        replica
+            .durable()
+            .cal_intent("rsvp-1")
+            .unwrap()
+            .unwrap()
+            .state,
+        IntentState::Pending
+    );
+    stack.stop().await;
+}
+
+#[cfg(feature = "calendar")]
+#[tokio::test]
+async fn a_server_failed_rsvp_is_retried_and_discarded_on_the_server() {
+    let mut stack = Stack::start().await;
+    invitations(&stack).await;
+    let replica = stack.replica().await;
+    replica.gate().await.unwrap();
+    let router = Router::new(replica.clone());
+    queued_rsvp(&mut stack, &replica, &router).await;
+    fail_on_server(&stack, "rsvp-1").await;
+    let failed = server_failed(&stack, "rsvp-1").await;
+    let op = serde_json::from_value(failed.clone()).unwrap();
+    replica.durable().settle_cal_intent(&op).unwrap();
+    let local = replica.durable().cal_intent("rsvp-1").unwrap().unwrap();
+    assert_eq!(local.state, IntentState::Failed, "{local:?}");
+    assert!(local.on_server);
+    let listed = json(&get(&router, "/api/ops/rsvp-1").await);
+    assert_eq!(listed["calendar"], failed["calendar"], "{listed}");
+    let attempts = failed["attempts"].as_u64().unwrap();
+
+    let retried = post(&router, "/api/ops/rsvp-1/retry", json!({})).await;
+    assert!(
+        retried.status == 200 || retried.status == 202,
+        "{}",
+        body(&retried)
+    );
+    assert_eq!(json(&retried)["status"], "pending");
+    let (_, on_server) = server_op(&stack, "rsvp-1").await;
+    assert_ne!(
+        on_server["status"], "failed",
+        "retried on the server: {on_server}"
+    );
+    assert!(on_server["attempts"].as_u64() <= Some(attempts.max(1)));
+
+    let discarded = call(&router, Method::Delete, "/api/ops/rsvp-1", b"").await;
+    assert!(discarded.status < 300, "{}", body(&discarded));
+    assert_eq!(server_op(&stack, "rsvp-1").await.0, 404);
+    assert!(replica.durable().cal_intent("rsvp-1").unwrap().is_none());
     stack.stop().await;
 }

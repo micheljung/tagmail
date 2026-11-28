@@ -1,12 +1,12 @@
 //! In-memory CalDAV server and connector for the calendar tests.
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use tagmail_dav::{
-    CalendarInfo, DavError, Discovery, DiscoveryTarget, MultigetItem, Resource, ResourceRef,
-    SyncPage,
+    CalendarInfo, DavError, Discovery, DiscoveryTarget, MultigetItem, PutCondition, Resource,
+    ResourceRef, SyncPage, UidConflictKind, UidMatch,
 };
 use url::Url;
 
@@ -49,6 +49,9 @@ struct State {
     calls: Mutex<Vec<&'static str>>,
     failing: Mutex<HashSet<String>>,
     blocked: AtomicBool,
+    etags: AtomicU64,
+    scripted: Mutex<VecDeque<(&'static str, DavError)>>,
+    rewrites: Mutex<VecDeque<(String, String)>>,
 }
 
 /// One home with the calendar [`WORK`]; clones share the server.
@@ -106,6 +109,95 @@ impl FakeDav {
 
     pub(crate) fn page(&self, page: tagmail_dav::Result<SyncPage>) {
         lock(&self.0.pages).push_back(page);
+    }
+
+    /// The next PUT finds the resource at `path` changed to `data` (a new
+    /// ETag) and fails with 412, like a concurrent writer.
+    pub(crate) fn rewrite_before_next_put(&self, path: &str, data: &str) {
+        lock(&self.0.rewrites).push_back((path.to_owned(), data.to_owned()));
+    }
+
+    /// The next `method` request fails with `error`, before any effect.
+    pub(crate) fn fail_next(&self, method: &'static str, error: DavError) {
+        lock(&self.0.scripted).push_back((method, error));
+    }
+
+    /// The resource at `path`, if any.
+    pub(crate) fn resource(&self, path: &str) -> Option<(String, String)> {
+        lock(&self.0.resources).get(path).cloned()
+    }
+
+    /// Paths of every resource.
+    pub(crate) fn paths(&self) -> Vec<String> {
+        lock(&self.0.resources).keys().cloned().collect()
+    }
+
+    fn scripted(&self, method: &'static str) -> Option<DavError> {
+        let mut scripted = lock(&self.0.scripted);
+        let at = scripted.iter().position(|(m, _)| *m == method)?;
+        scripted.remove(at).map(|(_, e)| e)
+    }
+
+    fn next_etag(&self) -> String {
+        format!("\"f{}\"", self.0.etags.fetch_add(1, Ordering::SeqCst))
+    }
+
+    fn holds_uid(data: &str, uid: &str) -> bool {
+        data.lines().any(|l| l.trim_end() == format!("UID:{uid}"))
+    }
+
+    fn uid_of(data: &str) -> Option<String> {
+        data.lines()
+            .find_map(|l| l.trim_end().strip_prefix("UID:").map(str::to_owned))
+    }
+
+    fn write(
+        &self,
+        href: &Url,
+        ics: &str,
+        condition: &PutCondition,
+    ) -> tagmail_dav::Result<String> {
+        let path = href.path().to_owned();
+        let mut resources = lock(&self.0.resources);
+        let existing = resources.get(&path).map(|(e, _)| e.clone());
+        match (condition, &existing) {
+            (PutCondition::Create, Some(_)) => return Err(DavError::PreconditionFailed),
+            (PutCondition::IfMatch(_), None) => return Err(DavError::PreconditionFailed),
+            (PutCondition::IfMatch(want), Some(have)) if want != have => {
+                return Err(DavError::PreconditionFailed);
+            }
+            _ => {}
+        }
+        if existing.is_none()
+            && let Some(uid) = Self::uid_of(ics)
+            && let Some(other) = resources
+                .iter()
+                .find(|(p, (_, d))| **p != path && Self::holds_uid(d, &uid))
+                .map(|(p, _)| p.clone())
+        {
+            return Err(DavError::UidConflict {
+                kind: UidConflictKind::NoUidConflict,
+                existing: Some(url(&other)),
+            });
+        }
+        let etag = self.next_etag();
+        resources.insert(path.clone(), (etag.clone(), ics.to_owned()));
+        Ok(etag)
+    }
+
+    fn remove(&self, href: &Url, etag: Option<&str>) -> tagmail_dav::Result<()> {
+        let path = href.path().to_owned();
+        let mut resources = lock(&self.0.resources);
+        match resources.get(&path) {
+            None => Err(DavError::NotFound { url: href.clone() }),
+            Some((have, _)) if etag.is_some_and(|want| want != have) => {
+                Err(DavError::PreconditionFailed)
+            }
+            Some(_) => {
+                resources.remove(&path);
+                Ok(())
+            }
+        }
     }
 
     /// The requests since the last call.
@@ -179,6 +271,105 @@ impl CalDav for FakeDav {
             .pop_front()
             .unwrap_or(Err(DavError::ReportUnsupported("sync-collection")));
         Box::pin(async move { page })
+    }
+
+    fn get<'a>(&'a self, href: &'a Url) -> DavFuture<'a, Resource> {
+        self.called("get");
+        let found = match self.scripted("get") {
+            Some(e) => Err(e),
+            None => self
+                .resource(href.path())
+                .map(|(etag, data)| Resource {
+                    href: href.clone(),
+                    etag: Some(etag),
+                    data,
+                })
+                .ok_or_else(|| DavError::NotFound { url: href.clone() }),
+        };
+        Box::pin(async move { found })
+    }
+
+    fn put<'a>(
+        &'a self,
+        href: &'a Url,
+        ics: &'a str,
+        condition: PutCondition,
+    ) -> DavFuture<'a, Option<String>> {
+        self.called("put");
+        let rewrite = lock(&self.0.rewrites).pop_front();
+        if let Some((path, data)) = rewrite {
+            let etag = self.next_etag();
+            lock(&self.0.resources).insert(path, (etag, data));
+            return Box::pin(async { Err(DavError::PreconditionFailed) });
+        }
+        let put = match self.scripted("put") {
+            Some(e) => Err(e),
+            None => self.write(href, ics, &condition).map(Some),
+        };
+        Box::pin(async move { put })
+    }
+
+    fn delete<'a>(&'a self, href: &'a Url, etag: Option<&'a str>) -> DavFuture<'a, ()> {
+        self.called("delete");
+        let deleted = match self.scripted("delete") {
+            Some(e) => Err(e),
+            None => self.remove(href, etag),
+        };
+        Box::pin(async move { deleted })
+    }
+
+    fn move_resource<'a>(
+        &'a self,
+        from: &'a Url,
+        to: &'a Url,
+        etag: Option<&'a str>,
+    ) -> DavFuture<'a, ()> {
+        self.called("move");
+        let moved = match self.scripted("move") {
+            Some(e) => Err(e),
+            None => match self.resource(from.path()) {
+                None => Err(DavError::NotFound { url: from.clone() }),
+                Some((have, _)) if etag.is_some_and(|want| want != have) => {
+                    Err(DavError::PreconditionFailed)
+                }
+                Some((_, data)) => {
+                    let mut resources = lock(&self.0.resources);
+                    if resources.contains_key(to.path()) {
+                        Err(DavError::PreconditionFailed)
+                    } else {
+                        resources.remove(from.path());
+                        resources.insert(to.path().to_owned(), (self.next_etag(), data));
+                        Ok(())
+                    }
+                }
+            },
+        };
+        Box::pin(async move { moved })
+    }
+
+    fn find_by_uid<'a>(
+        &'a self,
+        calendars: &'a [Url],
+        uid: &'a str,
+    ) -> DavFuture<'a, Option<UidMatch>> {
+        self.called("find_by_uid");
+        let resources = lock(&self.0.resources);
+        let found = calendars.iter().find_map(|calendar| {
+            resources
+                .iter()
+                .find(|(path, (_, data))| {
+                    path.starts_with(calendar.path()) && Self::holds_uid(data, uid)
+                })
+                .map(|(path, (etag, data))| UidMatch {
+                    calendar: calendar.clone(),
+                    resource: Resource {
+                        href: url(path),
+                        etag: Some(etag.clone()),
+                        data: data.clone(),
+                    },
+                })
+        });
+        Box::pin(async move { Ok(found) })
     }
 }
 

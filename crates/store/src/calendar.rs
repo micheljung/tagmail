@@ -8,6 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use tagmail_core::AccountId;
 
 use crate::blobs::ZSTD_LEVEL;
+use crate::changes::{self, ChangeOp, Entity, NewChange};
 use crate::credentials::Sealed;
 use crate::error::{Error, Result};
 
@@ -99,6 +100,9 @@ pub struct CaldavConfig {
     pub status: CaldavStatus,
     pub last_error: Option<String>,
     pub authserv_id: Option<String>,
+    /// The authserv-id the runner offers; read only, see
+    /// [`set_authserv_suggestion`].
+    pub authserv_suggestion: Option<String>,
 }
 
 impl CaldavConfig {
@@ -114,7 +118,7 @@ pub fn load_caldav(conn: &Connection, account: AccountId) -> Result<Option<Calda
             "SELECT c.url, c.principal_url, c.home_url, c.confirmed_host, c.allow_insecure, \
              c.scheduling, c.scheduling_detected, c.username, c.secret_ct, c.secret_nonce, \
              c.fallback_account_id, c.default_calendar_href, c.discovery, c.status, \
-             c.last_error, t.authserv_id, c.pending_host \
+             c.last_error, t.authserv_id, c.pending_host, t.suggestion \
              FROM account a LEFT JOIN caldav c ON c.account_id = a.id \
              LEFT JOIN caldav_trust t ON t.account_id = a.id \
              WHERE a.id = ?1 AND (c.account_id IS NOT NULL OR t.account_id IS NOT NULL)",
@@ -138,6 +142,7 @@ pub fn load_caldav(conn: &Connection, account: AccountId) -> Result<Option<Calda
                         last_error: r.get(14)?,
                         authserv_id: r.get(15)?,
                         pending_host: r.get(16)?,
+                        authserv_suggestion: r.get(17)?,
                         ..CaldavConfig::default()
                     },
                     [
@@ -206,6 +211,21 @@ pub fn save_caldav(conn: &Connection, account: AccountId, c: &CaldavConfig) -> R
         "INSERT INTO caldav_trust (account_id, authserv_id) VALUES (?1, ?2) \
          ON CONFLICT (account_id) DO UPDATE SET authserv_id = excluded.authserv_id",
         params![account.0, c.authserv_id],
+    )?;
+    Ok(())
+}
+
+/// Records the authserv-id to offer the owner for `account`.
+pub fn set_authserv_suggestion(
+    conn: &Connection,
+    account: AccountId,
+    suggestion: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO caldav_trust (account_id, suggestion) \
+         SELECT id, ?2 FROM account WHERE id = ?1 \
+         ON CONFLICT (account_id) DO UPDATE SET suggestion = excluded.suggestion",
+        params![account.0, suggestion],
     )?;
     Ok(())
 }
@@ -374,6 +394,26 @@ pub fn update_calendar_pref(
     Ok(())
 }
 
+/// Logs one calendar or event change in the caller's transaction.
+fn emit(conn: &Connection, entity: Entity, id: i64, op: ChangeOp) -> Result<()> {
+    changes::append(
+        conn,
+        &NewChange {
+            entity,
+            entity_id: id,
+            op,
+            payload: None,
+        },
+    )?;
+    Ok(())
+}
+
+/// Logs the deletion of each id.
+fn emit_deleted(conn: &Connection, entity: Entity, ids: &[i64]) -> Result<()> {
+    ids.iter()
+        .try_for_each(|id| emit(conn, entity, *id, ChangeOp::Delete))
+}
+
 /// A `cache.db` calendar collection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CalendarRow {
@@ -413,6 +453,7 @@ pub fn calendars(conn: &Connection, account: Option<AccountId>) -> Result<Vec<Ca
 }
 
 /// Inserts or renames a calendar, keeping its sync state; returns its id.
+/// Only an actual change is logged.
 pub fn upsert_calendar(
     conn: &Connection,
     account: AccountId,
@@ -421,14 +462,27 @@ pub fn upsert_calendar(
     color: Option<&str>,
     writable: bool,
 ) -> Result<i64> {
-    Ok(conn.query_row(
+    let unchanged: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM calendar WHERE account_id = ?1 AND href = ?2 \
+             AND display_name IS ?3 AND color_srv IS ?4 AND writable = ?5",
+            params![account.0, href, display_name, color, writable],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = unchanged {
+        return Ok(id);
+    }
+    let id = conn.query_row(
         "INSERT INTO calendar (account_id, href, display_name, color_srv, writable) \
          VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT (account_id, href) DO UPDATE SET \
          display_name = excluded.display_name, color_srv = excluded.color_srv, \
          writable = excluded.writable RETURNING id",
         params![account.0, href, display_name, color, writable],
         |r| r.get(0),
-    )?)
+    )?;
+    emit(conn, Entity::Calendar, id, ChangeOp::Upsert)?;
+    Ok(id)
 }
 
 /// Records a complete sync at `now` (Unix seconds).
@@ -452,8 +506,9 @@ pub fn retain_calendars(conn: &Connection, account: AccountId, keep: &[String]) 
     let mut delete = conn.prepare_cached("DELETE FROM calendar WHERE id = ?1")?;
     let mut deleted = 0;
     for calendar in calendars(conn, Some(account))? {
-        if !keep.contains(&calendar.href) {
-            deleted += delete.execute([calendar.id])?;
+        if !keep.contains(&calendar.href) && delete.execute([calendar.id])? > 0 {
+            emit(conn, Entity::Calendar, calendar.id, ChangeOp::Delete)?;
+            deleted += 1;
         }
     }
     Ok(deleted)
@@ -506,14 +561,18 @@ pub fn skip_resources(
     calendar: i64,
     skipped: &[(String, Option<String>)],
 ) -> Result<()> {
-    let mut drop_event =
-        conn.prepare_cached("DELETE FROM cal_event WHERE calendar_id = ?1 AND href = ?2")?;
+    let mut drop_event = conn.prepare_cached(
+        "DELETE FROM cal_event WHERE calendar_id = ?1 AND href = ?2 RETURNING id",
+    )?;
     let mut skip = conn.prepare_cached(
         "INSERT INTO cal_skip (calendar_id, href, etag) VALUES (?1, ?2, ?3) \
          ON CONFLICT (calendar_id, href) DO UPDATE SET etag = excluded.etag",
     )?;
     for (href, etag) in skipped {
-        drop_event.execute(params![calendar, href])?;
+        let dropped: Option<i64> = drop_event
+            .query_row(params![calendar, href], |r| r.get(0))
+            .optional()?;
+        emit_deleted(conn, Entity::Event, dropped.as_slice())?;
         skip.execute(params![calendar, href, etag])?;
     }
     Ok(())
@@ -571,6 +630,7 @@ pub fn put_event(
         |r| r.get(0),
     )?;
     replace_instances(conn, id, instances, event.window_edge)?;
+    emit(conn, Entity::Event, id, ChangeOp::Upsert)?;
     Ok(id)
 }
 
@@ -598,13 +658,18 @@ pub fn replace_instances(
 
 /// Deletes the events and skip records of `hrefs`.
 pub fn delete_events(conn: &Connection, calendar: i64, hrefs: &[String]) -> Result<usize> {
-    let mut stmt =
-        conn.prepare_cached("DELETE FROM cal_event WHERE calendar_id = ?1 AND href = ?2")?;
+    let mut stmt = conn.prepare_cached(
+        "DELETE FROM cal_event WHERE calendar_id = ?1 AND href = ?2 RETURNING id",
+    )?;
     let mut unskip =
         conn.prepare_cached("DELETE FROM cal_skip WHERE calendar_id = ?1 AND href = ?2")?;
     let mut deleted = 0;
     for href in hrefs {
-        deleted += stmt.execute(params![calendar, href])?;
+        let id: Option<i64> = stmt
+            .query_row(params![calendar, href], |r| r.get(0))
+            .optional()?;
+        emit_deleted(conn, Entity::Event, id.as_slice())?;
+        deleted += id.map_or(0, |_| 1);
         unskip.execute(params![calendar, href])?;
     }
     Ok(deleted)
@@ -694,15 +759,24 @@ pub fn retain_accounts(conn: &Connection, keep: &[AccountId]) -> Result<()> {
         .query_map([], |r| r.get(0).map(AccountId))?
         .collect::<rusqlite::Result<_>>()?;
     for account in cached.into_iter().filter(|a| !keep.contains(a)) {
-        conn.execute("DELETE FROM calendar WHERE account_id = ?1", [account.0])?;
+        delete_account_calendars(conn, account)?;
     }
     Ok(())
+}
+
+fn delete_account_calendars(conn: &Connection, account: AccountId) -> Result<()> {
+    let mut stmt =
+        conn.prepare_cached("DELETE FROM calendar WHERE account_id = ?1 RETURNING id")?;
+    let ids: Vec<i64> = stmt
+        .query_map([account.0], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    emit_deleted(conn, Entity::Calendar, &ids)
 }
 
 /// Deletes an account's calendars (events, instances and alarms cascade)
 /// and its queued invitations.
 pub fn purge_account(conn: &Connection, account: AccountId) -> Result<()> {
-    conn.execute("DELETE FROM calendar WHERE account_id = ?1", [account.0])?;
+    delete_account_calendars(conn, account)?;
     conn.execute("DELETE FROM cal_inbox WHERE account_id = ?1", [account.0])?;
     Ok(())
 }

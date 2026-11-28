@@ -36,11 +36,30 @@ pub enum OpKindDto {
     /// Permanently, from Trash or Junk.
     #[serde(rename = "delete")]
     Delete,
+    /// Calendar ops (`domain: "cal"`); never accepted by `POST /api/ops`.
+    #[serde(rename = "cal.rsvp")]
+    CalRsvp,
+    #[serde(rename = "cal.import")]
+    CalImport,
+    #[serde(rename = "cal.apply")]
+    CalApply,
+    #[serde(rename = "cal.put")]
+    CalPut,
+    #[serde(rename = "cal.delete")]
+    CalDelete,
+    #[serde(rename = "cal.move")]
+    CalMove,
 }
 
-impl From<OpKindDto> for OpKind {
-    fn from(k: OpKindDto) -> OpKind {
-        match k {
+/// A calendar kind, which is no mail op.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotAMailOp;
+
+impl TryFrom<OpKindDto> for OpKind {
+    type Error = NotAMailOp;
+
+    fn try_from(k: OpKindDto) -> Result<OpKind, NotAMailOp> {
+        Ok(match k {
             OpKindDto::LabelAdd => OpKind::LabelAdd,
             OpKindDto::LabelRemove => OpKind::LabelRemove,
             OpKindDto::Archive => OpKind::Archive,
@@ -53,7 +72,13 @@ impl From<OpKindDto> for OpKind {
             OpKindDto::Trash => OpKind::Trash,
             OpKindDto::Spam => OpKind::Spam,
             OpKindDto::Delete => OpKind::Delete,
-        }
+            OpKindDto::CalRsvp
+            | OpKindDto::CalImport
+            | OpKindDto::CalApply
+            | OpKindDto::CalPut
+            | OpKindDto::CalDelete
+            | OpKindDto::CalMove => return Err(NotAMailOp),
+        })
     }
 }
 
@@ -140,8 +165,56 @@ impl From<OpState> for OpStatusDto {
     }
 }
 
+/// Which queue an op is in: mail ops act on IMAP, calendar ops on CalDAV.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum OpDomainDto {
+    #[default]
+    Mail,
+    Cal,
+}
+
+/// Why a calendar op failed without retrying by itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum CalConflictDto {
+    /// The server copy changed; it was kept and the rejected edit is held
+    /// for re-apply (retry) or discard.
+    ServerWon,
+}
+
+/// The iTIP REPLY an RSVP queued in the outbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "lowercase")]
+pub enum CalReplyStateDto {
+    Queued,
+    Sending,
+    Sent,
+    Failed,
+    /// Cancelled in the outbox.
+    Cancelled,
+}
+
+/// What a calendar op (`domain: "cal"`) writes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CalOpInfoDto {
+    /// The account whose calendar is written; `accountId` is the account
+    /// the invitation arrived in.
+    pub target_account_id: i64,
+    pub calendar_href: Option<String>,
+    pub uid: String,
+    pub conflict: Option<CalConflictDto>,
+    /// The outbox op id of the REPLY, `<opId>#reply`.
+    pub reply_op_id: Option<String>,
+    /// `null` while no REPLY is queued. A failed op with `reply: "sent"`
+    /// is "reply sent, not saved to calendar".
+    pub reply: Option<CalReplyStateDto>,
+}
+
 /// One op; also the payload of `op` change events (whose id is the op's
-/// numeric `seq`). Done ops are not listed but stay readable by id.
+/// numeric `seq`) and, for calendar ops, of `cal_op` change events. Done
+/// ops are not listed but stay readable by id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct OpDto {
@@ -162,6 +235,11 @@ pub struct OpDto {
     pub mailbox_id: Option<i64>,
     /// Unix seconds.
     pub created_at: i64,
+    #[serde(default)]
+    pub domain: OpDomainDto,
+    /// Set for calendar ops only.
+    #[serde(default)]
+    pub calendar: Option<CalOpInfoDto>,
 }
 
 /// `GET /api/ops?status=`.

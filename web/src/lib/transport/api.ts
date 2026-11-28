@@ -6,13 +6,16 @@ import type {
 	AccountTestDto,
 	ApiErrorDto,
 	ApiTransport,
+	CalApplyDto,
 	CaldavDiscoveryDto,
 	CaldavSettingsDto,
 	CaldavSettingsInputDto,
-	ConfirmHostDto,
 	CalendarDto,
 	CalendarPatchDto,
 	CalendarsDto,
+	CalImportDto,
+	CalRsvpDto,
+	ConfirmHostDto,
 	CurrentAuthDto,
 	DesktopPairDto,
 	DesktopSettingsDto,
@@ -179,6 +182,22 @@ export class Api {
 
 	invitation(id: number, signal?: AbortSignal): Promise<InvitationDto> {
 		return this.#json<InvitationDto>(`/api/messages/${id}/invitation`, { signal });
+	}
+
+	async calendars(signal?: AbortSignal): Promise<CalendarDto[]> {
+		return (await this.#json<CalendarsDto>('/api/calendars', { signal })).calendars;
+	}
+
+	rsvp(request: CalRsvpDto): Promise<OpDto> {
+		return this.#post<OpDto>('/api/calendar/rsvp', request);
+	}
+
+	importInvitation(request: CalImportDto): Promise<OpDto> {
+		return this.#post<OpDto>('/api/calendar/import', request);
+	}
+
+	applyInvitation(request: CalApplyDto): Promise<OpDto> {
+		return this.#post<OpDto>('/api/calendar/apply', request);
 	}
 
 	/** Always (or no longer) load remote images from `address`. */
@@ -402,10 +421,6 @@ export class Api {
 		return this.#post<CaldavDiscoveryDto>(`/api/accounts/${accountId}/caldav/confirm-host`, {
 			host
 		} satisfies ConfirmHostDto);
-	}
-
-	async calendars(): Promise<CalendarDto[]> {
-		return (await this.#json<CalendarsDto>('/api/calendars')).calendars;
 	}
 
 	updateCalendar(change: CalendarPatchDto): Promise<CalendarDto> {

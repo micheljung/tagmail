@@ -199,6 +199,8 @@ async fn a_server_op_change_settles_the_intent() {
         label: None,
         mailbox_id: None,
         created_at: now(),
+        domain: tagmail_api_core::ops_dto::OpDomainDto::Mail,
+        calendar: None,
     };
     let payload = serde_json::to_string(&done).unwrap();
     f.server

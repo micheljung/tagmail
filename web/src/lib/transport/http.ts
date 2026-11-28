@@ -3,6 +3,9 @@ import type { ApiErrorDto, ApiEvent, ApiTransport, ChangesDto } from '@tagmail/a
 export const CSRF_HEADER = 'X-Requested-With';
 export const CSRF_VALUE = 'tagmail';
 
+/** Without it the server leaves calendar entities out of the event stream. */
+const INCLUDE_CALENDAR = 'calendar';
+
 const SAFE_METHODS = new Set(['GET', 'HEAD']);
 
 export interface EventSourceLike {
@@ -65,8 +68,10 @@ export class HttpTransport implements ApiTransport {
 	}
 
 	events(since: string | undefined, onEvent: (event: ApiEvent) => void): () => void {
-		const query = since ? `?since=${encodeURIComponent(since)}` : '';
-		const source = this.#eventSource(`${this.#base}/api/events${query}`);
+		const params = new URLSearchParams();
+		if (since) params.set('since', since);
+		params.set('include', INCLUDE_CALENDAR);
+		const source = this.#eventSource(`${this.#base}/api/events?${params}`);
 		let open = true;
 		const stop = () => {
 			open = false;

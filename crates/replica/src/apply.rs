@@ -187,14 +187,16 @@ pub fn put_message(conn: &Connection, m: &MessageRowRecord) -> Result<PutMessage
     conn.execute(
         "INSERT INTO message (id, account_id, email_id, msgid_hdr, in_reply_to, thread_id, date, \
          subject_norm, from_json, to_json, cc_json, subject, snippet, size, has_attachment, \
-         tombstoned_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16) \
+         tombstoned_at, has_calendar) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) \
          ON CONFLICT (id) DO UPDATE SET account_id = excluded.account_id, \
          email_id = excluded.email_id, msgid_hdr = excluded.msgid_hdr, \
          in_reply_to = excluded.in_reply_to, thread_id = excluded.thread_id, \
          date = excluded.date, subject_norm = excluded.subject_norm, \
          from_json = excluded.from_json, to_json = excluded.to_json, cc_json = excluded.cc_json, \
          subject = excluded.subject, snippet = excluded.snippet, size = excluded.size, \
-         has_attachment = excluded.has_attachment, tombstoned_at = excluded.tombstoned_at",
+         has_attachment = excluded.has_attachment, tombstoned_at = excluded.tombstoned_at, \
+         has_calendar = excluded.has_calendar",
         params![
             m.id,
             m.account_id,
@@ -211,7 +213,8 @@ pub fn put_message(conn: &Connection, m: &MessageRowRecord) -> Result<PutMessage
             m.snippet,
             m.size,
             m.has_attachment,
-            m.tombstoned_at
+            m.tombstoned_at,
+            m.has_calendar
         ],
     )?;
     conn.execute("DELETE FROM location WHERE message_id = ?1", [m.id])?;

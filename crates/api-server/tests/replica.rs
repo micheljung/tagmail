@@ -286,7 +286,7 @@ async fn snapshot_is_the_cache_at_its_cursor() {
     };
     assert_eq!(header.format, SNAPSHOT_FORMAT);
     assert_eq!(header.window_days, 90);
-    assert_eq!((header.api.major, header.api.minor), (1, 3));
+    assert_eq!((header.api.major, header.api.minor), (1, 4));
     assert!(header.cursor.starts_with(&format!("{}:", header.epoch)));
     let changes: Value = desktop
         .get(url(

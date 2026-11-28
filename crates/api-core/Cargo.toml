@@ -11,7 +11,7 @@ publish.workspace = true
 workspace = true
 
 [features]
-calendar = ["dep:tagmail-calendar", "dep:time"]
+calendar = ["dep:psl", "dep:tagmail-calendar", "dep:time"]
 # The `Store` over the server's databases; the desktop replica reads
 # through it too.
 sqlite = ["dep:hex", "dep:tagmail-store"]
@@ -26,6 +26,7 @@ hmac.workspace = true
 html5ever.workspace = true
 mail-parser = { workspace = true, features = ["full_encoding"] }
 percent-encoding.workspace = true
+psl = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -40,6 +41,7 @@ ts-rs.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+time = { workspace = true, features = ["macros"] }
 peak_alloc.workspace = true
 proptest.workspace = true
 tempfile.workspace = true

@@ -41,7 +41,7 @@ impl IntentState {
         }
     }
 
-    fn parse(s: &str) -> Result<IntentState> {
+    pub(crate) fn parse(s: &str) -> Result<IntentState> {
         Ok(match s {
             "pending" => IntentState::Pending,
             "sent" => IntentState::Sent,
@@ -148,16 +148,28 @@ impl Durable {
             .map(serde_json::to_string)
             .transpose()
             .map_err(|e| Error::Corrupt(e.to_string()))?;
-        let added = self.conn().execute(
-            "INSERT OR IGNORE INTO intent (op_id, seq, kind, account_id, email_ids, label, \
-             mailbox_ref, created_at, state, attempts, next_at, error) \
-             VALUES (?1, (SELECT coalesce(max(seq), 0) + 1 FROM intent), ?2, ?3, ?4, ?5, ?6, ?7, \
-             ?8, ?9, ?10, ?11)",
+        let ids = serde_json::to_string(&ids).map_err(|e| Error::Corrupt(e.to_string()))?;
+        let mut conn = self.conn();
+        let tx = conn.transaction()?;
+        let known = tx
+            .query_row("SELECT 1 FROM intent WHERE op_id = ?1", [&i.op_id], |_| {
+                Ok(())
+            })
+            .optional()?;
+        if known.is_some() {
+            return Ok(false);
+        }
+        let seq = crate::durable::next_op_seq(&tx)?;
+        tx.execute(
+            "INSERT INTO intent (op_id, seq, kind, account_id, email_ids, label, mailbox_ref, \
+             created_at, state, attempts, next_at, error) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 i.op_id,
+                seq,
                 i.kind.as_str(),
                 i.account_id,
-                serde_json::to_string(&ids).map_err(|e| Error::Corrupt(e.to_string()))?,
+                ids,
                 i.label,
                 mailbox,
                 i.created_at,
@@ -167,7 +179,8 @@ impl Durable {
                 i.error
             ],
         )?;
-        Ok(added == 1)
+        tx.commit()?;
+        Ok(true)
     }
 
     pub fn intent(&self, op_id: &str) -> Result<Option<Intent>> {

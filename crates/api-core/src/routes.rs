@@ -58,6 +58,9 @@ pub enum RouteId {
     ConfirmCaldavHost,
     Calendars,
     UpdateCalendar,
+    CalendarRsvp,
+    CalendarImport,
+    CalendarApply,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -166,6 +169,13 @@ pub const ROUTES: &[Route] = &[
     ),
     route(Method::Get, "/api/calendars", RouteId::Calendars),
     route(Method::Patch, "/api/calendars", RouteId::UpdateCalendar),
+    route(Method::Post, "/api/calendar/rsvp", RouteId::CalendarRsvp),
+    route(
+        Method::Post,
+        "/api/calendar/import",
+        RouteId::CalendarImport,
+    ),
+    route(Method::Post, "/api/calendar/apply", RouteId::CalendarApply),
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

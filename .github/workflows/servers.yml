@@ -115,13 +115,17 @@ jobs:
           - server: radicale
             up: cargo xtask dovecot up && cargo xtask radicale up
             caldav: 127.0.0.1:10232
+            imap: 127.0.0.1:10143
+            dav_tests: --test radicale
             engine_tests: --test calendar
-            services: dovecot radicale
+            services: dovecot radicale mailpit
           - server: stalwart
             up: cargo xtask stalwart up
             caldav: 127.0.0.1:10080
-            engine_tests: ''
-            services: stalwart
+            imap: 127.0.0.1:10145
+            dav_tests: --test stalwart
+            engine_tests: --test calendar_stalwart
+            services: stalwart mailpit
     env:
       TAGMAIL_CALDAV_ADDR: ${{ matrix.caldav }}
     steps:
@@ -135,14 +139,11 @@ jobs:
       - name: Start ${{ matrix.server }}
         run: ${{ matrix.up }}
       - name: CalDAV client suite
-        env:
-          TAGMAIL_IMAP_SERVER: ${{ matrix.server == 'stalwart' && 'stalwart' || '' }}
-        run: cargo test -p tagmail-dav --features caldav-tests
+        run: cargo test -p tagmail-dav --features caldav-tests ${{ matrix.dav_tests }}
       - name: Engine calendar suite
-        if: matrix.engine_tests != ''
         env:
           TAGMAIL_IMAP_SERVER: ${{ matrix.server == 'stalwart' && 'stalwart' || '' }}
-          TAGMAIL_IMAP_ADDR: ${{ matrix.server == 'stalwart' && '127.0.0.1:10145' || '127.0.0.1:10143' }}
+          TAGMAIL_IMAP_ADDR: ${{ matrix.imap }}
         run: cargo test -p tagmail-engine --features caldav-tests,mailpit-tests ${{ matrix.engine_tests }}
       - name: Server logs
         if: failure()

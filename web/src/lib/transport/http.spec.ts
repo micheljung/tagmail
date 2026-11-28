@@ -72,7 +72,7 @@ describe('HttpTransport.events', () => {
 		const { transport, sources } = setup();
 		const events: ApiEvent[] = [];
 		transport.events('00ab:7', (e) => events.push(e));
-		expect(sources[0].url).toBe('/api/events?since=00ab%3A7');
+		expect(sources[0].url).toBe('/api/events?since=00ab%3A7&include=calendar');
 		const page = { changes: [], next: '00ab:9', more: false };
 		sources[0].emit('changes', JSON.stringify(page), '00ab:9');
 		expect(events).toEqual([{ type: 'changes', id: '00ab:9', data: page }]);
@@ -82,7 +82,7 @@ describe('HttpTransport.events', () => {
 		const { transport, sources } = setup();
 		const events: ApiEvent[] = [];
 		transport.events(undefined, (e) => events.push(e));
-		expect(sources[0].url).toBe('/api/events');
+		expect(sources[0].url).toBe('/api/events?include=calendar');
 		sources[0].emit('reset', JSON.stringify({ error: 'gone', message: 'reload' }));
 		expect(sources[0].closed).toBe(true);
 		expect(events).toEqual([{ type: 'reset', data: { error: 'gone', message: 'reload' } }]);

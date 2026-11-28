@@ -32,8 +32,8 @@ use tokio::sync::watch;
 use tokio::time::Instant;
 
 use crate::compose::{
-    OUTBOX_TMP, SavedAt, UPLOAD_TMP, delete_draft_row, draft_build, draft_row, now, outgoing,
-    purge_later, read, remove_upload_files, state_of, write, write_message,
+    CAL_OP_DIR, OUTBOX_TMP, SavedAt, UPLOAD_TMP, delete_draft_row, draft_build, draft_row, now,
+    outgoing, purge_later, read, remove_upload_files, state_of, write, write_message,
 };
 use crate::error::{Error, Result};
 use crate::jobs::Priority;
@@ -829,8 +829,8 @@ impl<F: ConnectorFactory> Engine<F> {
     async fn cleanup(&self) -> ComposeResult<()> {
         let grace = i64::try_from(self.inner.config.upload_grace.as_secs()).unwrap_or(i64::MAX);
         let cutoff = now().saturating_sub(grace);
-        type Known = (Vec<i64>, HashSet<String>, HashSet<String>);
-        let (removed, uploads, messages): Known = write(&self.inner.stores, move |tx| {
+        type Known = (Vec<i64>, HashSet<String>, HashSet<String>, HashSet<String>);
+        let (removed, uploads, messages, objects): Known = write(&self.inner.stores, move |tx| {
             let names = |sql_text: &str, args: &[i64]| -> ComposeResult<Vec<String>> {
                 let mut stmt = tx.prepare(sql_text).map_err(sql)?;
                 stmt.query_map(rusqlite::params_from_iter(args), |r| r.get(0))
@@ -848,10 +848,16 @@ impl<F: ConnectorFactory> Engine<F> {
                 "SELECT mime_file FROM outbox WHERE mime_file IS NOT NULL",
                 &[],
             )?;
+            let objects = names(
+                "SELECT ics_file FROM cal_op WHERE ics_file IS NOT NULL \
+                 UNION SELECT conflict_ics_file FROM cal_op WHERE conflict_ics_file IS NOT NULL",
+                &[],
+            )?;
             Ok((
                 removed.iter().filter_map(|id| id.parse().ok()).collect(),
                 uploads.into_iter().collect(),
                 messages.into_iter().collect(),
+                objects.into_iter().collect(),
             ))
         })
         .await?;
@@ -864,6 +870,7 @@ impl<F: ConnectorFactory> Engine<F> {
             sweep(&upload_dir.join(UPLOAD_TMP), &HashSet::new(), grace);
             sweep(&outbox_dir, &messages, grace);
             sweep(&outbox_dir.join(OUTBOX_TMP), &HashSet::new(), grace);
+            sweep(&outbox_dir.join(CAL_OP_DIR), &objects, grace);
         })
         .await
         .map_err(|e| tagmail_api_core::compose::ComposeError::Internal(Box::new(e)))?;

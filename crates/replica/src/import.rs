@@ -14,6 +14,7 @@ use tagmail_core::Flags;
 use tagmail_store::{BlobStore, CacheDb, ConfigDb};
 
 use crate::apply;
+use crate::calendar;
 use crate::error::{Error, Result};
 
 /// Longest accepted line; text blobs are capped at 64 KiB before base64.
@@ -51,7 +52,17 @@ impl<'a> RecordReader<'a> {
     }
 
     /// The next record before `end`; `None` once `end` matched the counts.
+    /// Records of types this build does not know are counted and skipped.
     pub async fn next(&mut self) -> Result<Option<ReplicaRecord>> {
+        loop {
+            match self.next_any().await? {
+                Some(ReplicaRecord::Unknown) => {}
+                record => return Ok(record),
+            }
+        }
+    }
+
+    async fn next_any(&mut self) -> Result<Option<ReplicaRecord>> {
         if self.ended {
             return Ok(None);
         }
@@ -62,6 +73,12 @@ impl<'a> RecordReader<'a> {
         };
         let record: ReplicaRecord = serde_json::from_slice(&line)
             .map_err(|e| Error::Incomplete(format!("bad record: {e}")))?;
+        if record == ReplicaRecord::Unknown {
+            let tagged: Tagged = serde_json::from_slice(&line)
+                .map_err(|e| Error::Incomplete(format!("bad record: {e}")))?;
+            *self.counts.entry(tagged.t).or_default() += 1;
+            return Ok(Some(record));
+        }
         if let ReplicaRecord::End(end) = &record {
             if end.counts != self.counts {
                 return Err(Error::Incomplete(format!(
@@ -106,6 +123,11 @@ impl<'a> RecordReader<'a> {
             }
         }
     }
+}
+
+#[derive(serde::Deserialize)]
+struct Tagged {
+    t: String,
 }
 
 /// Where imported records go.
@@ -160,7 +182,12 @@ pub async fn import(
             ReplicaRecord::Account(_)
             | ReplicaRecord::Identity(_)
             | ReplicaRecord::LabelRegistry(_)
-            | ReplicaRecord::ImageSender(_) => config.push(record),
+            | ReplicaRecord::ImageSender(_)
+            | ReplicaRecord::Caldav(_) => config.push(record),
+            ReplicaRecord::Calendar(_) => {
+                config.push(record.clone());
+                cache.push(record);
+            }
             _ => cache.push(record),
         }
         if config.len() >= BATCH {
@@ -187,6 +214,8 @@ async fn flush_config(config: &ConfigDb, records: Vec<ReplicaRecord>) -> Result<
                     ReplicaRecord::Identity(i) => apply::put_identity(tx, i)?,
                     ReplicaRecord::LabelRegistry(r) => apply::put_label_registry(tx, r)?,
                     ReplicaRecord::ImageSender(r) => apply::put_image_sender(tx, r)?,
+                    ReplicaRecord::Caldav(r) => calendar::put_caldav(tx, r)?,
+                    ReplicaRecord::Calendar(r) => calendar::put_calendar_pref(tx, r)?,
                     _ => {}
                 }
             }
@@ -205,6 +234,7 @@ async fn flush_cache(
         return Ok(());
     }
     let blobs = Arc::clone(target.blobs);
+    let now = crate::sync::now();
     let (threads, arrivals) = target
         .cache
         .write(move |tx| {
@@ -230,6 +260,8 @@ async fn flush_cache(
                         }
                     }
                     ReplicaRecord::Text(t) => apply::put_text(tx, &blobs, t)?,
+                    ReplicaRecord::Calendar(c) => calendar::put_calendar(tx, c)?,
+                    ReplicaRecord::Event(e) => calendar::put_event(tx, e, now)?,
                     _ => {}
                 }
             }
@@ -307,8 +339,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_record_is_rejected() {
-        let mut r = reader(vec![r#"{"t":"bogus"}"#, "\n"]);
+    async fn unknown_records_are_counted_and_skipped() {
+        let mut r = reader(vec![
+            r#"{"t":"reminder","alarmKey":"k"}"#,
+            "\n",
+            IMAGE,
+            "\n",
+            r#"{"t":"end","counts":{"imageSender":1,"reminder":1}}"#,
+            "\n",
+        ]);
+        assert!(matches!(
+            r.next().await.unwrap(),
+            Some(ReplicaRecord::ImageSender(_))
+        ));
+        assert!(r.next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn untagged_record_is_rejected() {
+        let mut r = reader(vec![r#"{"address":"a@b"}"#, "\n"]);
         assert!(matches!(r.next().await, Err(Error::Incomplete(_))));
     }
 }

@@ -9,7 +9,7 @@ use serde_json::Value;
 use tagmail_api_core::api::gone_error;
 use tagmail_api_core::dto::ApiErrorDto;
 use tagmail_api_core::events::{Event, EventSession, OpenError};
-use tagmail_core::ChangeCursor;
+use tagmail_core::{ChangeCursor, ChangeFilter};
 use tokio::sync::watch;
 
 use crate::backend::Backend;
@@ -76,7 +76,14 @@ pub async fn run<B: Backend>(backend: Arc<B>, mut starts: Starts, emit: impl Emi
         let Some((store, source)) = backend.events() else {
             continue;
         };
-        let mut session = match EventSession::open(store, &*source, start.since).await {
+        let mut session = match EventSession::open(
+            store,
+            &*source,
+            start.since,
+            ChangeFilter::WithCalendar,
+        )
+        .await
+        {
             Ok(Ok(session)) => session,
             Ok(Err(OpenError::Gone)) => {
                 emit.emit(RESET, reset_payload(&gone_error()));

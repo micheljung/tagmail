@@ -14,6 +14,8 @@ pub mod events;
 pub mod id_index;
 pub mod identities;
 mod invitation;
+#[cfg(feature = "calendar")]
+pub mod itip_auth;
 pub mod messages;
 pub mod mime;
 pub mod ops_dto;
@@ -30,7 +32,7 @@ pub mod ts;
 pub mod writes;
 
 pub use api::{API_VERSION, Api, Method, PARTIAL_HEADER, Request, Response, offline_error};
-pub use caldav::{CalendarError, CalendarService};
+pub use caldav::{CalAction, CalRequest, CalendarError, CalendarService};
 pub use events::{Arrival, ChangeFeed, Event, EventSession, EventSource, OpenError};
 pub use store::{
     AccountPatch, AccountRegistry, AccountSummary, BoxFuture, CaldavSettingsUpdate, CalendarPatch,

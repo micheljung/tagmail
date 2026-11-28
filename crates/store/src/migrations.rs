@@ -12,6 +12,7 @@ pub(crate) const CONFIG: &[&str] = &[
     include_str!("../migrations/config/V7__draft_client_id.sql"),
     include_str!("../migrations/config/V8__push_subscription.sql"),
     include_str!("../migrations/config/V9__caldav.sql"),
+    include_str!("../migrations/config/V10__cal_op.sql"),
 ];
 pub(crate) const CACHE: &[&str] = &[
     include_str!("../migrations/cache/V1__init.sql"),
@@ -20,6 +21,7 @@ pub(crate) const CACHE: &[&str] = &[
     include_str!("../migrations/cache/V4__hide_has_cal.sql"),
     include_str!("../migrations/cache/V5__has_calendar.sql"),
     include_str!("../migrations/cache/V6__calendar.sql"),
+    include_str!("../migrations/cache/V7__cal_inbox_backoff.sql"),
 ];
 
 /// `user_version` of an up-to-date `config.db`.

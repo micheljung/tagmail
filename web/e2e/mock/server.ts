@@ -21,7 +21,14 @@ import {
 	type Row
 } from './fixture.ts';
 import { desktopApi, desktopHeaders, desktopMock, resetDesktop } from './desktop.ts';
-import { calendarApi, calendarMock, hasInvitation, resetCaldav } from './calendar.ts';
+import {
+	calendarApi,
+	calendarMock,
+	calendarOutcomeMock,
+	hasInvitation,
+	resetCaldav,
+	resetCalendar
+} from './calendar.ts';
 import { pushApi, pushMock, resetPush } from './push.ts';
 import { encodeIdIndex } from './idIndex.ts';
 import { RENDER_CSP, WEB_APP_CSP, renderMessage } from './render.ts';
@@ -520,6 +527,7 @@ async function mock(req: IncomingMessage, res: ServerResponse, url: URL) {
 		const { name } = await body(req);
 		setScenario(name === 'multi' ? 'multi' : 'single');
 		resetWrites();
+		resetCalendar();
 		return send(res, 204, '');
 	}
 	if (url.pathname === '/__mock/reset' && req.method === 'POST') {
@@ -537,6 +545,7 @@ async function mock(req: IncomingMessage, res: ServerResponse, url: URL) {
 		authorCss = false;
 		syncCalls.length = 0;
 		resetWrites();
+		resetCalendar();
 		return send(res, 204, '');
 	}
 	if (url.pathname === '/__mock/fresh-install' && req.method === 'POST') {
@@ -545,6 +554,7 @@ async function mock(req: IncomingMessage, res: ServerResponse, url: URL) {
 	}
 	if (await desktopMock(req, res, url, writeContext)) return;
 	if (await writeMock(req, res, url, writeContext)) return;
+	if (await calendarOutcomeMock(req, res, url, writeContext)) return;
 	if (await accountsMock(req, res, url, writeContext)) return;
 	if (await calendarMock(req, res, url, writeContext)) return;
 	if (await pushMock(req, res, url, writeContext)) return;

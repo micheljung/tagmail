@@ -3,21 +3,29 @@
 //! provides on the web.
 
 use std::future::Future;
+#[cfg(feature = "calendar")]
+use std::ops::Range;
 use std::sync::Arc;
 
 use reqwest::Method;
 use rusqlite::{OptionalExtension, params};
+#[cfg(feature = "calendar")]
+use tagmail_api_core::calendar_dto::{
+    CalEventDto, CalendarDto, CalendarTargetDto, EventInstanceDto,
+};
 use tagmail_api_core::dto::{AccountDto, LabelDto, MailboxDto};
 use tagmail_api_core::mime::reduce::CalendarParts;
 use tagmail_api_core::replica_dto::ReplicaImageDto;
 use tagmail_api_core::signing::UrlKeys;
 use tagmail_api_core::sqlite_store::SqliteStore;
+#[cfg(feature = "calendar")]
+use tagmail_api_core::store::InvitationContext;
 use tagmail_api_core::store::{
     AccountPatch, AccountRegistry, AccountSummary, BoxFuture, ChangePage, FetchRawError,
     ImageProxy, MarkDeleting, MessageRecord, NewAccount, ProxiedImage, ProxyError, RuntimeStatus,
     Store, StoreResult, ThreadDetail, ThreadRows, View, ViewIndex,
 };
-use tagmail_core::{AccountId, ChangeCursor, MessageRowId, ThreadId};
+use tagmail_core::{AccountId, ChangeCursor, ChangeFilter, MessageRowId, ThreadId};
 use tagmail_store::BlobKey;
 
 use crate::apply;
@@ -99,8 +107,9 @@ impl Store for ReplicaStore {
         &self,
         since: ChangeCursor,
         limit: usize,
+        filter: ChangeFilter,
     ) -> impl Future<Output = StoreResult<ChangePage>> + Send {
-        self.inner.changes_since(since, limit)
+        self.inner.changes_since(since, limit, filter)
     }
 
     fn accounts(&self) -> impl Future<Output = StoreResult<Vec<AccountSummary>>> + Send {
@@ -192,6 +201,48 @@ impl Store for ReplicaStore {
         allow: bool,
     ) -> impl Future<Output = StoreResult<()>> + Send {
         self.inner.set_image_sender(address, allow)
+    }
+
+    #[cfg(feature = "calendar")]
+    fn calendars(&self) -> impl Future<Output = StoreResult<Vec<CalendarDto>>> + Send {
+        self.inner.calendars()
+    }
+
+    #[cfg(feature = "calendar")]
+    fn events_in(
+        &self,
+        range: Range<i64>,
+        calendars: Vec<CalendarTargetDto>,
+    ) -> impl Future<Output = StoreResult<Vec<EventInstanceDto>>> + Send {
+        self.inner.events_in(range, calendars)
+    }
+
+    #[cfg(feature = "calendar")]
+    fn event(
+        &self,
+        account: AccountId,
+        href: String,
+    ) -> impl Future<Output = StoreResult<Option<CalEventDto>>> + Send {
+        self.inner.event(account, href)
+    }
+
+    #[cfg(feature = "calendar")]
+    fn event_by_uid(
+        &self,
+        account: AccountId,
+        uid: String,
+    ) -> impl Future<Output = StoreResult<Vec<CalEventDto>>> + Send {
+        self.inner.event_by_uid(account, uid)
+    }
+
+    #[cfg(feature = "calendar")]
+    fn invitation_context(
+        &self,
+        account: AccountId,
+        message: MessageRowId,
+        uids: Vec<String>,
+    ) -> impl Future<Output = StoreResult<InvitationContext>> + Send {
+        self.inner.invitation_context(account, message, uids)
     }
 }
 
