@@ -33,7 +33,7 @@ pub mod writes;
 
 pub use api::{API_VERSION, Api, Method, PARTIAL_HEADER, Request, Response, offline_error};
 pub use caldav::{CalAction, CalRequest, CalendarError, CalendarService};
-pub use events::{Arrival, ChangeFeed, Event, EventSession, EventSource, OpenError};
+pub use events::{Arrival, ChangeFeed, Event, EventSession, EventSource, OpenError, ReminderPush};
 pub use store::{
     AccountPatch, AccountRegistry, AccountSummary, BoxFuture, CaldavSettingsUpdate, CalendarPatch,
     ChangePage, FeatureDisabled, FetchRawError, ImageProxy, InvitationContext, MarkDeleting,

@@ -7,6 +7,7 @@
 //! the window around today.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -14,6 +15,7 @@ pub(crate) use tagmail_calendar::Window;
 use tagmail_core::AccountId;
 use tagmail_dav::{CalendarInfo, DavError, MultigetItem, ResourceRef};
 use tagmail_store::CacheDb;
+use tagmail_store::alarms::{self, AlarmRow};
 use tagmail_store::calendar::{self, CaldavStatus, CalendarRow, EventRow, InstanceRow};
 use time::OffsetDateTime;
 use tokio::sync::{Notify, watch};
@@ -71,6 +73,38 @@ pub(crate) struct Parsed {
     pub event: EventRow,
     pub ics: Vec<u8>,
     pub instances: Vec<InstanceRow>,
+    pub alarms: Vec<AlarmRow>,
+}
+
+/// The owner's IANA time zone, which floating and all-day alarms fire in.
+pub(crate) type Zone = Option<Arc<str>>;
+
+/// Reads the owner's time zone from `config.db`; UTC on error.
+pub(crate) async fn owner_zone(stores: &Stores) -> Zone {
+    match stores.config.read(alarms::owner_zone).await {
+        Ok(zone) => zone.map(Arc::from),
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot read the owner's time zone");
+            None
+        }
+    }
+}
+
+pub(crate) fn alarm_rows(
+    cal: &tagmail_calendar::Calendar,
+    window: &Window,
+    zone: &Zone,
+) -> Vec<AlarmRow> {
+    cal.alarms(window, zone.as_deref())
+        .into_iter()
+        .map(|a| AlarmRow {
+            recurrence_id: a.recurrence_id,
+            valarm: a.id,
+            fire_at: a.fire_at,
+            start: a.start,
+            title: a.title,
+        })
+        .collect()
 }
 
 /// The instances of `cal` in `window`, and the window edge to record: the
@@ -108,6 +142,7 @@ pub(crate) fn parse(
     data: &str,
     me: &[String],
     window: &Window,
+    zone: &Zone,
 ) -> Option<Parsed> {
     let cal = match tagmail_calendar::parse(data.as_bytes()) {
         Ok(cal) => cal,
@@ -133,6 +168,7 @@ pub(crate) fn parse(
         window_edge,
     };
     Some(Parsed {
+        alarms: alarm_rows(&cal, window, zone),
         instances,
         event,
         ics: data.as_bytes().to_vec(),
@@ -181,6 +217,7 @@ async fn fetch(sync: &CalendarSync<'_>, changed: Vec<Url>) -> SyncResult<usize> 
         let items = sync.dav.multiget(&sync.info.href, chunk).await?;
         let me = sync.me.clone();
         let window = sync.window;
+        let zone = sync.zone.clone();
         let (puts, skipped, gone) = tokio::task::spawn_blocking(move || {
             let mut puts = Vec::new();
             let mut skipped = Vec::new();
@@ -189,7 +226,7 @@ async fn fetch(sync: &CalendarSync<'_>, changed: Vec<Url>) -> SyncResult<usize> 
                 match item {
                     MultigetItem::Found(r) => {
                         let key = href(&r.href);
-                        match parse(&key, r.etag.clone(), &r.data, &me, &window) {
+                        match parse(&key, r.etag.clone(), &r.data, &me, &window, &zone) {
                             Some(parsed) => puts.push(parsed),
                             None => skipped.push((key, r.etag)),
                         }
@@ -204,7 +241,8 @@ async fn fetch(sync: &CalendarSync<'_>, changed: Vec<Url>) -> SyncResult<usize> 
         written += puts.len() + skipped.len() + gone.len();
         write(sync.cache, sync.removing, sync.row.account, move |tx| {
             for p in &puts {
-                calendar::put_event(tx, calendar_id, &p.event, &p.ics, &p.instances)?;
+                let id = calendar::put_event(tx, calendar_id, &p.event, &p.ics, &p.instances)?;
+                alarms::replace_alarms(tx, id, &p.alarms)?;
             }
             calendar::skip_resources(tx, calendar_id, &skipped)?;
             calendar::delete_events(tx, calendar_id, &gone)?;
@@ -261,6 +299,7 @@ pub(crate) struct CalendarSync<'a> {
     pub row: &'a CalendarRow,
     pub me: &'a Arc<Vec<String>>,
     pub window: Window,
+    pub zone: Zone,
     /// Unix seconds.
     pub now: i64,
 }
@@ -414,16 +453,25 @@ impl AccountSync {
     }
 }
 
+/// What one poll expands with: the window, the owner's zone and the time
+/// (Unix seconds).
+#[derive(Clone, Copy)]
+pub(crate) struct Poll<'a> {
+    pub window: Window,
+    pub zone: &'a Zone,
+    pub now: i64,
+}
+
 /// Syncs every calendar in the account's home.
 pub(crate) async fn sync_account(
     cache: &CacheDb,
     removing: &Removing,
     dav: &dyn CalDav,
     account: &CalAccount,
-    window: Window,
-    now: i64,
+    poll: Poll<'_>,
     broken: &mut BrokenReports,
 ) -> SyncResult<AccountSync> {
+    let Poll { window, zone, now } = poll;
     let home = account
         .config
         .home_url
@@ -466,6 +514,7 @@ pub(crate) async fn sync_account(
             row,
             me: &me,
             window,
+            zone: zone.clone(),
             now,
         };
         match sync.run(&mut report_broken).await {
@@ -488,13 +537,15 @@ pub(crate) async fn sync_account(
 /// window's end, and drops instances before its start. An event that no
 /// longer parses keeps its instances and moves its edge, so it is not
 /// tried again every poll.
-pub(crate) async fn slide(cache: &CacheDb, window: Window) -> SyncResult<usize> {
+pub(crate) async fn slide(cache: &CacheDb, window: Window, zone: &Zone) -> SyncResult<usize> {
     let end = window.end_ts();
     let behind = cache.read(move |c| calendar::events_behind(c, end)).await?;
+    let zone = zone.clone();
     let mut slid = 0;
     for chunk in behind.chunks(SLIDE_BATCH) {
         let ids: Vec<i64> = chunk.iter().map(|(id, _)| *id).collect();
         slid += ids.len();
+        let zone = zone.clone();
         cache
             .write(move |tx| {
                 for id in ids {
@@ -506,6 +557,7 @@ pub(crate) async fn slide(cache: &CacheDb, window: Window) -> SyncResult<usize> 
                         Ok(cal) => {
                             let (instances, edge) = instances(&cal, &window, &id.to_string());
                             calendar::replace_instances(tx, id, &instances, edge)?;
+                            alarms::replace_alarms(tx, id, &alarm_rows(&cal, &window, &zone))?;
                         }
                         Err(e) => {
                             tracing::debug!(event = id, error = %e, "cached event no longer parses");
@@ -522,6 +574,42 @@ pub(crate) async fn slide(cache: &CacheDb, window: Window) -> SyncResult<usize> 
         .write(move |tx| calendar::trim_instances(tx, start))
         .await?;
     Ok(slid)
+}
+
+const VALARM: &[u8] = b"BEGIN:VALARM";
+
+/// Recomputes the alarms of every cached event that has one, for a new
+/// owner time zone.
+pub(crate) async fn realarm(cache: &CacheDb, window: Window, zone: &Zone) -> SyncResult<usize> {
+    let ids = cache.read(alarms::event_ids).await?;
+    let mut realarmed = 0;
+    for chunk in ids.chunks(SLIDE_BATCH) {
+        let chunk = chunk.to_vec();
+        let zone = zone.clone();
+        realarmed += cache
+            .write(move |tx| {
+                let mut n = 0;
+                for id in chunk {
+                    let Some(ics) = calendar::event_ics(tx, id)? else {
+                        continue;
+                    };
+                    if !ics
+                        .windows(VALARM.len())
+                        .any(|w| w.eq_ignore_ascii_case(VALARM))
+                    {
+                        continue;
+                    }
+                    let text = String::from_utf8_lossy(&ics);
+                    if let Ok(cal) = tagmail_calendar::parse(text.as_bytes()) {
+                        alarms::replace_alarms(tx, id, &alarm_rows(&cal, &window, &zone))?;
+                        n += 1;
+                    }
+                }
+                Ok(n)
+            })
+            .await?;
+    }
+    Ok(realarmed)
 }
 
 async fn shrink(cache: &CacheDb) {
@@ -560,6 +648,10 @@ pub(crate) struct Runner {
     pub mail: Arc<dyn MailAccess>,
     /// Wakes [`invitations`] after each poll.
     pub inbox: Arc<Notify>,
+    /// Set when the owner's time zone changed.
+    pub rezone: Arc<AtomicBool>,
+    /// The zone the cached alarms were computed in; `None` until known.
+    pub zone: Option<Zone>,
 }
 
 impl Runner {
@@ -580,12 +672,7 @@ impl Runner {
         Ok(self.connector.connect(&account.login, &host)?)
     }
 
-    async fn sync_one(
-        &mut self,
-        id: AccountId,
-        window: Window,
-        now: i64,
-    ) -> SyncResult<AccountSync> {
+    async fn sync_one(&mut self, id: AccountId, poll: Poll<'_>) -> SyncResult<AccountSync> {
         let account = super::load(&self.stores, id)
             .await?
             .ok_or(crate::Error::NoAccount(id.0))?;
@@ -595,8 +682,7 @@ impl Runner {
             &self.removing,
             dav.as_ref(),
             &account,
-            window,
-            now,
+            poll,
             &mut self.broken,
         )
         .await
@@ -644,11 +730,33 @@ impl Runner {
         }
     }
 
-    /// One poll of every account, then the window slide.
+    /// Recomputes the cached alarms when the owner's zone is no longer the
+    /// one they were computed in.
+    /// `force` recomputes them anyway, for a cache that holds alarms of
+    /// another zone.
+    pub(crate) async fn rezone(&mut self, force: bool) {
+        self.rezone.store(false, AtomicOrdering::Release);
+        let zone = owner_zone(&self.stores).await;
+        if !force && self.zone.as_ref().is_some_and(|z| *z == zone) {
+            return;
+        }
+        let window = Window::around(OffsetDateTime::now_utc().date());
+        match realarm(&self.stores.cache, window, &zone).await {
+            Ok(_) => self.zone = Some(zone),
+            Err(e) => {
+                tracing::error!(error = %e, "cannot recompute reminders for the new time zone")
+            }
+        }
+    }
+
+    /// One poll of every account, then the window slide. A zone change
+    /// during the poll recomputes what it wrote.
     pub(crate) async fn poll(&mut self) {
         self.run_ops().await;
         let now = OffsetDateTime::now_utc();
         let window = Window::around(now.date());
+        let zone = owner_zone(&self.stores).await;
+
         let accounts = match self.stores.config.read(calendar::caldav_accounts).await {
             Ok(accounts) => accounts,
             Err(e) => {
@@ -672,7 +780,12 @@ impl Runner {
             if removing(&self.removing, id) {
                 continue;
             }
-            match self.sync_one(id, window, unix(now)).await {
+            let poll = Poll {
+                window,
+                zone: &zone,
+                now: unix(now),
+            };
+            match self.sync_one(id, poll).await {
                 Ok(report) => {
                     written += report.written;
                     record(&self.stores, id, report.error_text()).await;
@@ -684,10 +797,14 @@ impl Runner {
                 }
             }
         }
-        match slide(&self.stores.cache, window).await {
+        match slide(&self.stores.cache, window, &zone).await {
             Ok(slid) => written += slid,
             Err(e) => tracing::error!(error = %e, "cannot slide the calendar window"),
         }
+        // What this poll wrote uses `zone`; older rows may use another.
+        let stale = self.zone.as_ref().is_some_and(|z| *z != zone);
+        self.zone = Some(zone);
+        self.rezone(stale).await;
         if written > 0 {
             shrink(&self.stores.cache).await;
         }
@@ -739,6 +856,7 @@ pub(crate) async fn run(
     mut runner: Runner,
     wake: Arc<Notify>,
     ops: Arc<Notify>,
+    alarms: Arc<Notify>,
     mut stop: watch::Receiver<bool>,
 ) {
     executor::recover(&runner.stores).await;
@@ -759,6 +877,10 @@ pub(crate) async fn run(
                 _ = stop.wait_for(|stop| *stop) => return,
             }
         }
+        if runner.rezone.load(AtomicOrdering::Acquire) {
+            runner.rezone(false).await;
+        }
+        alarms.notify_one();
         let until_op = executor::next_due(&runner.stores).await.map(|at| {
             let wait = at.saturating_sub(crate::executor::now_secs()).max(0);
             tokio::time::Instant::now() + Duration::from_secs(wait.unsigned_abs())
@@ -834,8 +956,11 @@ mod tests {
                 &self.removing,
                 &self.dav,
                 &self.account,
-                Window::around(TODAY),
-                NOW,
+                Poll {
+                    window: Window::around(TODAY),
+                    zone: &None,
+                    now: NOW,
+                },
                 &mut self.broken,
             )
             .await
@@ -1146,13 +1271,55 @@ mod tests {
         f.sync().await;
         let window = Window::around(TODAY);
         assert_eq!(f.edges().await, [None, None, Some(window.end_ts())]);
-        assert_eq!(slide(&f.cache, window).await.unwrap(), 0);
+        assert_eq!(slide(&f.cache, window, &None).await.unwrap(), 0);
 
         let later = Window::around(TODAY + time::Duration::days(7));
-        assert_eq!(slide(&f.cache, later).await.unwrap(), 1);
+        assert_eq!(slide(&f.cache, later, &None).await.unwrap(), 1);
         assert_eq!(f.edges().await, [None, None, Some(later.end_ts())]);
         assert_eq!(f.events().await[2].3, WEEKLY_IN_WINDOW + 1);
-        assert_eq!(slide(&f.cache, later).await.unwrap(), 0);
+        assert_eq!(slide(&f.cache, later, &None).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_new_owner_zone_moves_all_day_alarms() {
+        let mut f = Fixture::new();
+        f.dav.calendar(None, None);
+        f.dav.put(
+            "holiday.ics",
+            "\"1\"",
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//t//EN\r\nBEGIN:VEVENT\r\n\
+             UID:holiday\r\nDTSTAMP:20261101T120000Z\r\nDTSTART;VALUE=DATE:20261215\r\n\
+             SUMMARY:Holiday\r\nBEGIN:VALARM\r\nACTION:DISPLAY\r\nDESCRIPTION:x\r\n\
+             TRIGGER:-PT15H\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        );
+        f.sync().await;
+        async fn fires(cache: &CacheDb) -> tagmail_store::Result<Vec<(i64, i64)>> {
+            cache
+                .read(|c| {
+                    let mut stmt = c.prepare("SELECT fire_at, start_utc FROM cal_alarm")?;
+                    Ok(stmt
+                        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                        .collect::<tagmail_store::rusqlite::Result<Vec<(i64, i64)>>>()?)
+                })
+                .await
+        }
+        // 2026-12-14T09:00Z, 15 hours before midnight UTC.
+        assert_eq!(
+            fires(&f.cache).await.unwrap(),
+            [(1_797_238_800, 1_797_292_800)]
+        );
+        let zone: Zone = Some(Arc::from("Europe/Zurich"));
+        assert_eq!(
+            realarm(&f.cache, Window::around(TODAY), &zone)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            fires(&f.cache).await.unwrap(),
+            [(1_797_238_800 - 3600, 1_797_292_800 - 3600)],
+            "09:00 CET the day before"
+        );
     }
 
     #[tokio::test]
@@ -1181,9 +1348,9 @@ mod tests {
             .await
             .unwrap();
         let window = Window::around(TODAY);
-        assert_eq!(slide(&f.cache, window).await.unwrap(), 1);
+        assert_eq!(slide(&f.cache, window, &None).await.unwrap(), 1);
         assert_eq!(f.edges().await, [Some(window.end_ts())]);
-        assert_eq!(slide(&f.cache, window).await.unwrap(), 0);
+        assert_eq!(slide(&f.cache, window, &None).await.unwrap(), 0);
     }
 
     #[tokio::test]

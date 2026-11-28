@@ -16,6 +16,7 @@ const WINDOW_KEY: &str = "windowDays";
 const RAW_CAP_KEY: &str = "rawCapBytes";
 const NOTIFY_KEY: &str = "notify";
 const NOTIFY_CONTENT_KEY: &str = "notifyContent";
+const REMINDERS_KEY: &str = "reminders";
 const AUTOSTART_KEY: &str = "autostart";
 const CLOSE_TO_TRAY_KEY: &str = "closeToTray";
 
@@ -25,6 +26,7 @@ pub fn defaults() -> DesktopSettingsDto {
         raw_cap_mb: DEFAULT_RAW_CAP_BYTES / MIB,
         notify: true,
         notify_content: true,
+        reminders: true,
         autostart: false,
         close_to_tray: true,
     }
@@ -60,6 +62,7 @@ pub fn apply(
     }
     next.notify = patch.notify.unwrap_or(next.notify);
     next.notify_content = patch.notify_content.unwrap_or(next.notify_content);
+    next.reminders = patch.reminders.unwrap_or(next.reminders);
     next.autostart = patch.autostart.unwrap_or(next.autostart);
     next.close_to_tray = patch.close_to_tray.unwrap_or(next.close_to_tray);
     Ok(next)
@@ -83,6 +86,7 @@ pub fn load(durable: &Durable) -> tagmail_replica::Result<DesktopSettingsDto> {
         raw_cap_mb: read::<u64>(durable, RAW_CAP_KEY)?.map_or(d.raw_cap_mb, |b| b / MIB),
         notify: read(durable, NOTIFY_KEY)?.unwrap_or(d.notify),
         notify_content: read(durable, NOTIFY_CONTENT_KEY)?.unwrap_or(d.notify_content),
+        reminders: read(durable, REMINDERS_KEY)?.unwrap_or(d.reminders),
         autostart: read(durable, AUTOSTART_KEY)?.unwrap_or(d.autostart),
         close_to_tray: read(durable, CLOSE_TO_TRAY_KEY)?.unwrap_or(d.close_to_tray),
     })
@@ -93,6 +97,7 @@ pub fn save(durable: &Durable, settings: &DesktopSettingsDto) -> tagmail_replica
     durable.set_meta(RAW_CAP_KEY, &(settings.raw_cap_mb * MIB).to_string())?;
     durable.set_meta(NOTIFY_KEY, &settings.notify.to_string())?;
     durable.set_meta(NOTIFY_CONTENT_KEY, &settings.notify_content.to_string())?;
+    durable.set_meta(REMINDERS_KEY, &settings.reminders.to_string())?;
     durable.set_meta(AUTOSTART_KEY, &settings.autostart.to_string())?;
     durable.set_meta(CLOSE_TO_TRAY_KEY, &settings.close_to_tray.to_string())
 }

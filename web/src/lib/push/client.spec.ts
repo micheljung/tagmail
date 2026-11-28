@@ -65,6 +65,7 @@ function row(overrides: Partial<PushSubscriptionDto> = {}): PushSubscriptionDto 
 		createdAt: 0,
 		lastSuccessAt: null,
 		current: true,
+		reminders: false,
 		...overrides
 	};
 }
@@ -85,7 +86,12 @@ function memoryPrefs(initial?: PushPrefs): PushPrefStore & { value: PushPrefs | 
 	return store;
 }
 
-const SAVED: PushPrefs = { endpoint: 'https://push.example/a', preview: false, accountIds: [2] };
+const SAVED: PushPrefs = {
+	endpoint: 'https://push.example/a',
+	preview: false,
+	accountIds: [2],
+	reminders: true
+};
 const refusal = { status: 422, field: 'accountIds' };
 const SAVED_KEYS = { p256dh: 'p', auth: 'a' };
 
@@ -101,12 +107,21 @@ function fakeApi(key: Uint8Array, rows: PushSubscriptionDto[] = [], accountIds =
 		subscribePush: (dto) => {
 			posted.push(dto);
 			return Promise.resolve(
-				row({ preview: dto.preview ?? true, accountIds: dto.accountIds ?? null })
+				row({
+					preview: dto.preview ?? true,
+					accountIds: dto.accountIds ?? null,
+					reminders: dto.reminders ?? false
+				})
 			);
 		},
 		updatePushSubscription: (id, patch) =>
 			Promise.resolve(
-				row({ id, preview: patch.preview ?? true, accountIds: patch.accountIds ?? null })
+				row({
+					id,
+					preview: patch.preview ?? true,
+					accountIds: patch.accountIds ?? null,
+					reminders: patch.reminders ?? true
+				})
 			),
 		removePushSubscription
 	};
@@ -304,7 +319,9 @@ describe('enablePush', () => {
 		const api = fakeApi(NEW_KEY);
 		const prefs = memoryPrefs();
 		const request = vi.fn(() => Promise.resolve('granted' as const));
-		expect(await enablePush(asManager(manager), api, prefs, request)).toEqual(row());
+		expect(await enablePush(asManager(manager), api, prefs, request)).toEqual(
+			row({ reminders: true })
+		);
 		expect(request.mock.invocationCallOrder[0]).toBeLessThan(
 			manager.subscribe.mock.invocationCallOrder[0]
 		);

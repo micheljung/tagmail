@@ -42,6 +42,9 @@ pub struct PushSubscribeDto {
     /// The endpoint this one renews (`pushsubscriptionchange`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub old_endpoint: Option<String>,
+    /// Calendar reminders; a new subscription defaults to false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reminders: Option<bool>,
 }
 
 /// `PATCH /api/push/subscriptions/{id}` body: the fields to change.
@@ -59,6 +62,9 @@ pub struct PushSubscriptionPatchDto {
     )]
     #[ts(optional)]
     pub account_ids: Option<Option<Vec<i64>>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reminders: Option<bool>,
 }
 
 /// Tells a field that is `null` (`Some(None)`) from one that is absent
@@ -88,6 +94,7 @@ pub struct PushSubscriptionDto {
     pub last_success_at: Option<i64>,
     /// Belongs to the caller's session: this browser.
     pub current: bool,
+    pub reminders: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -95,6 +102,7 @@ pub struct PushSubscriptionDto {
 pub enum PushKindDto {
     NewMail,
     Test,
+    Reminder,
 }
 
 /// The plaintext of a push before RFC 8291 encryption. Without preview,
@@ -122,6 +130,19 @@ pub struct PushPayloadDto {
     pub subject: Option<String>,
     /// App path to open on click; always starts with a single `/`.
     #[ts(optional = false)]
+    pub url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reminder: Option<PushReminderDto>,
+}
+
+/// A due calendar reminder; `tag` is its alarm key, to dismiss it with.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PushReminderDto {
+    pub title: String,
+    /// Unix seconds.
+    pub start: i64,
+    pub tag: String,
     pub url: String,
 }
 
@@ -153,10 +174,11 @@ mod tests {
                 preview: Some(false),
                 account_ids: Some(vec![1, 2]),
                 old_endpoint: Some("https://push.example/w".into()),
+                reminders: Some(true),
             },
             json!({"endpoint": "https://push.example/x", "keys": {"p256dh": "BP", "auth": "au"},
                    "preview": false, "accountIds": [1, 2],
-                   "oldEndpoint": "https://push.example/w"}),
+                   "oldEndpoint": "https://push.example/w", "reminders": true}),
         );
         round_trip(
             &PushSubscriptionDto {
@@ -168,9 +190,11 @@ mod tests {
                 created_at: 10,
                 last_success_at: None,
                 current: true,
+                reminders: false,
             },
             json!({"id": 3, "endpointHost": "push.example", "preview": true, "accountIds": null,
-                   "userAgent": "UA", "createdAt": 10, "lastSuccessAt": null, "current": true}),
+                   "userAgent": "UA", "createdAt": 10, "lastSuccessAt": null, "current": true,
+                   "reminders": false}),
         );
         round_trip(
             &PushKeyDto {
@@ -204,6 +228,7 @@ mod tests {
             &PushSubscriptionPatchDto {
                 preview: None,
                 account_ids: Some(Some(vec![4])),
+                reminders: None,
             },
             json!({"accountIds": [4]}),
         );
@@ -222,6 +247,7 @@ mod tests {
                 from: Some("Alice Example".into()),
                 subject: Some("Lunch?".into()),
                 url: "/thread/4711".into(),
+                reminder: None,
             },
             json!({"v": 1, "kind": "newMail", "accountId": 1, "count": 1, "threadId": 4711,
                    "from": "Alice Example", "subject": "Lunch?", "url": "/thread/4711"}),
@@ -236,6 +262,7 @@ mod tests {
                 from: None,
                 subject: None,
                 url: "/settings/notifications".into(),
+                reminder: None,
             },
             json!({"v": 1, "kind": "test", "url": "/settings/notifications"}),
         );

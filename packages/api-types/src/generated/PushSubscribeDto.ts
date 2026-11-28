@@ -19,4 +19,8 @@ accountIds?: Array<number>,
 /**
  * The endpoint this one renews (`pushsubscriptionchange`).
  */
-oldEndpoint?: string, };
+oldEndpoint?: string, 
+/**
+ * Calendar reminders; a new subscription defaults to false.
+ */
+reminders?: boolean, };

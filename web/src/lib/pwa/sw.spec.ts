@@ -3,6 +3,7 @@ import {
 	FALLBACK_URL,
 	notificationFor,
 	openApp,
+	reminderBody,
 	fetchStrategy,
 	safeAppUrl,
 	servesShell,
@@ -262,5 +263,50 @@ describe('openApp', () => {
 		const clients = fakeClients(0);
 		await openApp(clients, '/inbox');
 		expect(clients.openWindow).toHaveBeenCalledWith('/inbox');
+	});
+});
+
+describe('reminders', () => {
+	const start = new Date(2026, 11, 15, 9, 30).getTime() / 1000;
+	const sameDay = new Date(2026, 11, 15, 9, 15).getTime();
+	const dayBefore = new Date(2026, 11, 14, 18, 0).getTime();
+	const time = new Date(start * 1000).toLocaleTimeString([], {
+		hour: '2-digit',
+		minute: '2-digit'
+	});
+
+	it('show the time today and the day otherwise', () => {
+		expect(reminderBody(start, sameDay)).toBe(`Starts ${time}`);
+		const other = reminderBody(start, dayBefore);
+		expect(other).not.toBe(`Starts ${time}`);
+		expect(other).toContain(new Date(start * 1000).toLocaleString([], { weekday: 'short' }));
+	});
+
+	it('are tagged with their alarm key and keep it to dismiss with', () => {
+		const key = '0123456789abcdef0123456789abcdef';
+		const spec = notificationFor(
+			JSON.stringify({
+				v: 1,
+				kind: 'reminder',
+				url: '/calendar',
+				reminder: { title: 'Dentist', start, tag: key, url: '/calendar' }
+			}),
+			'https://mail.example.com',
+			sameDay
+		);
+		expect(spec).toMatchObject({
+			title: 'Dentist',
+			options: {
+				body: `Starts ${time}`,
+				tag: key,
+				renotify: true,
+				data: { reminder: key }
+			}
+		});
+		const at = new Date(start * 1000);
+		const day = [at.getFullYear(), at.getMonth() + 1, at.getDate()]
+			.map((n) => String(n).padStart(2, '0'))
+			.join('-');
+		expect(spec.options.data.url).toBe(`/calendar?view=day&date=${day}`);
 	});
 });

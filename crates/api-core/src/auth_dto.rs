@@ -70,6 +70,17 @@ pub struct DeviceDto {
     pub name: String,
     pub created_at: i64,
     pub last_seen_at: Option<i64>,
+    /// Shows calendar reminders.
+    pub reminders: bool,
+}
+
+/// `PATCH /api/devices/{id}` body; a device may change only itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DevicePatchDto {
+    #[serde(default)]
+    #[ts(optional)]
+    pub reminders: Option<bool>,
 }
 
 /// `GET /api/devices`: paired devices that are not revoked.

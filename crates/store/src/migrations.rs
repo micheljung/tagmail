@@ -22,6 +22,7 @@ pub(crate) const CACHE: &[&str] = &[
     include_str!("../migrations/cache/V5__has_calendar.sql"),
     include_str!("../migrations/cache/V6__calendar.sql"),
     include_str!("../migrations/cache/V7__cal_inbox_backoff.sql"),
+    include_str!("../migrations/cache/V8__alarm_payload.sql"),
 ];
 
 /// `user_version` of an up-to-date `config.db`.

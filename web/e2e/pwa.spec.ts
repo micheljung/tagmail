@@ -15,14 +15,17 @@ interface PushStub {
 }
 
 interface MockPush {
-	posted: { endpoint: string; keys: { p256dh: string; auth: string } }[];
+	posted: { endpoint: string; keys: { p256dh: string; auth: string }; reminders?: boolean }[];
 	tests: number[];
 	subscriptions: {
 		id: number;
 		preview: boolean;
 		accountIds: number[] | null;
 		current: boolean;
+		reminders: boolean;
 	}[];
+	dismissed: string[];
+	timeZone: string | null;
 }
 
 /**
@@ -101,7 +104,12 @@ async function cachedPaths(page: Page): Promise<string[]> {
 
 interface Shown {
 	title: string;
-	options: { body: string; tag: string; renotify: boolean; data: { url: string } };
+	options: {
+		body: string;
+		tag: string;
+		renotify: boolean;
+		data: { url: string; reminder?: string };
+	};
 }
 
 /**
@@ -155,7 +163,7 @@ test('Enable notifications subscribes this browser and the settings apply to it'
 	expect(await stubState(page)).toMatchObject({ permissionRequests: 1, subscribed: 1 });
 	const { posted } = await mockPush(page);
 	expect(posted).toEqual([
-		{ endpoint: ENDPOINT, keys: { p256dh: 'BPk3x0', auth: 'c2VjcmV0LWF1dGgtMTY' } }
+		{ endpoint: ENDPOINT, keys: { p256dh: 'BPk3x0', auth: 'c2VjcmV0LWF1dGgtMTY' }, reminders: true }
 	]);
 
 	await page.getByLabel('Show sender and subject').uncheck();
@@ -176,6 +184,57 @@ test('Enable notifications subscribes this browser and the settings apply to it'
 	await expect(enable).toBeVisible();
 	expect((await stubState(page)).unsubscribed).toBe(1);
 	expect((await mockPush(page)).subscriptions).toEqual([]);
+});
+
+test('Calendar reminders are on for a new subscription and follow the toggle', async ({ page }) => {
+	await stubPush(page);
+	await openSettings(page);
+	await page.getByRole('button', { name: 'Enable notifications' }).click();
+
+	const reminders = page.getByLabel('Calendar reminders');
+	await expect(reminders).toBeChecked();
+	expect((await mockPush(page)).subscriptions).toMatchObject([{ reminders: true }]);
+	await reminders.uncheck();
+	await expect.poll(async () => (await mockPush(page)).subscriptions[0]?.reminders).toBe(false);
+	await reminders.check();
+	await expect.poll(async () => (await mockPush(page)).subscriptions[0]?.reminders).toBe(true);
+});
+
+test('settings saved before reminders existed turn them on once', async ({ page }) => {
+	await stubPush(page, { existing: VAPID_PUBLIC_KEY });
+	await openSettings(page);
+	await expect(page.locator('[data-push-state="enabled"]')).toBeVisible();
+	await page.evaluate(
+		(prefs) =>
+			new Promise<void>((resolve, reject) => {
+				const open = indexedDB.open('tagmail-push');
+				open.onsuccess = () => {
+					const tx = open.result.transaction('prefs', 'readwrite');
+					tx.objectStore('prefs').put(prefs, 'device');
+					tx.oncomplete = () => resolve();
+					tx.onerror = () => reject(new Error('saving the push settings failed'));
+				};
+			}),
+		{ endpoint: ENDPOINT, preview: true, accountIds: null }
+	);
+	await page.request.patch(`/api/push/subscriptions/1`, {
+		headers: { 'X-Requested-With': 'tagmail' },
+		data: { reminders: false }
+	});
+
+	const before = (await mockPush(page)).posted.length;
+	await page.reload();
+	await expect(page.getByLabel('Calendar reminders')).toBeChecked();
+	const { posted, subscriptions } = await mockPush(page);
+	expect(posted[before]).not.toHaveProperty('reminders');
+	expect(subscriptions).toMatchObject([{ reminders: true }]);
+
+	await page.getByLabel('Calendar reminders').uncheck();
+	await expect.poll(async () => (await mockPush(page)).subscriptions[0]?.reminders).toBe(false);
+	await expect(page.getByLabel('Calendar reminders')).toBeEnabled();
+	await page.reload();
+	await expect(page.getByLabel('Calendar reminders')).not.toBeChecked();
+	expect((await mockPush(page)).posted.at(-1)).toMatchObject({ reminders: false });
 });
 
 test('a push service failure shows what to check and lets the user try again', async ({ page }) => {
@@ -437,4 +496,78 @@ test('a push shows its notification, without preview and when malformed too', as
 		{ title: 'New mail', body: '', tag: 'inbox-1', url: '/inbox' },
 		{ title: 'New mail', body: '', tag: 'tagmail', url: '/inbox' }
 	]);
+});
+
+test('clicking or closing a reminder dismisses it everywhere', async ({ page, context }) => {
+	await signIn(page);
+	await page.goto('/inbox');
+	await page.evaluate(() => navigator.serviceWorker.ready.then(() => undefined));
+	const worker = await recordNotifications(context);
+	const cdp = await context.newCDPSession(page);
+	const registrations: string[] = [];
+	cdp.on('ServiceWorker.workerRegistrationUpdated', (e) =>
+		registrations.push(...e.registrations.map((r) => r.registrationId))
+	);
+	await cdp.send('ServiceWorker.enable');
+	await expect.poll(() => registrations.length).toBeGreaterThan(0);
+	const key = '0123456789abcdef0123456789abcdef';
+	await cdp.send('ServiceWorker.deliverPushMessage', {
+		origin: new URL(page.url()).origin,
+		registrationId: registrations[0],
+		data: JSON.stringify({
+			v: 1,
+			kind: 'reminder',
+			accountId: 1,
+			url: '/calendar',
+			reminder: { title: 'Dentist', start: 1_796_115_600, tag: key, url: '/calendar' }
+		})
+	});
+	const shown = () => worker.evaluate(() => (self as unknown as { __shown: Shown[] }).__shown);
+	await expect.poll(async () => (await shown()).length).toBe(1);
+	const [reminder] = await shown();
+	expect(reminder).toMatchObject({ title: 'Dentist', options: { tag: key, renotify: true } });
+	expect(reminder.options.data.reminder).toBe(key);
+
+	for (const type of ['notificationclick', 'notificationclose'])
+		await worker.evaluate(
+			({ type, data }) => {
+				const event = Object.assign(new Event(type), {
+					notification: { data, close: () => {} },
+					waitUntil: () => {}
+				});
+				self.dispatchEvent(event);
+			},
+			{ type, data: reminder.options.data }
+		);
+	await expect.poll(async () => (await mockPush(page)).dismissed).toEqual([key, key]);
+});
+
+test.describe('in Zurich', () => {
+	test.use({ timezoneId: 'Europe/Zurich' });
+
+	test('the browser gives its time zone once and Settings changes it', async ({ page }) => {
+		await openSettings(page);
+		await expect.poll(async () => (await mockPush(page)).timeZone).toBe('Europe/Zurich');
+		const zone = page.locator('[data-time-zone]');
+		await expect(zone).toHaveValue('Europe/Zurich');
+		await zone.selectOption('America/New_York');
+		await expect.poll(async () => (await mockPush(page)).timeZone).toBe('America/New_York');
+		await page.reload();
+		await expect(zone).toHaveValue('America/New_York');
+	});
+});
+
+test('an unset or refused time zone says so', async ({ page }) => {
+	await page.route('/api/reminders/settings', (route) =>
+		route.request().method() === 'PATCH'
+			? route.fulfill({
+					status: 422,
+					json: { error: 'invalid', message: 'not an IANA time zone', field: 'timeZone' }
+				})
+			: route.fallback()
+	);
+	await openSettings(page);
+	await expect(page.locator('[data-zone-unset]')).toContainText('remind in UTC');
+	await page.locator('[data-time-zone]').selectOption('Europe/Zurich');
+	await expect(page.locator('[data-zone-error]')).toContainText('not an IANA time zone');
 });

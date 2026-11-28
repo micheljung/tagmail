@@ -60,6 +60,8 @@ pub struct DesktopSettingsDto {
     pub notify: bool,
     /// Show sender and subject in notifications.
     pub notify_content: bool,
+    /// Calendar reminders on this device; the server sends none when off.
+    pub reminders: bool,
     pub autostart: bool,
     pub close_to_tray: bool,
 }
@@ -73,6 +75,7 @@ pub struct DesktopSettingsPatchDto {
     pub raw_cap_mb: Option<u64>,
     pub notify: Option<bool>,
     pub notify_content: Option<bool>,
+    pub reminders: Option<bool>,
     pub autostart: Option<bool>,
     pub close_to_tray: Option<bool>,
 }

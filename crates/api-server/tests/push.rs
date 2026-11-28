@@ -19,6 +19,7 @@ use p256::ecdsa::{Signature, VerifyingKey};
 use p256::elliptic_curve::Generate;
 use serde_json::{Value, json};
 use tagmail_api_core::Arrival;
+use tagmail_api_core::calendar_dto::REMINDER_GRACE_SECS;
 use tagmail_api_core::dto::AddressDto;
 use tagmail_api_server::auth::DEFAULT_SESSION_IDLE;
 use tagmail_api_server::outbound::{EndpointPolicy, Resolver};
@@ -1132,5 +1133,294 @@ async fn a_lagging_dispatcher_sends_generic_new_mail() {
         "missed arrivals leave count, account and sender unknown"
     );
     mock.quiet().await;
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn reminder_payload_and_cooldown_bypass() {
+    let dirs = Dirs::new();
+    let server = Server::start(&dirs.config(loopback()), None).await.unwrap();
+    let c = owner(&server).await;
+    add_accounts(&server, &[1]).await;
+    let mut mock = Mock::start().await;
+    let (on, off) = (Browser::new(), Browser::new());
+    let mut body = on.subscription(&mock.endpoint("on"));
+    body["reminders"] = json!(true);
+    let dto: Value = subscribe(&c, &server, &body).await.json().await.unwrap();
+    assert_eq!(dto["reminders"], true);
+    let id = subscribed(&c, &server, &off.subscription(&mock.endpoint("off"))).await;
+    let row = &subscriptions(&c, &server).await[1];
+    assert_eq!(
+        (row["id"].as_i64(), &row["reminders"]),
+        (Some(id), &json!(false))
+    );
+
+    server
+        .feed()
+        .publish_arrivals(vec![arrival(1, 7, "Alice", "Lunch?")]);
+    let mut paths = [mock.next().await.path, mock.next().await.path];
+    paths.sort();
+    assert_eq!(paths, ["/push/off", "/push/on"]);
+
+    let session = server
+        .store()
+        .config()
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT lower(hex(session_hash)) FROM push_subscription LIMIT 1",
+                [],
+                |r| r.get::<_, String>(0),
+            )?)
+        })
+        .await
+        .unwrap();
+    server
+        .feed()
+        .publish_reminder(tagmail_api_core::ReminderPush {
+            alarm_key: "0123456789abcdef0123456789abcdef".into(),
+            account_id: 1,
+            title: Some("Standup".into()),
+            start: 1_796_115_600,
+            fire_at: unix_now(),
+            sessions: vec![session],
+        });
+    let push = mock.next().await;
+    assert_eq!(push.path, "/push/on", "inside the mail cooldown");
+    assert!(push.headers.get("topic").is_none());
+    assert_eq!(push.headers["urgency"], "high");
+    let ttl: i64 = push.headers["ttl"].to_str().unwrap().parse().unwrap();
+    assert!(
+        (REMINDER_GRACE_SECS - 5..=REMINDER_GRACE_SECS).contains(&ttl),
+        "the grace is the TTL: {ttl}"
+    );
+    assert_eq!(
+        on.decrypt(&push.body),
+        json!({"v": 1, "kind": "reminder", "accountId": 1, "url": "/calendar",
+               "reminder": {"title": "Standup", "start": 1_796_115_600,
+                            "tag": "0123456789abcdef0123456789abcdef", "url": "/calendar"}})
+    );
+    mock.quiet().await;
+
+    let patched: Value = c
+        .patch(url(&server, &format!("/api/push/subscriptions/{id}")))
+        .json(&json!({"reminders": true}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(patched["reminders"], true);
+    server.shutdown().await.unwrap();
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .cast_signed()
+}
+
+async fn reminder_session(server: &Server) -> String {
+    server
+        .store()
+        .config()
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT lower(hex(session_hash)) FROM push_subscription LIMIT 1",
+                [],
+                |r| r.get::<_, String>(0),
+            )?)
+        })
+        .await
+        .unwrap()
+}
+
+fn due(key: &str, fire_at: i64, session: &str) -> tagmail_api_core::ReminderPush {
+    tagmail_api_core::ReminderPush {
+        alarm_key: key.into(),
+        account_id: 1,
+        title: Some("Dentist".into()),
+        start: 1_796_115_600,
+        fire_at,
+        sessions: vec![session.to_owned()],
+    }
+}
+
+#[tokio::test]
+async fn a_failed_reminder_is_retried_once_and_hides_its_title_without_preview() {
+    let dirs = Dirs::new();
+    let server = Server::start(&dirs.config(loopback()), None).await.unwrap();
+    let c = owner(&server).await;
+    add_accounts(&server, &[1]).await;
+    let mut mock = Mock::start().await;
+    let browser = Browser::new();
+    let mut body = browser.subscription(&mock.endpoint("a"));
+    body["reminders"] = json!(true);
+    body["preview"] = json!(false);
+    subscribe(&c, &server, &body).await;
+    let session = reminder_session(&server).await;
+
+    mock.status.store(503, Ordering::SeqCst);
+    let key = "00112233445566778899aabbccddeeff";
+    server
+        .feed()
+        .publish_reminder(due(key, unix_now(), &session));
+    let first = mock.next().await;
+    assert_eq!(
+        browser.decrypt(&first.body)["reminder"],
+        json!({"title": "Reminder", "start": 1_796_115_600, "tag": key, "url": "/calendar"})
+    );
+    mock.status.store(201, Ordering::SeqCst);
+    let retry = mock.next().await;
+    assert_eq!(browser.decrypt(&retry.body), browser.decrypt(&first.body));
+    mock.quiet().await;
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_rate_limited_push_service_gets_no_reminder_past_its_grace() {
+    let dirs = Dirs::new();
+    let server = Server::start(&dirs.config(loopback()), None).await.unwrap();
+    let c = owner(&server).await;
+    add_accounts(&server, &[1]).await;
+    let mut mock = Mock::start().await;
+    let browser = Browser::new();
+    let mut body = browser.subscription(&mock.endpoint("a"));
+    body["reminders"] = json!(true);
+    subscribe(&c, &server, &body).await;
+    let session = reminder_session(&server).await;
+
+    mock.status.store(429, Ordering::SeqCst);
+    let nearly_late = unix_now() - REMINDER_GRACE_SECS + 10;
+    server.feed().publish_reminder(due(
+        "0123456789abcdef0123456789abcde0",
+        nearly_late,
+        &session,
+    ));
+    mock.next().await;
+    mock.quiet().await;
+    mock.status.store(201, Ordering::SeqCst);
+    server.feed().publish_reminder(due(
+        "0123456789abcdef0123456789abcde1",
+        nearly_late,
+        &session,
+    ));
+    mock.quiet().await;
+
+    server.feed().publish_reminder(due(
+        "0123456789abcdef0123456789abcde2",
+        unix_now() - REMINDER_GRACE_SECS - 1,
+        &session,
+    ));
+    mock.quiet().await;
+    server.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn devices_switch_their_own_reminders_and_the_owner_zone_is_validated() {
+    let dirs = Dirs::new();
+    let server = Server::start(&dirs.config(loopback()), None).await.unwrap();
+    let c = owner(&server).await;
+    let mut tokens = Vec::new();
+    for name in ["Laptop", "Desk"] {
+        let pairing: Value = c
+            .post(url(&server, "/api/pairing"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let paired: Value = reqwest::Client::new()
+            .post(url(&server, "/api/pairing/exchange"))
+            .header("x-requested-with", "tagmail")
+            .json(&json!({ "code": pairing["code"], "name": name }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        tokens.push(paired["token"].as_str().unwrap().to_owned());
+    }
+    let devices: Value = c
+        .get(url(&server, "/api/devices"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let id_of = |name: &str| {
+        devices["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|d| d["name"] == name)
+            .map(|d| (d["id"].as_i64().unwrap(), d["reminders"].clone()))
+            .unwrap()
+    };
+    let (laptop, on) = id_of("Laptop");
+    let (desk, _) = id_of("Desk");
+    assert_eq!(on, true, "a device shows reminders by default");
+    let patch = |token: &str, id: i64, reminders: bool| {
+        reqwest::Client::new()
+            .patch(url(&server, &format!("/api/devices/{id}")))
+            .bearer_auth(token.to_owned())
+            .json(&json!({ "reminders": reminders }))
+            .send()
+    };
+    let own = patch(&tokens[0], laptop, false).await.unwrap();
+    assert_eq!(own.status(), 200);
+    assert_eq!(own.json::<Value>().await.unwrap()["reminders"], false);
+    assert_eq!(patch(&tokens[0], desk, false).await.unwrap().status(), 403);
+    let by_owner = c
+        .patch(url(&server, &format!("/api/devices/{desk}")))
+        .json(&json!({ "reminders": false }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(by_owner.json::<Value>().await.unwrap()["reminders"], false);
+
+    let settings = |c: &reqwest::Client| {
+        c.patch(url(&server, "/api/reminders/settings"))
+            .json(&json!({ "timeZone": "Europe/Zurich", "ifUnset": true }))
+            .send()
+    };
+    let first: Value = settings(&c).await.unwrap().json().await.unwrap();
+    assert_eq!(first, json!({ "timeZone": "Europe/Zurich" }));
+    let set: Value = c
+        .patch(url(&server, "/api/reminders/settings"))
+        .json(&json!({ "timeZone": "America/New_York" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(set["timeZone"], "America/New_York");
+    let kept: Value = settings(&c).await.unwrap().json().await.unwrap();
+    assert_eq!(
+        kept["timeZone"], "America/New_York",
+        "ifUnset keeps the owner's zone"
+    );
+    let bad = c
+        .patch(url(&server, "/api/reminders/settings"))
+        .json(&json!({ "timeZone": "W. Europe Standard Time" }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 422);
+    let read: Value = c
+        .get(url(&server, "/api/reminders/settings"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(read["timeZone"], "America/New_York");
     server.shutdown().await.unwrap();
 }

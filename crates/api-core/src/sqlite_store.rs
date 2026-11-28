@@ -183,6 +183,42 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Dismisses a reminder on every device: `None` for an unknown key,
+    /// false when it was dismissed already.
+    pub async fn dismiss_reminder(&self, key: String, now: i64) -> StoreResult<Option<bool>> {
+        let Some(alarm) = self
+            .cache
+            .read(move |c| tagmail_store::alarms::alarm_by_key(c, &key))
+            .await?
+        else {
+            return Ok(None);
+        };
+        let acked = alarm.clone();
+        if !self
+            .config
+            .write(move |tx| tagmail_store::alarms::ack(tx, &acked, now))
+            .await?
+        {
+            return Ok(Some(false));
+        }
+        let payload = crate::calendar_dto::ReminderDto {
+            alarm_key: alarm.key,
+            account_id: alarm.account.0,
+            title: alarm.title,
+            start: alarm.start,
+            fire_at: alarm.fire_at,
+            devices: Vec::new(),
+        };
+        self.emit(NewChange {
+            entity: Entity::Reminder,
+            entity_id: 0,
+            op: ChangeOp::Delete,
+            payload: Some(serde_json::to_string(&payload)?),
+        })
+        .await?;
+        Ok(Some(true))
+    }
+
     /// Message blobs, shared with the engine.
     pub fn blobs(&self) -> &Arc<BlobStore> {
         &self.blobs

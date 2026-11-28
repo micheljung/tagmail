@@ -5,6 +5,7 @@
 use reqwest::Method;
 use tagmail_core::ChangeCursor;
 
+use crate::bootstrap::INCLUDE_CALENDAR;
 use crate::client::ServerClient;
 use crate::error::{Error, Result};
 use crate::import::RecordReader;
@@ -21,9 +22,15 @@ pub struct Doorbells {
 }
 
 /// Opens `/api/events` after `since`; a 410 is [`crate::ClientError::Gone`].
-pub async fn connect(client: &ServerClient, since: ChangeCursor) -> Result<Doorbells> {
+/// `calendar` rings for calendar changes too.
+pub async fn connect(
+    client: &ServerClient,
+    since: ChangeCursor,
+    calendar: bool,
+) -> Result<Doorbells> {
+    let include = if calendar { INCLUDE_CALENDAR } else { "" };
     let builder = client
-        .request(Method::GET, &format!("api/events?since={since}"))?
+        .request(Method::GET, &format!("api/events?since={since}{include}"))?
         .header(reqwest::header::ACCEPT, "text/event-stream");
     let resp = client.send(builder).await?;
     Ok(Doorbells {
@@ -130,7 +137,7 @@ mod tests {
             epoch: tagmail_core::CacheEpoch(1),
             seq: 0,
         };
-        let mut bells = connect(&client, since).await.unwrap();
+        let mut bells = connect(&client, since, false).await.unwrap();
 
         let next = tokio::time::timeout(std::time::Duration::from_secs(5), bells.next())
             .await

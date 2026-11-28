@@ -192,12 +192,20 @@ test('desktop settings save through the local routes', async ({ page }) => {
 	await expect(page.getByText('https://mail.example.com')).toBeVisible();
 	const notify = page.getByLabel('Notify me about new mail');
 	await expect(notify).toBeChecked();
+	const reminders = page.getByLabel('Calendar reminders');
+	await expect(reminders).toBeChecked();
+	const off = page.waitForResponse(
+		(r) => r.url().endsWith('/api/desktop/settings') && r.request().method() === 'PATCH'
+	);
+	await reminders.uncheck();
+	expect((await off).request().postDataJSON()).toEqual({ reminders: false });
 	const saved = page.waitForResponse(
 		(r) => r.url().endsWith('/api/desktop/settings') && r.request().method() === 'PATCH'
 	);
 	await notify.uncheck();
 	expect(((await saved).request().postDataJSON() as { notify: boolean }).notify).toBe(false);
 	await expect(page.getByLabel('Show sender and subject in notifications')).toBeDisabled();
+	await expect(reminders).toBeDisabled();
 	await page.getByRole('button', { name: 'Disconnect this device' }).click();
 	await expect(page).toHaveURL(/\/pair$/);
 });

@@ -698,8 +698,9 @@ pub fn events_behind(conn: &Connection, window_end: i64) -> Result<Vec<(i64, Acc
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Drops instances that ended before `window_start`.
+/// Drops instances that ended, and alarms that fired, before `window_start`.
 pub fn trim_instances(conn: &Connection, window_start: i64) -> Result<usize> {
+    conn.execute("DELETE FROM cal_alarm WHERE fire_at < ?1", [window_start])?;
     Ok(conn.execute(
         "DELETE FROM cal_instance WHERE end_utc < ?1",
         [window_start],

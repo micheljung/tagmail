@@ -12,7 +12,7 @@ import {
 	shellReferences,
 	staleCaches
 } from '#lib/pwa/sw.ts';
-import { fetchPushApi, renewPush } from '#lib/push/client.ts';
+import { dismissReminder, fetchPushApi, renewPush } from '#lib/push/client.ts';
 import { pushPrefs } from '#lib/push/prefs.ts';
 
 const CACHE = shellCacheName(version);
@@ -69,11 +69,26 @@ self.addEventListener('push', (event) => {
 	event.waitUntil(self.registration.showNotification(title, options));
 });
 
+const reminderOf = (notification: Notification) =>
+	(notification.data as { reminder?: unknown } | null)?.reminder;
+
+const dismiss = (notification: Notification) => {
+	const key = reminderOf(notification);
+	return typeof key === 'string' ? dismissReminder(key).catch(() => {}) : Promise.resolve();
+};
+
 self.addEventListener('notificationclick', (event) => {
 	event.notification.close();
 	const data = event.notification.data as { url?: unknown } | null;
-	event.waitUntil(openApp(self.clients, safeAppUrl(data?.url, self.location.origin)));
+	event.waitUntil(
+		Promise.all([
+			openApp(self.clients, safeAppUrl(data?.url, self.location.origin)),
+			dismiss(event.notification)
+		])
+	);
 });
+
+self.addEventListener('notificationclose', (event) => event.waitUntil(dismiss(event.notification)));
 
 interface PushSubscriptionChangeEvent extends ExtendableEvent {
 	readonly oldSubscription: PushSubscription | null;

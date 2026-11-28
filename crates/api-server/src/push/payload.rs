@@ -1,8 +1,10 @@
 //! The notification payload (contract §6): minimal, text only, and small
 //! enough that the padded ciphertext fits a few 256-byte buckets.
 
-use tagmail_api_core::Arrival;
-use tagmail_api_core::push_dto::{PUSH_PAYLOAD_VERSION, PushKindDto, PushPayloadDto};
+use tagmail_api_core::push_dto::{
+    PUSH_PAYLOAD_VERSION, PushKindDto, PushPayloadDto, PushReminderDto,
+};
+use tagmail_api_core::{Arrival, ReminderPush};
 
 pub const MAX_FROM_CHARS: usize = 64;
 pub const MAX_SUBJECT_CHARS: usize = 120;
@@ -10,6 +12,8 @@ pub const MAX_SUBJECT_CHARS: usize = 120;
 pub const MAX_JSON: usize = 1024;
 pub const INBOX_URL: &str = "/inbox";
 pub const TEST_URL: &str = "/settings/notifications";
+pub const CALENDAR_URL: &str = "/calendar";
+const UNTITLED: &str = "Reminder";
 const ELLIPSIS: char = '…';
 
 /// At most `max` chars, ending in "…" when cut; control characters become
@@ -52,6 +56,7 @@ pub fn new_mail(newest: &Arrival, count: u32, preview: bool) -> PushPayloadDto {
             .filter(|_| preview)
             .map(|s| clip(s, MAX_SUBJECT_CHARS)),
         url: thread.map_or_else(|| INBOX_URL.to_owned(), |id| format!("/thread/{id}")),
+        reminder: None,
     }
 }
 
@@ -67,6 +72,7 @@ pub fn unknown_new_mail() -> PushPayloadDto {
         from: None,
         subject: None,
         url: INBOX_URL.to_owned(),
+        reminder: None,
     }
 }
 
@@ -80,6 +86,34 @@ pub fn test() -> PushPayloadDto {
         from: None,
         subject: None,
         url: TEST_URL.to_owned(),
+        reminder: None,
+    }
+}
+
+/// Without `preview` the event's title stays off the lock screen.
+pub fn reminder(due: &ReminderPush, preview: bool) -> PushPayloadDto {
+    let title = due
+        .title
+        .as_deref()
+        .filter(|_| preview)
+        .map(|t| clip(t, MAX_SUBJECT_CHARS))
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| UNTITLED.to_owned());
+    PushPayloadDto {
+        v: PUSH_PAYLOAD_VERSION,
+        kind: PushKindDto::Reminder,
+        account_id: Some(due.account_id),
+        count: None,
+        thread_id: None,
+        from: None,
+        subject: None,
+        url: CALENDAR_URL.to_owned(),
+        reminder: Some(PushReminderDto {
+            title,
+            start: due.start,
+            tag: due.alarm_key.clone(),
+            url: CALENDAR_URL.to_owned(),
+        }),
     }
 }
 

@@ -31,7 +31,8 @@ pub struct Pulled {
     pub local_head: Option<ChangeCursor>,
     /// New unread INBOX mail from other senders; never from bulk refreshes.
     pub arrivals: Vec<Arrival>,
-    /// `op` and `outbox` changes, for the durable intents and outbox.
+    /// `op`, `outbox`, `cal_op` and `reminder` changes: for the durable
+    /// intents, the outbox and notifications.
     pub writes: Vec<ChangeDto>,
 }
 
@@ -57,7 +58,7 @@ impl Plan {
     fn new(changes: &[ChangeDto], writes: &mut Vec<ChangeDto>) -> Plan {
         let mut plan = Plan::default();
         for c in changes {
-            if matches!(c.entity, EntityDto::Unknown | EntityDto::Reminder) {
+            if c.entity == EntityDto::Unknown {
                 continue;
             }
             let Some(entity) = local_entity(c.entity) else {
@@ -443,7 +444,11 @@ mod tests {
         ];
         let plan = Plan::new(&changes, &mut writes);
 
-        assert_eq!(writes.len(), 1, "cal_op goes to the intents");
+        assert_eq!(
+            writes.len(),
+            2,
+            "cal_op goes to the intents, reminder to notifications"
+        );
         assert_eq!(plan.log.len(), 3);
         assert_eq!(plan.deletes, vec![(EntityDto::Event, 8)]);
         let requests = plan.requests(90, true);

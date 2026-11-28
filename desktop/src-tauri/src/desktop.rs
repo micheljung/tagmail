@@ -7,12 +7,12 @@ use std::sync::{Arc, Mutex, Weak};
 
 use serde_json::Value;
 use tagmail_api_core::api::{self, offline_error};
-use tagmail_api_core::auth_dto::DeviceTokenDto;
+use tagmail_api_core::auth_dto::{DevicePatchDto, DeviceTokenDto};
 use tagmail_api_core::desktop_dto::{
     DesktopPhaseDto, DesktopSettingsDto, DesktopSettingsPatchDto, DesktopStatusDto,
     UpdateRequiredDto,
 };
-use tagmail_api_core::dto::ApiErrorDto;
+use tagmail_api_core::dto::{ApiErrorDto, ChangeDto, ChangeOpDto, EntityDto};
 use tagmail_api_core::events::EventSource;
 use tagmail_api_core::sqlite_store::SqliteStore;
 use tagmail_replica::client::{REQUEST_TIMEOUT, is_secure};
@@ -26,6 +26,7 @@ use url::Url;
 
 use crate::backend::{Backend, EventStore};
 use crate::events::{Emit, RESET};
+use crate::notify::{self, ReminderAction};
 use crate::settings;
 use crate::token::{FILE_WARNING, TokenStore};
 
@@ -33,6 +34,7 @@ pub const STATUS: &str = "desktop:status";
 pub const UPDATE_REQUIRED: &str = "desktop:update-required";
 const SERVER_KEY: &str = "server_url";
 const DEVICE_NAME_KEY: &str = "device_name";
+const DEVICE_ID_KEY: &str = "device_id";
 const TOKEN_FILE: &str = "device-token";
 const EVENT_BUFFER: usize = 64;
 const MAX_DEVICE_NAME: usize = 100;
@@ -64,6 +66,12 @@ pub struct Desktop {
     rebound: Mutex<Option<String>>,
     changed: watch::Sender<u64>,
     settings_tx: watch::Sender<DesktopSettingsDto>,
+    /// This device's id on the server, once known.
+    device_id: Mutex<Option<i64>>,
+    /// The server has this run's reminders setting.
+    device_synced: AtomicBool,
+    /// One reminders PATCH at a time, so the last one sent is the newest.
+    device_sending: tokio::sync::Mutex<()>,
 }
 
 const QUARANTINED: &str = "SELECT \
@@ -152,11 +160,12 @@ impl Desktop {
         let dir = data_dir.to_owned();
         let layout = Layout::new(&dir);
         let durable_path = layout.durable();
-        let (durable, settings) = tokio::task::spawn_blocking(move || {
+        let (durable, settings, device_id) = tokio::task::spawn_blocking(move || {
             private_dir(&dir)?;
             let durable = Durable::open(&durable_path)?;
             let settings = settings::load(&durable)?;
-            Ok::<_, tagmail_replica::Error>((durable, settings))
+            let device_id = durable.meta(DEVICE_ID_KEY)?.and_then(|v| v.parse().ok());
+            Ok::<_, tagmail_replica::Error>((durable, settings, device_id))
         })
         .await
         .expect("opening the durable store does not panic")?;
@@ -174,6 +183,9 @@ impl Desktop {
             last_sync: AtomicI64::new(0),
             insecure_server: AtomicBool::new(false),
             rebound: Mutex::new(None),
+            device_id: Mutex::new(device_id),
+            device_synced: AtomicBool::new(false),
+            device_sending: tokio::sync::Mutex::new(()),
         });
         let server = desktop.stored_server()?;
         let token = desktop.tokens.load().unwrap_or_else(|e| {
@@ -210,6 +222,135 @@ impl Desktop {
             .await
             .map_err(|e| tracing::warn!(error = %e, "counting unread mail failed"))
             .ok()
+    }
+
+    /// What the `reminder` changes among `writes` do on this device:
+    /// nothing shows while notifications or reminders are off here.
+    pub async fn reminders(&self, writes: &[ChangeDto]) -> Vec<ReminderAction> {
+        let of_reminders = || writes.iter().filter(|c| c.entity == EntityDto::Reminder);
+        if of_reminders().next().is_none() {
+            return Vec::new();
+        }
+        let settings = self.settings();
+        let due = of_reminders().any(|c| c.op == ChangeOpDto::Upsert);
+        let device = if due && settings.notify && settings.reminders {
+            self.device_id().await
+        } else {
+            None
+        };
+        notify::reminders(
+            writes,
+            device,
+            tagmail_replica::sync::now(),
+            settings.notify_content,
+        )
+    }
+
+    /// This device's id on the server: stored at pairing, else asked once.
+    async fn device_id(&self) -> Option<i64> {
+        if let Some(id) = *self.lock_device_id() {
+            return Some(id);
+        }
+        let replica = self.replica()?;
+        let id = match replica.client().get_json::<Value>("api/auth/session").await {
+            Ok(auth) => auth["deviceId"].as_i64(),
+            Err(e) => {
+                tracing::warn!(error = %e, "asking the server for this device's id failed");
+                None
+            }
+        }?;
+        self.remember_device(id);
+        Some(id)
+    }
+
+    fn lock_device_id(&self) -> std::sync::MutexGuard<'_, Option<i64>> {
+        self.device_id.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn remember_device(&self, id: i64) {
+        *self.lock_device_id() = Some(id);
+        if let Err(e) = self.durable.set_meta(DEVICE_ID_KEY, &id.to_string()) {
+            tracing::warn!(error = %e, "saving the device id failed");
+        }
+    }
+
+    /// Sends this device's reminders setting to the server, once per run
+    /// unless it changes; a failure is tried again on the next connect.
+    fn sync_device(&self, force: bool) {
+        if !force && self.device_synced.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.device_synced.store(true, Ordering::Release);
+        let me = self.arc();
+        tokio::spawn(async move {
+            let _sending = me.device_sending.lock().await;
+            let Some(replica) = me.replica() else { return };
+            let Some(id) = me.device_id().await else {
+                me.device_synced.store(false, Ordering::Release);
+                return;
+            };
+            loop {
+                let reminders = me.settings().reminders;
+                let sent = match replica
+                    .client()
+                    .request(reqwest::Method::PATCH, &format!("api/devices/{id}"))
+                {
+                    Ok(builder) => {
+                        let builder = builder.timeout(REQUEST_TIMEOUT).json(&DevicePatchDto {
+                            reminders: Some(reminders),
+                        });
+                        replica.client().send(builder).await.map(drop)
+                    }
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = sent {
+                    tracing::warn!(error = %e, "sending the reminders setting failed");
+                    me.device_synced.store(false, Ordering::Release);
+                    return;
+                }
+                if me.settings().reminders == reminders {
+                    return;
+                }
+            }
+        });
+    }
+
+    /// Forwards a request the server answers, e.g. reminder settings.
+    async fn forward_to_server(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        body: &[u8],
+    ) -> api::Response {
+        let Some(replica) = self.replica() else {
+            return unpaired();
+        };
+        let client = replica.client();
+        let builder = match client.request(method, path.trim_start_matches('/')) {
+            Ok(builder) => builder.timeout(REQUEST_TIMEOUT),
+            Err(e) => return internal(e),
+        };
+        let builder = if body.is_empty() {
+            builder
+        } else {
+            builder
+                .header(reqwest::header::CONTENT_TYPE, "application/json")
+                .body(body.to_vec())
+        };
+        match client.exchange(builder).await {
+            Ok((status, content_type, body)) => api::Response {
+                status,
+                headers: vec![
+                    (
+                        "content-type",
+                        content_type.unwrap_or_else(|| "application/json".to_owned()),
+                    ),
+                    ("cache-control", "no-store".to_owned()),
+                ],
+                body,
+            },
+            Err(_) => offline_error("the server is not reachable"),
+        }
     }
 
     fn bump(&self) {
@@ -286,6 +427,7 @@ impl Desktop {
             stop.subscribe(),
         ));
         let router = Router::new(Arc::clone(&replica));
+        self.device_synced.store(false, Ordering::Release);
         let old = self.lock_running().replace(Running {
             replica,
             router,
@@ -376,7 +518,10 @@ async fn watch_replica(
                     Phase::UpdateRequired { server, min_client } => desktop
                         .emit
                         .emit(UPDATE_REQUIRED, json(&UpdateRequiredDto { server, min_client })),
-                    Phase::Live => desktop.synced(),
+                    Phase::Live => {
+                        desktop.synced();
+                        desktop.sync_device(false);
+                    }
                     _ => {}
                 }
                 desktop.publish_status();
@@ -431,6 +576,10 @@ fn phase_dto(phase: &Phase, bootstrapped: bool) -> DesktopPhaseDto {
 
 impl Backend for Desktop {
     type Store = SqliteStore;
+
+    async fn forward(&self, method: reqwest::Method, path: &str, body: &[u8]) -> api::Response {
+        self.forward_to_server(method, path, body).await
+    }
 
     async fn handle_api(&self, req: api::Request<'_>, content_type: Option<&str>) -> api::Response {
         let router = self.lock_running().as_ref().map(|r| r.router.clone());
@@ -514,6 +663,7 @@ impl Backend for Desktop {
         self.durable
             .set_meta(DEVICE_NAME_KEY, &device_name())
             .map_err(internal)?;
+        self.remember_device(token.device_id);
         let me = self.arc();
         me.start(&url, token.token).await.map_err(internal)?;
         self.publish_status();
@@ -530,6 +680,10 @@ impl Backend for Desktop {
         }
         self.insecure_server.store(false, Ordering::Relaxed);
         *self.lock_rebound() = None;
+        *self.lock_device_id() = None;
+        if let Err(e) = self.durable.set_meta(DEVICE_ID_KEY, "") {
+            tracing::warn!(error = %e, "forgetting the device id failed");
+        }
         if let Err(e) = self.layout.discard() {
             tracing::warn!(error = %e, "removing the replica failed");
         }
@@ -550,8 +704,13 @@ impl Backend for Desktop {
         if let Some(replica) = self.replica() {
             replica.set_settings(settings::replica_settings(&next));
         }
+        let reminders_changed = current.reminders != next.reminders;
         *current = next.clone();
+        drop(current);
         self.settings_tx.send_replace(next.clone());
+        if reminders_changed {
+            self.sync_device(true);
+        }
         Ok(next)
     }
 }

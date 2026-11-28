@@ -56,6 +56,10 @@ pub trait CalendarService: Send + Sync + 'static {
     /// The calendar op `op_id` names if it was submitted before; a conflict
     /// when a mail op or a discarded op used it.
     fn existing(&self, op_id: String) -> BoxFuture<WriteResult<Option<crate::ops_dto::OpDto>>>;
+
+    /// Called after the owner's time zone changed: recomputes the alarms
+    /// of floating and all-day events.
+    fn owner_zone_changed(&self) -> BoxFuture<()>;
 }
 
 /// A validated `POST /api/calendar/{rsvp,import,apply}`.

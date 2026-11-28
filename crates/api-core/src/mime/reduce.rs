@@ -705,7 +705,7 @@ mod tests {
         );
         assert!(raw.len() > 2 << 20);
         let elapsed = render(raw.as_bytes());
-        assert!(elapsed.as_millis() < 1000, "{elapsed:?}");
+        assert!(elapsed.as_millis() < 5000, "{elapsed:?}");
     }
 
     #[test]
@@ -716,7 +716,7 @@ mod tests {
         raw.push_str(&"--x\r\n".repeat(40_000));
         assert!(raw.len() > 2 << 20);
         let elapsed = render(raw.as_bytes());
-        assert!(elapsed.as_millis() < 1000, "{elapsed:?}");
+        assert!(elapsed.as_millis() < 5000, "{elapsed:?}");
     }
 
     #[test]

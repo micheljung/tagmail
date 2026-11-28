@@ -1,5 +1,8 @@
+import type { ReminderDto } from '@tagmail/api-types';
 import type { ListNames } from '../listMeta';
 import { OpsStore } from '../ops/ops.svelte';
+import { closeReminders } from '../push/client';
+import { appRegistration } from '../pwa/register';
 import { api } from '../transport';
 import { errorText } from '../ui/errors';
 import { accountParam, viewScope } from '../views';
@@ -46,6 +49,11 @@ export const ops: OpsStore = new OpsStore({
 hub.subscribe({
 	changes(page) {
 		ops.changes(page);
+		const dismissed = page.changes
+			.filter((c) => c.entity === 'reminder' && c.op.kind === 'delete')
+			.map((c) => (c.payload as ReminderDto | null)?.alarmKey)
+			.filter((key) => key !== undefined);
+		if (dismissed.length > 0) void closeReminders(dismissed, appRegistration);
 		const navChanged = page.changes.some(
 			(c) =>
 				c.entity === 'label' ||

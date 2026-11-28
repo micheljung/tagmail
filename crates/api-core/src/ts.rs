@@ -68,6 +68,7 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<ChangesDto>(&cfg, &mut files)?;
     file::<CurrentAuthDto>(&cfg, &mut files)?;
     file::<DeviceDto>(&cfg, &mut files)?;
+    file::<DevicePatchDto>(&cfg, &mut files)?;
     file::<DeviceTokenDto>(&cfg, &mut files)?;
     file::<DevicesDto>(&cfg, &mut files)?;
     file::<EntityDto>(&cfg, &mut files)?;
@@ -166,6 +167,9 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<InvitationOrganizerDto>(&cfg, &mut files)?;
     file::<PartstatDto>(&cfg, &mut files)?;
     file::<RecurrenceDto>(&cfg, &mut files)?;
+    file::<ReminderDto>(&cfg, &mut files)?;
+    file::<ReminderSettingsDto>(&cfg, &mut files)?;
+    file::<ReminderSettingsPatchDto>(&cfg, &mut files)?;
     file::<SchedulingDto>(&cfg, &mut files)?;
     file::<SchedulingOverrideDto>(&cfg, &mut files)?;
     file::<SenderAuthDto>(&cfg, &mut files)?;
@@ -176,6 +180,7 @@ pub fn bindings() -> Result<BTreeMap<String, String>, ExportError> {
     file::<PushKeysDto>(&cfg, &mut files)?;
     file::<PushKindDto>(&cfg, &mut files)?;
     file::<PushPayloadDto>(&cfg, &mut files)?;
+    file::<PushReminderDto>(&cfg, &mut files)?;
     file::<PushSubscribeDto>(&cfg, &mut files)?;
     file::<PushSubscriptionDto>(&cfg, &mut files)?;
     file::<PushSubscriptionPatchDto>(&cfg, &mut files)?;

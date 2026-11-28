@@ -478,3 +478,53 @@ pub struct CalApplyDto {
     #[ts(optional)]
     pub allow_organizer_change: Option<bool>,
 }
+
+/// `GET /api/reminders/settings`: the owner's IANA time zone, which
+/// floating and all-day events start in for reminders; `null` until a
+/// client set it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ReminderSettingsDto {
+    pub time_zone: Option<String>,
+}
+
+/// `PATCH /api/reminders/settings` body. `ifUnset` keeps a zone the owner
+/// already has: what clients send on their own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReminderSettingsPatchDto {
+    pub time_zone: String,
+    #[serde(default)]
+    #[ts(optional)]
+    pub if_unset: Option<bool>,
+}
+
+/// Whether `name` is an IANA time zone such as `Europe/Zurich`.
+pub fn is_time_zone(name: &str) -> bool {
+    #[cfg(feature = "calendar")]
+    return tagmail_calendar::is_time_zone(name);
+    #[cfg(not(feature = "calendar"))]
+    return !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/_+-".contains(&b));
+}
+
+/// A reminder reached later than this after it fired is not shown.
+pub const REMINDER_GRACE_SECS: i64 = 15 * 60;
+
+/// The payload of a `reminder` change. `upsert`: due, shown by the paired
+/// `devices`; `delete`: dismissed, closed everywhere.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct ReminderDto {
+    pub alarm_key: String,
+    pub account_id: i64,
+    pub title: Option<String>,
+    /// Unix seconds of the instance's start.
+    pub start: i64,
+    pub fire_at: i64,
+    #[serde(default)]
+    pub devices: Vec<i64>,
+}

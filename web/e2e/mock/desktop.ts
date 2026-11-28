@@ -23,6 +23,7 @@ const initial = (): DesktopState => ({
 		rawCapMb: 2048,
 		notify: true,
 		notifyContent: true,
+		reminders: true,
 		autostart: false,
 		closeToTray: true
 	}

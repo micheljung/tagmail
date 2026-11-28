@@ -49,6 +49,9 @@ struct State {
     calls: Mutex<Vec<&'static str>>,
     failing: Mutex<HashSet<String>>,
     blocked: AtomicBool,
+    /// `list_calendars` waits for [`FakeDav::release`].
+    held: AtomicBool,
+    released: tokio::sync::Notify,
     etags: AtomicU64,
     scripted: Mutex<VecDeque<(&'static str, DavError)>>,
     rewrites: Mutex<VecDeque<(String, String)>>,
@@ -86,6 +89,16 @@ impl FakeDav {
     /// Every later request hangs, like an unresponsive server.
     pub(crate) fn block(&self) {
         self.0.blocked.store(true, Ordering::SeqCst);
+    }
+
+    /// Holds the next listings until [`FakeDav::release`].
+    pub(crate) fn hold(&self) {
+        self.0.held.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn release(&self) {
+        self.0.held.store(false, Ordering::SeqCst);
+        self.0.released.notify_waiters();
     }
 
     pub(crate) fn calendars(&self) -> Vec<CalendarInfo> {
@@ -215,6 +228,12 @@ impl CalDav for FakeDav {
         self.called("list_calendars");
         if self.0.blocked.load(Ordering::SeqCst) {
             return Box::pin(std::future::pending());
+        }
+        if self.0.held.load(Ordering::SeqCst) {
+            return Box::pin(async move {
+                self.0.released.notified().await;
+                Ok(self.calendars())
+            });
         }
         let calendars = self.calendars();
         Box::pin(async move { Ok(calendars) })

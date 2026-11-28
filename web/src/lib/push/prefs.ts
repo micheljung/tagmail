@@ -8,6 +8,33 @@ export interface PushPrefs {
 	preview: boolean;
 	/** `null` = all accounts. */
 	accountIds: number[] | null;
+	/** Calendar reminders; absent in settings saved before they existed. */
+	reminders?: boolean;
+}
+
+const MOBILE = /Android|iPhone|iPad|iPod|Mobile/;
+
+/**
+ * Reminders start on, except in an installed app on a phone or tablet,
+ * whose own calendar app already reminds. iPadOS names itself a Mac; its
+ * touch screen gives it away.
+ */
+export function remindersByDefault(
+	userAgent: string,
+	standalone: boolean,
+	maxTouchPoints = 0
+): boolean {
+	const mobile = MOBILE.test(userAgent) || (/Macintosh/.test(userAgent) && maxTouchPoints > 1);
+	return !(mobile && standalone);
+}
+
+export function defaultReminders(): boolean {
+	const { matchMedia } = globalThis as { matchMedia?: (query: string) => { matches: boolean } };
+	return remindersByDefault(
+		navigator.userAgent,
+		matchMedia?.('(display-mode: standalone)').matches ?? false,
+		(navigator as { maxTouchPoints?: number }).maxTouchPoints
+	);
 }
 
 /**

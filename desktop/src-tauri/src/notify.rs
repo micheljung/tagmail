@@ -1,7 +1,9 @@
 //! What to show for mail the replica pulled: one notification per message,
-//! or one summary when many arrive together.
+//! or one summary when many arrive together; and the calendar reminders
+//! the server sent to this device.
 
-use tagmail_api_core::dto::AddressDto;
+use tagmail_api_core::calendar_dto::{REMINDER_GRACE_SECS, ReminderDto};
+use tagmail_api_core::dto::{AddressDto, ChangeDto, ChangeOpDto, EntityDto};
 use tagmail_replica::import::Arrival;
 
 /// From this many messages in one pull on, a single summary is shown.
@@ -73,6 +75,71 @@ pub fn plan(arrivals: &[Arrival], content: bool) -> Vec<Notification> {
             Notification {
                 title: sender(a).unwrap_or_else(|| "New mail".to_owned()),
                 body: subject.unwrap_or("(no subject)").to_owned(),
+            }
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReminderAction {
+    Show {
+        id: i32,
+        notification: Notification,
+    },
+    /// Dismissed somewhere: close the notification shown as `id`.
+    Close {
+        id: i32,
+    },
+}
+
+const ID_DIGITS: usize = 7;
+const UNTITLED: &str = "Reminder";
+
+/// The OS notification id of a reminder, from its alarm key.
+pub fn reminder_id(alarm_key: &str) -> Option<i32> {
+    i32::from_str_radix(alarm_key.get(..ID_DIGITS)?, 16).ok()
+}
+
+fn starts(start: i64, now: i64) -> String {
+    match (start - now + 59) / 60 {
+        ..=0 => "Now".to_owned(),
+        1 => "In 1 minute".to_owned(),
+        minutes => format!("In {minutes} minutes"),
+    }
+}
+
+/// What the `reminder` changes among `changes` do on `device` at `now`: a
+/// due one is shown unless it fired more than the grace ago (pulled after
+/// a sleep), a dismissed one is closed. `None` shows none. Without
+/// `content` the event's title stays hidden.
+pub fn reminders(
+    changes: &[ChangeDto],
+    device: Option<i64>,
+    now: i64,
+    content: bool,
+) -> Vec<ReminderAction> {
+    changes
+        .iter()
+        .filter(|c| c.entity == EntityDto::Reminder)
+        .filter_map(|c| {
+            let r: ReminderDto = serde_json::from_value(c.payload.clone()?).ok()?;
+            let id = reminder_id(&r.alarm_key)?;
+            match c.op {
+                ChangeOpDto::Delete => Some(ReminderAction::Close { id }),
+                ChangeOpDto::Upsert
+                    if device.is_some_and(|d| r.devices.contains(&d))
+                        && r.fire_at >= now - REMINDER_GRACE_SECS =>
+                {
+                    let title = r.title.filter(|t| content && !t.trim().is_empty());
+                    Some(ReminderAction::Show {
+                        id,
+                        notification: Notification {
+                            title: title.unwrap_or_else(|| UNTITLED.to_owned()),
+                            body: starts(r.start, now),
+                        },
+                    })
+                }
+                _ => None,
             }
         })
         .collect()
